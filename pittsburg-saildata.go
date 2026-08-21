@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +33,7 @@ type SailingReport struct {
 	Station     string            `json:"station"`
 	ReportTime  time.Time         `json:"report_time"`
 	Latest      *WindObservation  `json:"latest,omitempty"`
+	Latest10    []WindObservation `json:"latest_10,omitempty"`
 	Last12Hours *WindStats        `json:"last_12_hours,omitempty"`
 	Afternoon   []PeriodReport    `json:"afternoon,omitempty"`
 	Historical  *HistoricalReport `json:"historical,omitempty"`
@@ -344,10 +346,11 @@ func runServer(
 		},
 	)
 
-    port = os.Getenv("PORT")
-    if port == "" {
-        port = "8080"
-    }
+	envPort := os.Getenv("PORT")
+	if envPort != "" {
+		port = envPort
+	}
+
 	addr := ":" + port
 
 	fmt.Println("Pittsburg Delta sailing API")
@@ -549,6 +552,11 @@ func buildCurrentReport(
 
 	latest := findLatest(observations)
 
+	latest10 := findLatestN(
+		observations,
+		10,
+	)
+
 	start12 := now.Add(
 		-12 * time.Hour,
 	)
@@ -564,10 +572,15 @@ func buildCurrentReport(
 	)
 
 	report := &SailingReport{
-		Station:    station,
+		Station: station,
 		ReportTime: now,
 		Latest: makeWindObservation(
 			latest,
+			now,
+			loc,
+		),
+		Latest10: makeWindObservationList(
+			latest10,
 			now,
 			loc,
 		),
@@ -947,6 +960,38 @@ func writeCurrentText(
 
 	fmt.Fprintln(
 		w,
+		"LATEST 10 OBSERVATIONS",
+	)
+
+	fmt.Fprintln(
+		w,
+		"--------------------------------",
+	)
+
+	fmt.Fprintf(
+		w,
+		"%-9s %-3s %6s  %s\n",
+		"Time",
+		"Dir",
+		"Wind",
+		"Gust",
+	)
+
+	for _, o := range report.Latest10 {
+		fmt.Fprintf(
+			w,
+			"%-9s %-3s %5.1f kt  %5.1f kt\n",
+			o.Time.In(loc).Format("3:04 PM"),
+			o.Direction,
+			o.WindKT,
+			o.GustKT,
+		)
+	}
+
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(
+		w,
 		"LAST 12 HOURS",
 	)
 
@@ -1269,6 +1314,60 @@ func makeWindObservation(
 	}
 
 	return result
+}
+
+func makeWindObservationList(
+	observations []Observation,
+	reference time.Time,
+	loc *time.Location,
+) []WindObservation {
+	result := make(
+		[]WindObservation,
+		0,
+		len(observations),
+	)
+
+	for _, o := range observations {
+		result = append(
+			result,
+			*makeWindObservation(
+				o,
+				reference,
+				loc,
+			),
+		)
+	}
+
+	return result
+}
+
+func findLatestN(
+	observations []Observation,
+	n int,
+) []Observation {
+	if n <= 0 || len(observations) == 0 {
+		return nil
+	}
+
+	sorted := append(
+		[]Observation(nil),
+		observations...,
+	)
+
+	sort.Slice(
+		sorted,
+		func(i, j int) bool {
+			return sorted[i].Time.After(
+				sorted[j].Time,
+			)
+		},
+	)
+
+	if n > len(sorted) {
+		n = len(sorted)
+	}
+
+	return sorted[:n]
 }
 
 func findLatest(
