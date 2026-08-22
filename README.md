@@ -837,7 +837,23 @@ Possible endpoint:
 This would show how wind changes from Pittsburg through Carquinez
 Strait, San Pablo Bay and Richmond.
 
-## 6. Better station metadata
+## 6. Evaluate NDBC station discovery sources
+
+The application currently uses `activestations.xml` for dynamic
+wind-station metadata. NDBC also publishes:
+
+``` text
+https://www.ndbc.noaa.gov/data/stations/station_table.txt
+```
+
+A useful next step is to compare these sources and determine whether
+`station_table.txt` provides better station names, positions,
+ownership/network information or station-type information.
+
+Any change should preserve the current design goal: **do not hard-code a
+list of supported wind stations.**
+
+## 7. Better station metadata
 
 Include or expose:
 
@@ -850,7 +866,7 @@ Include or expose:
 This is especially important when comparing wind speeds from different
 stations.
 
-## 7. Smarter current-station selection
+## 8. Smarter current-station selection
 
 Geographic proximity is a useful first approximation, but the nearest
 station is not necessarily the best station hydrodynamically.
@@ -867,7 +883,7 @@ Future selection could consider:
 The automatically selected current station should remain visible so the
 user can judge whether it is appropriate.
 
-## 8. Add a real wind forecast source
+## 9. Add a real wind forecast source
 
 The current wind portion is observational: it reports what the NDBC
 station measured and summarizes recent observations.
@@ -885,7 +901,7 @@ This would allow the service to make statements such as "wind is
 expected to build this afternoon" based on an actual forecast rather
 than inference from current observations.
 
-## 9. Caching and concurrent retrieval
+## 10. Caching and concurrent retrieval
 
 The combined report makes several NOAA requests.
 
