@@ -226,7 +226,21 @@ func writeTextReport(
 		return
 	}
 
-	fmt.Fprintln(w, "DELTA SAILING OUTLOOK")
+	headingName := report.Station
+
+	if stationMeta, err := fetchNDBCStation(report.Station); err == nil {
+		name := strings.TrimSpace(stationMeta.Name)
+		if name != "" {
+			headingName = name
+		}
+	}
+
+	fmt.Fprintf(
+		w,
+		"SAILING OUTLOOK — %s (%s)\n",
+		headingName,
+		report.Station,
+	)
 	fmt.Fprintln(w, "================================")
 	fmt.Fprintf(
 		w,
@@ -234,6 +248,11 @@ func writeTextReport(
 		report.ReportTime.In(loc).Format("Mon Jan 2, 2006 3:04:05 PM MST"),
 	)
 
+	fmt.Fprintln(w, "BOTTOM LINE")
+	fmt.Fprintln(w, "--------------------------------")
+	writeBottomLineText(w, report)
+
+	fmt.Fprintln(w)
 	fmt.Fprintln(w, "WIND")
 	fmt.Fprintln(w, "--------------------------------")
 	writeWindSummaryText(w, report, loc)
@@ -247,6 +266,122 @@ func writeTextReport(
 	fmt.Fprintln(w, "WIND DETAILS")
 	fmt.Fprintln(w, "--------------------------------")
 	writeWindDetailsText(w, report, loc)
+}
+
+func writeBottomLineText(
+	w io.Writer,
+	report *SailingReport,
+) {
+	if report == nil || report.Latest == nil {
+		fmt.Fprintln(w, "Insufficient data for a combined sailing summary.")
+		return
+	}
+
+	latest := report.Latest
+
+	if latest.GustKT > 0 {
+		fmt.Fprintf(
+			w,
+			"Latest wind at %s: %s %.0f kt, gusting %.0f kt.\n",
+			latest.Time.Format("3:04 PM"),
+			latest.Direction,
+			latest.WindKT,
+			latest.GustKT,
+		)
+	} else {
+		fmt.Fprintf(
+			w,
+			"Latest wind at %s: %s %.0f kt.\n",
+			latest.Time.Format("3:04 PM"),
+			latest.Direction,
+			latest.WindKT,
+		)
+	}
+
+	if report.Current == nil || report.Current.Error != "" {
+		fmt.Fprintln(w, "Current prediction is unavailable.")
+		return
+	}
+
+	// Determine the predicted current phase at the beginning of the
+	// configured sailing window from the event sequence.
+	startPhase := ""
+	for _, line := range report.Current.Outlook {
+		switch {
+		case strings.Contains(line, "starts on a flood"):
+			startPhase = "flooding"
+		case strings.Contains(line, "starts on an ebb"):
+			startPhase = "ebbing"
+		case strings.Contains(line, "begins close to slack"):
+			startPhase = "near slack"
+		}
+		if startPhase != "" {
+			break
+		}
+	}
+
+	if startPhase != "" {
+		fmt.Fprintf(
+			w,
+			"At %s, current is predicted to be %s.\n",
+			report.Current.Start.Format("3:04 PM"),
+			startPhase,
+		)
+	}
+
+	// Find the first slack within the sailing window and the following phase.
+	for i, event := range report.Current.Events {
+		if event.Type != "slack" ||
+			event.Time.Before(report.Current.Start) ||
+			event.Time.After(report.Current.End) {
+			continue
+		}
+
+		var next *CurrentEvent
+		for j := i + 1; j < len(report.Current.Events); j++ {
+			if report.Current.Events[j].Type == "flood" ||
+				report.Current.Events[j].Type == "ebb" {
+				copy := report.Current.Events[j]
+				next = &copy
+				break
+			}
+		}
+
+		if next != nil {
+			fmt.Fprintf(
+				w,
+				"Slack is around %s, then the current turns to a %s %s.\n",
+				event.Time.Format("3:04 PM"),
+				currentStrength(next.SpeedKT),
+				next.Type,
+			)
+		} else {
+			fmt.Fprintf(
+				w,
+				"Slack is around %s.\n",
+				event.Time.Format("3:04 PM"),
+			)
+		}
+		break
+	}
+
+	// End with a compact strength assessment.
+	if len(report.Current.Outlook) > 0 {
+		assessment := report.Current.Outlook[len(report.Current.Outlook)-1]
+
+		switch {
+		case strings.Contains(assessment, "relatively mild"):
+			fmt.Fprintln(w, "Overall, current should be relatively mild during the sailing window.")
+		case strings.Contains(assessment, "very light"):
+			fmt.Fprintln(w, "Overall, current should be very light during the sailing window.")
+		case strings.Contains(assessment, "moderate"):
+			fmt.Fprintln(w, "Overall, expect moderate current during the sailing window.")
+		case strings.Contains(assessment, "fairly strong"):
+			fmt.Fprintln(w, "Overall, expect fairly strong current during part of the sailing window.")
+		case strings.Contains(assessment, "strong"):
+			fmt.Fprintln(w, "Overall, expect strong current during part of the sailing window.")
+		}
+	}
 }
 
 func printUsage() {
