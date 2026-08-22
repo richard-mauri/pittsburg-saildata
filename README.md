@@ -19,8 +19,8 @@ Rather than presenting only raw NOAA numbers, the service generates a
 concise sailing-oriented interpretation while keeping observed wind and
 predicted current clearly distinguished.
 
-The report now puts the decision-oriented **BOTTOM LINE** near the top
-and identifies the selected wind station by human-readable location when
+The report puts the decision-oriented **BOTTOM LINE** near the top and
+identifies the selected wind station by human-readable location when
 NDBC metadata are available.
 
 Example:
@@ -40,7 +40,6 @@ Overall, current should be relatively mild during the sailing window.
 WIND
 --------------------------------
 Currently WNW 11.0 kt, gusting 15.0 kt.
-Recent observations summarize the short-term wind behavior.
 
 CURRENT
 --------------------------------
@@ -50,7 +49,6 @@ approximately 11 nmi from PSBC1.
 The sailing window starts on a flood current.
 Slack is around 2:13 PM, followed by an ebb.
 The ebb peaks around 3:55 PM at about 0.4 kt.
-The current then weakens toward another slack.
 ```
 
 ## Features
@@ -196,6 +194,31 @@ Station location and metadata are obtained dynamically from:
 ``` text
 https://www.ndbc.noaa.gov/activestations.xml
 ```
+
+### Finding NDBC wind station IDs
+
+NDBC maintains an official station-selection page:
+
+``` text
+https://www.ndbc.noaa.gov/to_station.shtml
+```
+
+This is a useful place to browse available station IDs, including NDBC,
+NOAA NOS PORTS, and other observing networks.
+
+NDBC also publishes station information and position data under:
+
+``` text
+https://www.ndbc.noaa.gov/data/stations/
+```
+
+That directory includes machine-readable station resources such as
+`station_table.txt`.
+
+The Bay and Delta station IDs listed later in this README are a
+convenient sailing-oriented shortlist, not a hard-coded list required by
+the application. The Go service discovers active wind-station metadata
+dynamically.
 
 This allows commands such as:
 
@@ -384,33 +407,25 @@ compact JSON.
 ### Full text
 
 ``` bash
-curl -sS \
-  "http://localhost:8080/report?station=PSBC1"
+curl -sS "http://localhost:8080/report?station=PSBC1"
 ```
 
 ### Compact text
 
-Compact mode keeps the high-value sections --- **BOTTOM LINE**, **WIND**
-and **CURRENT** --- and omits the long observation/statistics detail.
+Compact mode keeps **BOTTOM LINE**, **WIND** and **CURRENT** while
+omitting the longer observation/statistics detail:
 
 ``` bash
-curl -sS \
-  "http://localhost:8080/report?station=PSBC1&compact=1"
+curl -sS "http://localhost:8080/report?station=PSBC1&compact=1"
 ```
-
-This is useful on an iPhone and for clients that want concise text
-suitable for speech.
 
 ### Full JSON
 
-JSON can be requested explicitly:
-
 ``` bash
-curl -sS \
-  "http://localhost:8080/report?station=PSBC1&format=json"
+curl -sS "http://localhost:8080/report?station=PSBC1&format=json"
 ```
 
-The existing HTTP `Accept` header is also supported:
+The existing HTTP `Accept` header remains supported:
 
 ``` bash
 curl -sS \
@@ -427,37 +442,8 @@ curl -sS \
   "http://localhost:8080/report?station=PSBC1&format=json&compact=1"
 ```
 
-Compact JSON includes concise, structured fields such as:
-
-``` json
-{
-  "station": "PSBC1",
-  "location": "Pittsburg (Suisun Bay), CA",
-  "bottom_line": [
-    "Latest wind at 10:00 AM: WNW 11 kt, gusting 15 kt.",
-    "At 12:00 PM, current is predicted to be flooding.",
-    "Slack is around 2:13 PM, then the current turns to a weak ebb."
-  ],
-  "wind": {
-    "time": "2026-08-22T10:00:00-07:00",
-    "direction": "WNW",
-    "wind_kt": 11,
-    "gust_kt": 15
-  },
-  "current": {
-    "phase_at_start": "flood",
-    "slack_time": "2026-08-22T14:13:00-07:00",
-    "next_phase": "ebb",
-    "next_speed_kt": 0.4,
-    "strength": "weak"
-  }
-}
-```
-
-The structured form deliberately separates the latest **observed wind**
-from the **predicted current**. Assistant clients can either read the
-supplied `bottom_line` or generate their own natural-language response
-from the structured fields.
+Compact JSON keeps observed wind and predicted current explicitly
+separate and includes the human-readable `bottom_line`.
 
 ------------------------------------------------------------------------
 
@@ -499,7 +485,7 @@ curl -sS \
   "https://pittsburg-saildata.onrender.com/report?station=RCMC1"
 ```
 
-Full JSON:
+JSON:
 
 ``` bash
 curl -sS \
@@ -513,7 +499,7 @@ curl -sS \
   "https://pittsburg-saildata.onrender.com/report?station=PSBC1&compact=1"
 ```
 
-Compact JSON:
+Compact JSON for assistants:
 
 ``` bash
 curl -sS \
@@ -597,6 +583,15 @@ Render automatic deployment
 
 These NDBC stations are useful candidates for building a Delta-to-Bay
 wind picture.
+
+For the authoritative and current NDBC station list, use:
+
+``` text
+https://www.ndbc.noaa.gov/to_station.shtml
+```
+
+The table below is a convenient sailing-oriented shortlist rather than a
+complete or authoritative station catalog.
 
   -----------------------------------------------------------------------
   ID                      Area / description      Sailing use
@@ -727,106 +722,46 @@ Working functionality now includes:
 
 # Possible next steps
 
-## 1. Assistant and voice integrations
+## 1. Alexa and other voice assistants
 
-The compact JSON endpoint is intended to become the common interface for
-voice assistants and AI clients:
+Use compact JSON as the common assistant interface:
 
 ``` text
 /report?station=PSBC1&format=json&compact=1
 ```
 
-Potential clients include:
+Alexa can use a thin custom-skill/Lambda adapter. Siri, ChatGPT, Grok
+and other clients should likewise keep assistant-specific code thin and
+leave sailing logic in this Go service.
 
--   Alexa custom skills
--   ChatGPT GPT Actions
--   Siri Shortcuts or another Siri-facing adapter
--   Grok or other assistants that can call external HTTPS APIs
--   custom mobile applications
+## 2. ChatGPT GPT Action
 
-The Go service should remain the source of sailing facts.
-Assistant-specific code should be a thin adapter that calls the API and
-speaks or reformats the result.
+Define `/report` with an OpenAPI schema so a custom GPT can reliably
+call the service instead of depending on conversation history.
 
-For voice output, compass abbreviations can be expanded by the client:
-
-``` text
-WNW -> west-northwest
-kt  -> knots
-```
-
-A key rule for assistant prompts should be: **do not turn the latest
-observed wind into an afternoon wind forecast unless a real forecast
-data source is added.**
-
-## 2. Alexa integration
-
-Alexa will need structured JSON and a small skill/backend adapter.
-
-The intended flow is:
-
-``` text
-Alexa
-  |
-  v
-custom skill / Lambda
-  |
-  v
-GET /report?station=PSBC1&format=json&compact=1
-  |
-  v
-Alexa speech response
-```
-
-The Alexa layer should contain little or no sailing logic.
-
-## 3. ChatGPT GPT Action
-
-A custom GPT Action can expose the `/report` endpoint through an OpenAPI
-schema.
-
-Example user requests could be:
+Example requests:
 
 ``` text
 Read my Pittsburg sailing report.
 Read my Richmond sailing report.
 ```
 
-The GPT instructions can map familiar place names to NDBC station IDs,
-call the action every time current conditions are requested, and read
-the compact result naturally.
+Assistant instructions should require a live API call for current
+conditions and should not turn observed wind into a future forecast.
 
-This avoids depending on a particular chat's conversation history to
-remember the Render service URL.
+## 3. Place-name aliases
 
-## 4. Place-name and station mapping
-
-For human-facing assistants, it would be convenient to support familiar
-sailing-area names rather than requiring station IDs.
-
-Examples:
+Allow human-friendly names to map to station IDs, for example:
 
 ``` text
 Pittsburg -> PSBC1
 Richmond  -> RCMC1
 ```
 
-This mapping could initially live in the assistant configuration. A
-later API enhancement could expose station search or aliases directly
-from the Go service.
+Initially this can live in assistant configuration; later the API could
+expose station lookup or aliases.
 
-## 5. Multi-station wind corridor
-
-Retrieve several stations concurrently:
-
-``` text
-PSBC1
-PCOC1
-MZXC1
-DPXC1
-RCMC1
-PPXC1
-```
+## 4. Multi-station wind corridor
 
 Possible endpoint:
 
@@ -834,26 +769,31 @@ Possible endpoint:
 /route?stations=PSBC1,PCOC1,MZXC1,DPXC1,RCMC1,PPXC1
 ```
 
-This would show how wind changes from Pittsburg through Carquinez
+This could show how wind changes from Pittsburg through Carquinez
 Strait, San Pablo Bay and Richmond.
 
-## 6. Evaluate NDBC station discovery sources
+## 5. Evaluate NDBC station discovery sources
 
-The application currently uses `activestations.xml` for dynamic
-wind-station metadata. NDBC also publishes:
+The application currently uses:
+
+``` text
+https://www.ndbc.noaa.gov/activestations.xml
+```
+
+NDBC also publishes:
 
 ``` text
 https://www.ndbc.noaa.gov/data/stations/station_table.txt
 ```
 
-A useful next step is to compare these sources and determine whether
-`station_table.txt` provides better station names, positions,
-ownership/network information or station-type information.
+Compare these sources to determine whether `station_table.txt` provides
+better station names, positions, ownership/network or station-type
+information.
 
-Any change should preserve the current design goal: **do not hard-code a
-list of supported wind stations.**
+Preserve the design goal: **do not hard-code a list of supported wind
+stations.**
 
-## 7. Better station metadata
+## 6. Better station metadata
 
 Include or expose:
 
@@ -863,33 +803,20 @@ Include or expose:
 -   observation age
 -   exposure/instrument notes
 
-This is especially important when comparing wind speeds from different
-stations.
+## 7. Smarter current-station selection
 
-## 8. Smarter current-station selection
+Geographic proximity is useful, but the nearest station is not
+necessarily the best hydrodynamic match. Future selection could consider
+waterway, channel, barriers, station location, known sailing areas and
+distance.
 
-Geographic proximity is a useful first approximation, but the nearest
-station is not necessarily the best station hydrodynamically.
+The automatically selected current station should remain visible in the
+report.
 
-Future selection could consider:
+## 8. Add a real wind forecast source
 
--   waterway
--   channel
--   geographic barriers
--   station name/location
--   known sailing areas
--   distance
-
-The automatically selected current station should remain visible so the
-user can judge whether it is appropriate.
-
-## 9. Add a real wind forecast source
-
-The current wind portion is observational: it reports what the NDBC
-station measured and summarizes recent observations.
-
-A future enhancement could add a separate forecast data source. If
-added, the report should clearly label:
+The current wind report is observational. A future forecast source
+should be clearly separated:
 
 ``` text
 OBSERVED WIND
@@ -897,22 +824,14 @@ FORECAST WIND
 PREDICTED CURRENT
 ```
 
-This would allow the service to make statements such as "wind is
-expected to build this afternoon" based on an actual forecast rather
-than inference from current observations.
+Only a real forecast source should support statements such as "wind is
+expected to build this afternoon."
 
-## 10. Caching and concurrent retrieval
+## 9. Caching and concurrent retrieval
 
-The combined report makes several NOAA requests.
-
-A short cache could reduce:
-
--   NOAA traffic
--   response latency
--   duplicate requests
-
-Concurrent retrieval would also become useful for multi-station corridor
-reports and assistant clients where response time matters.
+A short cache could reduce NOAA traffic, latency and duplicate requests.
+Concurrent retrieval will also help multi-station corridor reports and
+voice-assistant response time.
 
   ------------------------------------------------------------
   Solid WNW breeze with relatively mild afternoon current. The
