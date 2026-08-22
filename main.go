@@ -29,6 +29,36 @@ type SailingReport struct {
 	Historical  *HistoricalReport `json:"historical,omitempty"`
 }
 
+type CompactReport struct {
+	Station    string          `json:"station"`
+	Location   string          `json:"location,omitempty"`
+	ReportTime time.Time       `json:"report_time"`
+	BottomLine []string        `json:"bottom_line,omitempty"`
+	Wind       *CompactWind    `json:"wind,omitempty"`
+	Current    *CompactCurrent `json:"current,omitempty"`
+}
+
+type CompactWind struct {
+	Time      time.Time `json:"time"`
+	Direction string    `json:"direction,omitempty"`
+	WindKT    float64   `json:"wind_kt,omitempty"`
+	GustKT    float64   `json:"gust_kt,omitempty"`
+}
+
+type CompactCurrent struct {
+	WindowStart  time.Time `json:"window_start,omitempty"`
+	WindowEnd    time.Time `json:"window_end,omitempty"`
+	PhaseAtStart string    `json:"phase_at_start,omitempty"`
+	SlackTime    time.Time `json:"slack_time,omitempty"`
+	NextPhase    string    `json:"next_phase,omitempty"`
+	NextSpeedKT  float64   `json:"next_speed_kt,omitempty"`
+	Strength     string    `json:"strength,omitempty"`
+	StationID    string    `json:"station_id,omitempty"`
+	StationName  string    `json:"station_name,omitempty"`
+	DistanceNM   float64   `json:"distance_nm,omitempty"`
+	Error        string    `json:"error,omitempty"`
+}
+
 func main() {
 	loc, err := time.LoadLocation(timeZoneName)
 	if err != nil {
@@ -162,8 +192,18 @@ func runServer(
 			}
 		}
 
-		if wantsJSON(r) {
-			writeJSONReport(w, report)
+		compact := queryBool(r, "compact")
+		format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+		jsonOutput := format == "json" || wantsJSON(r)
+
+		if jsonOutput {
+			if compact && report.Historical == nil {
+				writeCompactJSONReport(w, report)
+			} else {
+				writeJSONReport(w, report)
+			}
+		} else if compact && report.Historical == nil {
+			writeCompactTextReport(w, report, loc)
 		} else {
 			writeTextReport(w, report, loc)
 		}
@@ -198,6 +238,16 @@ func queryInt(r *http.Request, key string, fallback int) int {
 	return parsed
 }
 
+func queryBool(r *http.Request, key string) bool {
+	value := strings.ToLower(strings.TrimSpace(r.URL.Query().Get(key)))
+	switch value {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 func wantsJSON(r *http.Request) bool {
 	return strings.Contains(
 		strings.ToLower(r.Header.Get("Accept")),
@@ -214,6 +264,175 @@ func writeJSONReport(w http.ResponseWriter, report *SailingReport) {
 	if err := encoder.Encode(report); err != nil {
 		fmt.Println("JSON encoding error:", err)
 	}
+}
+
+func writeCompactJSONReport(
+	w http.ResponseWriter,
+	report *SailingReport,
+) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+
+	if err := encoder.Encode(buildCompactReport(report)); err != nil {
+		fmt.Println("compact JSON encoding error:", err)
+	}
+}
+
+func buildCompactReport(report *SailingReport) *CompactReport {
+	result := &CompactReport{
+		Station:    report.Station,
+		ReportTime: report.ReportTime,
+		BottomLine: bottomLineLines(report),
+	}
+
+	if stationMeta, err := fetchNDBCStation(report.Station); err == nil {
+		result.Location = strings.TrimSpace(stationMeta.Name)
+	}
+
+	if report.Latest != nil {
+		result.Wind = &CompactWind{
+			Time:      report.Latest.Time,
+			Direction: report.Latest.Direction,
+			WindKT:    report.Latest.WindKT,
+			GustKT:    report.Latest.GustKT,
+		}
+	}
+
+	if report.Current != nil {
+		c := &CompactCurrent{
+			WindowStart:  report.Current.Start,
+			WindowEnd:    report.Current.End,
+			PhaseAtStart: currentPhaseAtStart(report.Current),
+			Error:        report.Current.Error,
+		}
+
+		if report.Current.CurrentStation != nil {
+			c.StationID = report.Current.CurrentStation.ID
+			c.StationName = report.Current.CurrentStation.Name
+			c.DistanceNM = report.Current.CurrentStation.DistanceNM
+		}
+
+		for i, event := range report.Current.Events {
+			if event.Type != "slack" ||
+				event.Time.Before(report.Current.Start) ||
+				event.Time.After(report.Current.End) {
+				continue
+			}
+
+			c.SlackTime = event.Time
+
+			for j := i + 1; j < len(report.Current.Events); j++ {
+				next := report.Current.Events[j]
+				if next.Type == "flood" || next.Type == "ebb" {
+					c.NextPhase = next.Type
+					c.NextSpeedKT = next.SpeedKT
+					c.Strength = currentStrength(next.SpeedKT)
+					break
+				}
+			}
+			break
+		}
+
+		result.Current = c
+	}
+
+	return result
+}
+
+func writeCompactTextReport(
+	w io.Writer,
+	report *SailingReport,
+	loc *time.Location,
+) {
+	headingName := report.Station
+	if stationMeta, err := fetchNDBCStation(report.Station); err == nil {
+		if name := strings.TrimSpace(stationMeta.Name); name != "" {
+			headingName = name
+		}
+	}
+
+	fmt.Fprintf(w, "SAILING OUTLOOK — %s (%s)\n", headingName, report.Station)
+	fmt.Fprintln(w, "================================")
+	fmt.Fprintf(
+		w,
+		"Report time: %s\n\n",
+		report.ReportTime.In(loc).Format("Mon Jan 2, 2006 3:04:05 PM MST"),
+	)
+
+	fmt.Fprintln(w, "BOTTOM LINE")
+	fmt.Fprintln(w, "--------------------------------")
+	writeBottomLineText(w, report)
+
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "WIND")
+	fmt.Fprintln(w, "--------------------------------")
+	writeWindSummaryText(w, report, loc)
+
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "CURRENT")
+	fmt.Fprintln(w, "--------------------------------")
+	writeCompactCurrentText(w, report.Current)
+}
+
+func writeCompactCurrentText(w io.Writer, report *CurrentReport) {
+	if report == nil {
+		fmt.Fprintln(w, "Current prediction unavailable.")
+		return
+	}
+	if report.Error != "" {
+		fmt.Fprintf(w, "Current prediction unavailable: %s\n", report.Error)
+		return
+	}
+
+	if report.CurrentStation != nil {
+		fmt.Fprintf(
+			w,
+			"Using %s — %s, %.1f nmi from %s.\n",
+			report.CurrentStation.ID,
+			report.CurrentStation.Name,
+			report.CurrentStation.DistanceNM,
+			report.WindReference.ID,
+		)
+	}
+
+	for _, line := range report.Outlook {
+		fmt.Fprintln(w, line)
+	}
+}
+
+func bottomLineLines(report *SailingReport) []string {
+	var b strings.Builder
+	writeBottomLineText(&b, report)
+
+	raw := strings.Split(strings.TrimSpace(b.String()), "\n")
+	lines := make([]string, 0, len(raw))
+	for _, line := range raw {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+func currentPhaseAtStart(report *CurrentReport) string {
+	if report == nil {
+		return ""
+	}
+
+	for _, line := range report.Outlook {
+		switch {
+		case strings.Contains(line, "starts on a flood"):
+			return "flood"
+		case strings.Contains(line, "starts on an ebb"):
+			return "ebb"
+		case strings.Contains(line, "begins close to slack"):
+			return "slack"
+		}
+	}
+	return ""
 }
 
 func writeTextReport(
@@ -438,10 +657,19 @@ Examples:
   Change current window:
     curl -sS "http://localhost:8080/report?station=PSBC1&start=11&end=18"
 
-  JSON:
+  Full JSON:
     curl -sS \
-      -H "Accept: application/json" \
-      "http://localhost:8080/report?station=PSBC1"
+      "http://localhost:8080/report?station=PSBC1&format=json"
+
+  Compact text (BOTTOM LINE, WIND, CURRENT only):
+    curl -sS \
+      "http://localhost:8080/report?station=PSBC1&compact=1"
+
+  Compact JSON for Alexa / assistants:
+    curl -sS \
+      "http://localhost:8080/report?station=PSBC1&format=json&compact=1"
+
+  The Accept: application/json header is still supported.
 
 `)
 }
