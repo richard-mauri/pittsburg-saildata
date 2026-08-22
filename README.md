@@ -1,4 +1,4 @@
-# Delta Sailing Data
+# NOAA Sailing Conditions
 
 A small Go service that combines NOAA/NDBC wind observations with NOAA
 current predictions to produce concise, sailing-oriented reports for the
@@ -721,6 +721,16 @@ Working functionality now includes:
 ------------------------------------------------------------------------
 
 # Possible next steps
+
+## Geographic portability testing
+
+Test the service outside the San Francisco Bay/Delta development area
+using other active NDBC wind stations and NOAA current prediction
+stations.
+
+The goal is to determine where the current automatic station-selection
+logic works well and where regional hydrodynamics require better station
+matching.
 
 ## 1. Alexa and other voice assistants
 
