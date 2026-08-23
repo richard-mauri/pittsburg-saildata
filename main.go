@@ -522,84 +522,212 @@ func writeBottomLineText(
 		return
 	}
 
-	// Determine the predicted current phase at the beginning of the
-	// configured sailing window from the event sequence.
-	startPhase := ""
-	for _, line := range report.Current.Outlook {
-		switch {
-		case strings.Contains(line, "starts on a flood"):
-			startPhase = "flooding"
-		case strings.Contains(line, "starts on an ebb"):
-			startPhase = "ebbing"
-		case strings.Contains(line, "begins close to slack"):
-			startPhase = "near slack"
-		}
-		if startPhase != "" {
-			break
-		}
-	}
+	now := report.ReportTime
 
-	if startPhase != "" {
-		fmt.Fprintf(
-			w,
-			"At %s, current is predicted to be %s.\n",
-			report.Current.Start.Format("3:04 PM"),
-			startPhase,
-		)
-	}
+	if now.Before(report.Current.Start) {
+		phase := currentPhaseAtStart(report.Current)
 
-	// Find the first slack within the sailing window and the following phase.
-	for i, event := range report.Current.Events {
-		if event.Type != "slack" ||
-			event.Time.Before(report.Current.Start) ||
-			event.Time.After(report.Current.End) {
-			continue
+		if phase != "" {
+			fmt.Fprintf(
+				w,
+				"At %s, current is predicted to be %s.\n",
+				report.Current.Start.Format("3:04 PM"),
+				currentPhaseWord(phase),
+			)
 		}
 
-		var next *CurrentEvent
-		for j := i + 1; j < len(report.Current.Events); j++ {
-			if report.Current.Events[j].Type == "flood" ||
-				report.Current.Events[j].Type == "ebb" {
-				copy := report.Current.Events[j]
-				next = &copy
-				break
+		if slack, next := firstSlackAndNextPhase(
+			report.Current,
+			report.Current.Start,
+		); slack != nil {
+			if next != nil {
+				fmt.Fprintf(
+					w,
+					"Slack is around %s, then the current turns to a %s %s.\n",
+					slack.Time.Format("3:04 PM"),
+					currentStrength(next.SpeedKT),
+					next.Type,
+				)
+			} else {
+				fmt.Fprintf(
+					w,
+					"Slack is around %s.\n",
+					slack.Time.Format("3:04 PM"),
+				)
 			}
 		}
 
-		if next != nil {
-			fmt.Fprintf(
-				w,
-				"Slack is around %s, then the current turns to a %s %s.\n",
-				event.Time.Format("3:04 PM"),
-				currentStrength(next.SpeedKT),
-				next.Type,
-			)
-		} else {
-			fmt.Fprintf(
-				w,
-				"Slack is around %s.\n",
-				event.Time.Format("3:04 PM"),
-			)
-		}
-		break
+		printOverallCurrentAssessment(w, report.Current)
+		return
 	}
 
-	// End with a compact strength assessment.
-	if len(report.Current.Outlook) > 0 {
-		assessment := report.Current.Outlook[len(report.Current.Outlook)-1]
+	prev, next := surroundingCurrentEvents(
+		report.Current.Events,
+		now,
+	)
 
-		switch {
-		case strings.Contains(assessment, "relatively mild"):
-			fmt.Fprintln(w, "Overall, current should be relatively mild during the sailing window.")
-		case strings.Contains(assessment, "very light"):
-			fmt.Fprintln(w, "Overall, current should be very light during the sailing window.")
-		case strings.Contains(assessment, "moderate"):
-			fmt.Fprintln(w, "Overall, expect moderate current during the sailing window.")
-		case strings.Contains(assessment, "fairly strong"):
-			fmt.Fprintln(w, "Overall, expect fairly strong current during part of the sailing window.")
-		case strings.Contains(assessment, "strong"):
-			fmt.Fprintln(w, "Overall, expect strong current during part of the sailing window.")
+	phase := currentPhaseNow(prev, next)
+
+	switch phase {
+	case "flood":
+		fmt.Fprintln(w, "Current is predicted to be flooding now.")
+	case "ebb":
+		fmt.Fprintln(w, "Current is predicted to be ebbing now.")
+	case "slack":
+		fmt.Fprintln(w, "Current is predicted to be near slack now.")
+	}
+
+	if next != nil {
+		switch next.Type {
+		case "slack":
+			fmt.Fprintf(
+				w,
+				"Next slack is around %s.\n",
+				next.Time.Format("3:04 PM"),
+			)
+		case "flood":
+			fmt.Fprintf(
+				w,
+				"Flood builds toward about %.1f kt around %s.\n",
+				next.SpeedKT,
+				next.Time.Format("3:04 PM"),
+			)
+		case "ebb":
+			fmt.Fprintf(
+				w,
+				"Ebb builds toward about %.1f kt around %s.\n",
+				next.SpeedKT,
+				next.Time.Format("3:04 PM"),
+			)
 		}
+	} else if prev != nil && prev.Type == "slack" {
+		fmt.Fprintf(
+			w,
+			"Slack was around %s.\n",
+			prev.Time.Format("3:04 PM"),
+		)
+	}
+
+	printOverallCurrentAssessment(w, report.Current)
+}
+
+func currentPhaseWord(phase string) string {
+	switch phase {
+	case "flood":
+		return "flooding"
+	case "ebb":
+		return "ebbing"
+	case "slack":
+		return "near slack"
+	default:
+		return phase
+	}
+}
+
+func firstSlackAndNextPhase(
+	report *CurrentReport,
+	from time.Time,
+) (*CurrentEvent, *CurrentEvent) {
+	for i := range report.Events {
+		event := report.Events[i]
+
+		if event.Type != "slack" || event.Time.Before(from) {
+			continue
+		}
+
+		slack := event
+		for j := i + 1; j < len(report.Events); j++ {
+			next := report.Events[j]
+			if next.Type == "flood" || next.Type == "ebb" {
+				copy := next
+				return &slack, &copy
+			}
+		}
+		return &slack, nil
+	}
+	return nil, nil
+}
+
+func surroundingCurrentEvents(
+	events []CurrentEvent,
+	now time.Time,
+) (*CurrentEvent, *CurrentEvent) {
+	var previous *CurrentEvent
+	var next *CurrentEvent
+
+	for i := range events {
+		event := events[i]
+		if !event.Time.After(now) {
+			copy := event
+			previous = &copy
+			continue
+		}
+		copy := event
+		next = &copy
+		break
+	}
+	return previous, next
+}
+
+func currentPhaseNow(
+	previous *CurrentEvent,
+	next *CurrentEvent,
+) string {
+	if previous != nil && previous.Type == "slack" {
+		if next != nil {
+			switch next.Type {
+			case "flood":
+				return "flood"
+			case "ebb":
+				return "ebb"
+			}
+		}
+		return "slack"
+	}
+
+	if previous != nil {
+		switch previous.Type {
+		case "flood":
+			return "flood"
+		case "ebb":
+			return "ebb"
+		}
+	}
+
+	if next != nil {
+		switch next.Type {
+		case "flood":
+			return "flood"
+		case "ebb":
+			return "ebb"
+		case "slack":
+			return "slack"
+		}
+	}
+	return ""
+}
+
+func printOverallCurrentAssessment(
+	w io.Writer,
+	report *CurrentReport,
+) {
+	if report == nil || len(report.Outlook) == 0 {
+		return
+	}
+
+	assessment := report.Outlook[len(report.Outlook)-1]
+
+	switch {
+	case strings.Contains(assessment, "relatively mild"):
+		fmt.Fprintln(w, "Overall, current should be relatively mild during the sailing window.")
+	case strings.Contains(assessment, "very light"):
+		fmt.Fprintln(w, "Overall, current should be very light during the sailing window.")
+	case strings.Contains(assessment, "moderate"):
+		fmt.Fprintln(w, "Overall, expect moderate current during the sailing window.")
+	case strings.Contains(assessment, "fairly strong"):
+		fmt.Fprintln(w, "Overall, expect fairly strong current during part of the sailing window.")
+	case strings.Contains(assessment, "strong"):
+		fmt.Fprintln(w, "Overall, expect strong current during part of the sailing window.")
 	}
 }
 
