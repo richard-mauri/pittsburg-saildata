@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"html/template"
 	"io"
 	"net/http"
 	"os"
@@ -161,6 +162,25 @@ func runServer(
 		fmt.Fprintln(w, "OK")
 	})
 
+	mux.HandleFunc("/assets/hero.jpg", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		http.ServeFile(w, r, "assets/hero.jpg")
+	})
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		q := r.URL.Query()
+		q.Set("format", "html")
+		http.Redirect(w, r, "/report?"+q.Encode(), http.StatusTemporaryRedirect)
+	})
+
 	mux.HandleFunc("/report", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -239,6 +259,10 @@ func runServer(
 
 		compact := queryBool(r, "compact")
 		format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+		if format == "html" {
+			writeHTMLReport(w, report, loc)
+			return
+		}
 		jsonOutput := format == "json" || wantsJSON(r)
 
 		if jsonOutput {
@@ -269,6 +293,158 @@ func runServer(
 		fatal(err)
 	}
 }
+
+type htmlCurrentEvent struct{ Time, Label, Speed, Direction, Class string }
+type htmlReportData struct {
+	Title, Station, ReportTime                       string
+	Historical                                       bool
+	RequestedTime                                    string
+	WindDirection, WindSpeed, WindGust, WindObserved string
+	WindSummary                                      string
+	CurrentStation, CurrentMeta                      string
+	CurrentOutlook                                   []string
+	CurrentEvents                                    []htmlCurrentEvent
+	BottomLine                                       []string
+	FullText                                         string
+}
+
+func writeHTMLReport(w http.ResponseWriter, report *SailingReport, loc *time.Location) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := sailingHTMLTemplate.Execute(w, makeHTMLReportData(report, loc)); err != nil {
+		http.Error(w, err.Error(), 500)
+	}
+}
+func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportData {
+	d := htmlReportData{Station: report.Station, Title: report.Station}
+	if !report.ReportTime.IsZero() {
+		d.ReportTime = report.ReportTime.In(loc).Format("Mon Jan 2, 2006 · 3:04 PM MST")
+	}
+	if report.Historical != nil {
+		d.Historical = true
+		d.RequestedTime = report.Historical.Requested.In(loc).Format("Mon Jan 2, 2006 · 3:04 PM")
+	}
+	if report.Current != nil && report.Current.WindReference != nil && strings.TrimSpace(report.Current.WindReference.Name) != "" {
+		d.Title = strings.TrimSpace(report.Current.WindReference.Name)
+	}
+	var latest *WindObservation
+
+	// Historical reports should show the observation closest to the
+	// requested timestamp. Current reports should show Latest. Latest10 is
+	// a defensive fallback so the HTML card never goes blank when recent
+	// observations are available.
+	if report.Historical != nil && report.Historical.Closest != nil {
+		latest = report.Historical.Closest
+	} else if report.Latest != nil {
+		latest = report.Latest
+	} else if len(report.Latest10) > 0 {
+		copy := report.Latest10[0]
+		latest = &copy
+	}
+
+	if latest != nil {
+		d.WindDirection = latest.Direction
+		if d.WindDirection == "" {
+			d.WindDirection = "—"
+		}
+
+		if latest.WindKT > 0 {
+			d.WindSpeed = fmt.Sprintf("%.0f kt", latest.WindKT)
+		} else {
+			d.WindSpeed = "—"
+		}
+
+		if latest.GustKT > 0 {
+			d.WindGust = fmt.Sprintf("%.0f kt", latest.GustKT)
+		} else {
+			d.WindGust = "—"
+		}
+
+		d.WindObserved = latest.Time.In(loc).Format("3:04 PM")
+	} else {
+		d.WindDirection = "—"
+		d.WindSpeed = "—"
+		d.WindGust = "—"
+		d.WindObserved = "Wind observation unavailable"
+	}
+	// Generate the same wind summary used by the text report so the HTML
+	// card always has an authoritative fallback.
+	var windText strings.Builder
+	if report.Historical != nil {
+		if report.Historical.Closest != nil {
+			printWindObservation(
+				&windText,
+				report.Historical.Closest,
+				loc,
+				report.Historical.Requested,
+			)
+		}
+	} else {
+		writeWindSummaryText(
+			&windText,
+			report,
+			loc,
+		)
+	}
+	d.WindSummary = strings.TrimSpace(windText.String())
+
+	if report.Current != nil && report.Current.Error == "" {
+		if report.Current.CurrentStation != nil {
+			s := report.Current.CurrentStation
+			d.CurrentStation = s.Name
+			d.CurrentMeta = fmt.Sprintf("%s · bin %s · %s ft depth · %.1f nmi away", s.ID, report.Current.Bin, report.Current.Depth, s.DistanceNM)
+		}
+		d.CurrentOutlook = append(d.CurrentOutlook, report.Current.Outlook...)
+		for _, e := range report.Current.Events {
+			x := htmlCurrentEvent{Time: e.Time.In(loc).Format("3:04 PM"), Class: e.Type}
+			switch e.Type {
+			case "flood":
+				x.Label = "Max flood"
+				x.Speed = fmt.Sprintf("%.2f kt", e.SpeedKT)
+				x.Direction = fmt.Sprintf("%03d°", e.Direction)
+			case "ebb":
+				x.Label = "Max ebb"
+				x.Speed = fmt.Sprintf("%.2f kt", e.SpeedKT)
+				x.Direction = fmt.Sprintf("%03d°", e.Direction)
+			default:
+				x.Label = "Slack"
+			}
+			d.CurrentEvents = append(d.CurrentEvents, x)
+		}
+	}
+	var b strings.Builder
+	writeBottomLineText(&b, report)
+	for _, line := range strings.Split(strings.TrimSpace(b.String()), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && line != "BOTTOM LINE" && !strings.HasPrefix(line, "---") {
+			d.BottomLine = append(d.BottomLine, line)
+		}
+	}
+	var full strings.Builder
+	writeTextReport(&full, report, loc)
+	d.FullText = strings.TrimSpace(full.String())
+
+	return d
+}
+
+var sailingHTMLTemplate = template.Must(template.New("sailing").Parse(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mauri’s Sailing Outlook — {{.Title}}</title>
+<style>:root{--navy:#082b45;--blue:#126b91;--sea:#0b8793;--ink:#153242;--muted:#607886;--paper:#f5fafc;--card:#fff;--line:#d8e7ed;--flood:#087f8c;--ebb:#365f91;--slack:#756d64;--shadow:0 12px 34px rgba(8,43,69,.10)}*{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#dff3f8,#f7fbfc 32rem);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Avenir Next",Avenir,Helvetica,Arial,sans-serif;line-height:1.45}.shell{max-width:880px;margin:auto;padding:28px 18px 64px}.hero{color:#fff;padding:34px 30px 30px;border-radius:24px;min-height:360px;display:flex;flex-direction:column;justify-content:flex-end;background:
+linear-gradient(180deg,rgba(4,24,38,.06) 12%,rgba(4,24,38,.24) 48%,rgba(4,24,38,.86) 100%),
+url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text-shadow:0 2px 12px rgba(0,0,0,.45)}.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-weight:800;font-size:.76rem;opacity:.8}.photo-tag{margin-top:14px;font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;opacity:.72}h1{font-size:clamp(1.8rem,6vw,3.2rem);line-height:1.05;margin:.4rem 0 .6rem;letter-spacing:-.035em}.sub{opacity:.82}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}.full{grid-column:1/-1}h2{font-size:.82rem;letter-spacing:.13em;text-transform:uppercase;color:var(--blue);margin:0 0 16px}.bottom{font-size:1.13rem}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.metric{background:var(--paper);border-radius:15px;padding:14px}.label{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700}.value{font-size:1.55rem;font-weight:800;color:var(--navy)}.meta{color:var(--muted);font-size:.88rem;margin-top:12px}.station{font-weight:800;font-size:1.1rem;color:var(--navy)}.wind-summary{white-space:pre-line;margin-top:14px;padding:13px 14px;background:#eef7fa;border-left:4px solid var(--sea);border-radius:10px;color:var(--ink);font-size:.92rem}.event{display:grid;grid-template-columns:88px 12px 1fr;gap:12px;align-items:center;min-height:58px}.time{font-weight:800;color:var(--navy)}.dot{width:12px;height:12px;border-radius:50%;background:var(--slack);box-shadow:0 0 0 5px #edf3f5}.flood .dot{background:var(--flood)}.ebb .dot{background:var(--ebb)}.eventbody{border-left:2px solid var(--line);padding:8px 0 8px 18px}.eventlabel{font-weight:800}.eventdata{color:var(--muted);font-size:.9rem}.badge{display:inline-block;border-radius:999px;padding:5px 10px;background:#e9f6fb;color:var(--blue);font-size:.75rem;font-weight:800;margin-top:12px}.footer{text-align:center;color:var(--muted);font-size:.78rem;margin-top:22px}.full-report{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:.88rem;line-height:1.55;background:#071f31;color:#e7f4f8;border-radius:14px;padding:18px;overflow-x:auto}.details-note{color:var(--muted);font-size:.88rem;margin:-4px 0 14px}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}</style></head><body><main class="shell">
+<section class="hero"><div class="eyebrow">Mauri’s Sailing Outlook</div><h1>{{.Title}}</h1><div class="sub">{{.ReportTime}} · {{.Station}}</div>{{if .Historical}}<span class="badge">Historical · {{.RequestedTime}}</span>{{end}}<div class="photo-tag">Bay sailing</div></section><div class="grid">
+<section class="card full bottom"><h2>Bottom line</h2>{{range .BottomLine}}<p>{{.}}</p>{{else}}<p>Summary unavailable.</p>{{end}}</section>
+<section class="card"><h2>Wind</h2>
+<div class="metrics">
+<div class="metric"><div class="label">Direction</div><div class="value">{{if .WindDirection}}{{.WindDirection}}{{else}}—{{end}}</div></div>
+<div class="metric"><div class="label">Wind</div><div class="value">{{if .WindSpeed}}{{.WindSpeed}}{{else}}—{{end}}</div></div>
+<div class="metric"><div class="label">Gust</div><div class="value">{{if .WindGust}}{{.WindGust}}{{else}}—{{end}}</div></div>
+</div>
+<div class="meta"><strong>Observed:</strong> {{if .WindObserved}}{{.WindObserved}}{{else}}unavailable{{end}}</div>
+{{if .WindSummary}}<div class="wind-summary">{{.WindSummary}}</div>{{end}}
+</section>
+<section class="card"><h2>Current</h2>{{if .CurrentStation}}<div class="station">{{.CurrentStation}}</div><div class="meta">{{.CurrentMeta}}</div>{{range .CurrentOutlook}}<p>{{.}}</p>{{end}}{{else}}<p>Current prediction unavailable.</p>{{end}}</section>
+<section class="card full"><h2>Current timeline</h2>{{range .CurrentEvents}}<div class="event {{.Class}}"><div class="time">{{.Time}}</div><div class="dot"></div><div class="eventbody"><div class="eventlabel">{{.Label}}</div>{{if .Speed}}<div class="eventdata">{{.Speed}} · {{.Direction}}</div>{{end}}</div></div>{{else}}<p>No current events in the selected sailing window.</p>{{end}}</section>
+<section class="card full"><h2>Full report details</h2><p class="details-note">Complete CLI/text report. This section includes every detail available from the text endpoint.</p><pre class="full-report">{{.FullText}}</pre></section></div>
+<div class="footer"><strong>Mauri’s Sailing Outlook</strong><br>NOAA/NDBC observations + NOAA CO-OPS current predictions · Sailing aid, not a navigation system</div></main></body></html>`))
 
 func queryInt(r *http.Request, key string, fallback int) int {
 	value := strings.TrimSpace(r.URL.Query().Get(key))
