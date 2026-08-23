@@ -1,7 +1,8 @@
-# Sailing Wind & Current Data
+# Mauri's Sailing Outlook
 
-A small Go service for turning NOAA/NDBC marine observations and NOAA
-CO-OPS tidal-current predictions into concise sailing-oriented reports.
+Mauri's Sailing Outlook is a small Go service for turning NOAA/NDBC
+marine observations and NOAA CO-OPS tidal-current predictions into
+sailing-oriented reports for humans, voice assistants, and API clients.
 
 The project began as a command-line utility for checking conditions
 around Pittsburg and the San Francisco Bay--Delta system. It now
@@ -29,6 +30,9 @@ HTTP-capable assistants.
 -   Plain-text reports
 -   JSON output for programmatic and voice-client use
 -   Concise output mode
+-   Branded, mobile-friendly HTML dashboard
+-   Sailing-photo hero image served from `assets/hero.jpg`
+-   Full text-report details embedded in the HTML page
 -   REST API with `/report` and `/health`
 -   GitHub → Render deployment
 
@@ -286,6 +290,92 @@ CURRENT EVENTS
 The exact observations and predictions naturally vary by report date and
 time.
 
+## HTML dashboard
+
+The server now includes a branded, mobile-friendly web presentation
+called **Mauri's Sailing Outlook**.
+
+The dashboard includes:
+
+-   a sailing-photo hero image
+-   Bottom Line summary
+-   Wind card
+-   Current card
+-   visual current-event timeline
+-   the complete text report in a detailed section
+
+The HTML presentation uses the same report data as the text/JSON API. It
+is a presentation layer rather than a separate weather/current
+calculation path.
+
+The hero photograph is stored in the repository at:
+
+``` text
+assets/hero.jpg
+```
+
+The Go server exposes it at:
+
+``` text
+/assets/hero.jpg
+```
+
+When deploying to Render, commit the `assets/hero.jpg` file along with
+the Go source.
+
+### Local HTML dashboard
+
+Start the server:
+
+``` bash
+./sailing-go -server
+```
+
+Then open:
+
+``` text
+http://localhost:8080/
+```
+
+The root URL redirects to the HTML presentation.
+
+HTML can also be requested explicitly:
+
+``` text
+http://localhost:8080/report?format=html
+```
+
+Another wind station can be selected in the dashboard:
+
+``` text
+http://localhost:8080/?station=RCMC1
+```
+
+Historical HTML works through the same query parameters:
+
+``` text
+http://localhost:8080/?station=PSBC1&at=2026-08-22T12:00
+```
+
+### Production HTML dashboard
+
+The Render deployment is:
+
+``` text
+https://pittsburg-saildata.onrender.com/
+```
+
+Important: `/report` intentionally remains the plain-text/API endpoint.
+To view HTML, use either the site root or `format=html`:
+
+``` text
+https://pittsburg-saildata.onrender.com/
+https://pittsburg-saildata.onrender.com/report?format=html
+```
+
+This separation preserves backward compatibility for curl, Alexa,
+ChatGPT, Siri, and other clients already using `/report`.
+
 ## REST API
 
 Start the server:
@@ -303,7 +393,10 @@ environment variable.
 curl -sS http://localhost:8080/health
 ```
 
-### Current report
+### Current plain-text report
+
+`/report` defaults to the plain-text API response; it does **not**
+default to HTML.
 
 ``` bash
 curl -sS "http://localhost:8080/report"
@@ -327,6 +420,20 @@ curl -sS \
 ``` bash
 curl -sS \
   "http://localhost:8080/report?station=PSBC1&current_station=SFB1325&bin=9"
+```
+
+### HTML
+
+Request the HTML dashboard explicitly with:
+
+``` bash
+curl -sS "http://localhost:8080/report?format=html"
+```
+
+In a browser, normally use the simpler root URL:
+
+``` text
+http://localhost:8080/
 ```
 
 ### JSON
@@ -385,7 +492,18 @@ The service can be deployed from GitHub to Render.
 Production service:
 
 ``` text
-https://pittsburg-saildata.onrender.com
+https://pittsburg-saildata.onrender.com/
+```
+
+Useful production routes:
+
+``` text
+/                         Mauri’s Sailing Outlook HTML dashboard
+/report                   Plain-text report/API
+/report?format=html       HTML dashboard explicitly
+/report?format=json       JSON report
+/health                   Health check
+/assets/hero.jpg          Dashboard hero photograph
 ```
 
 Render supplies the `PORT` environment variable.
@@ -419,6 +537,21 @@ Render automatic deployment
 
 Before pushing current-selection changes, compare the local report with
 a known NOAA/BASK reference where possible.
+
+For HTML deployments, also verify that the hero image is committed:
+
+``` bash
+git status
+git ls-files assets/hero.jpg
+```
+
+After Render deploys, check both presentation and API behavior:
+
+``` text
+https://pittsburg-saildata.onrender.com/
+https://pittsburg-saildata.onrender.com/report
+https://pittsburg-saildata.onrender.com/report?format=html
+```
 
 ## Useful San Francisco Bay / Delta wind stations
 
@@ -496,6 +629,10 @@ Working capabilities include:
 -   explicit current-station/bin override
 -   historical current predictions for `-at` dates
 -   BASK/NOAA validation of PSBC1 → SFB1325 bin 9
+-   Mauri's Sailing Outlook HTML branding
+-   responsive HTML dashboard
+-   sailing-photo hero image
+-   full text-report detail included in HTML
 -   text output
 -   JSON output
 -   concise/voice-oriented output
