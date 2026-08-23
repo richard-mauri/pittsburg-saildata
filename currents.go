@@ -8,20 +8,28 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 const (
 	ndbcStationsURL = "https://www.ndbc.noaa.gov/activestations.xml"
 
-	currentMetadataURL = "https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations.json?type=currents"
+	// Important: use NOAA CURRENT PREDICTION stations here, not merely
+	// active real-time current meters.
+	currentMetadataURL = "https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations.json?type=currentpredictions&units=english"
 
 	currentDataURL = "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
 
 	noaaCurrentTimeFormat = "2006-01-02 15:04"
+
+	// Metadata changes infrequently. Cache it to avoid an MDAPI request for
+	// every sailing report while still refreshing periodically.
+	currentMetadataCacheTTL = 24 * time.Hour
 )
 
 type NDBCStations struct {
@@ -36,12 +44,22 @@ type NDBCStation struct {
 	Met  string  `xml:"met,attr" json:"met,omitempty"`
 }
 
+// CurrentStation represents a NOAA CO-OPS CURRENT PREDICTION station.
+//
+// CurrBin, Depth, DepthType, and PredictionType come from MDAPI's
+// currentpredictions catalog. DistanceNM is calculated locally relative to
+// the requested NDBC wind station.
 type CurrentStation struct {
-	ID         string  `json:"id"`
-	Name       string  `json:"name"`
-	Lat        float64 `json:"lat"`
-	Lon        float64 `json:"lon"`
-	DistanceNM float64 `json:"distance_nm"`
+	ID             string  `json:"id"`
+	Name           string  `json:"name"`
+	Lat            float64 `json:"lat"`
+	Lon            float64 `json:"lon"`
+	DistanceNM     float64 `json:"distance_nm"`
+	SelectionScore float64 `json:"selection_score,omitempty"`
+	CurrBin        int     `json:"currbin,omitempty"`
+	Depth          float64 `json:"metadata_depth_ft,omitempty"`
+	DepthType      string  `json:"depth_type,omitempty"`
+	PredictionType string  `json:"prediction_type,omitempty"`
 }
 
 type CurrentPrediction struct {
@@ -69,6 +87,7 @@ type CurrentEvent struct {
 type CurrentReport struct {
 	WindReference  *NDBCStation    `json:"wind_reference,omitempty"`
 	CurrentStation *CurrentStation `json:"current_station,omitempty"`
+	SelectionMode  string          `json:"selection_mode,omitempty"`
 	Start          time.Time       `json:"window_start,omitempty"`
 	End            time.Time       `json:"window_end,omitempty"`
 	Outlook        []string        `json:"outlook,omitempty"`
@@ -90,8 +109,93 @@ type currentAPIResponse struct {
 	} `json:"error,omitempty"`
 }
 
+// NOAA documentation has historically described the collection as
+// "stationList" while JSON examples/implementations may expose "stations".
+// Supporting both costs almost nothing and makes the parser more robust.
+type currentMetadataResponse struct {
+	Count       int               `json:"count"`
+	Stations    []metadataStation `json:"stations"`
+	StationList []metadataStation `json:"stationList"`
+}
+
+type metadataStation struct {
+	ID             string          `json:"id"`
+	Name           string          `json:"name"`
+	Lat            flexibleFloat64 `json:"lat"`
+	Lng            flexibleFloat64 `json:"lng"`
+	CurrBin        flexibleInt     `json:"currbin"`
+	Depth          flexibleFloat64 `json:"depth"`
+	DepthType      string          `json:"depthType"`
+	PredictionType string          `json:"type"`
+}
+
+type flexibleFloat64 float64
+
+func (f *flexibleFloat64) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" || string(data) == `""` {
+		*f = 0
+		return nil
+	}
+
+	var number json.Number
+	if err := json.Unmarshal(data, &number); err == nil {
+		v, err := number.Float64()
+		if err == nil {
+			*f = flexibleFloat64(v)
+			return nil
+		}
+	}
+
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		v, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+		if err != nil {
+			return err
+		}
+		*f = flexibleFloat64(v)
+		return nil
+	}
+
+	return fmt.Errorf("cannot parse %q as number", string(data))
+}
+
+type flexibleInt int
+
+func (i *flexibleInt) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" || string(data) == `""` {
+		*i = 0
+		return nil
+	}
+
+	var n int
+	if err := json.Unmarshal(data, &n); err == nil {
+		*i = flexibleInt(n)
+		return nil
+	}
+
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		v, err := strconv.Atoi(strings.TrimSpace(s))
+		if err != nil {
+			return err
+		}
+		*i = flexibleInt(v)
+		return nil
+	}
+
+	return fmt.Errorf("cannot parse %q as integer", string(data))
+}
+
+var currentStationCache = struct {
+	sync.RWMutex
+	stations []CurrentStation
+	loadedAt time.Time
+}{}
+
 func BuildCurrentReport(
 	windStationID string,
+	currentStationOverride string,
+	currentBinOverride int,
 	date time.Time,
 	startHour int,
 	endHour int,
@@ -112,41 +216,116 @@ func BuildCurrentReport(
 		return nil, err
 	}
 
-	currentStations, err := fetchCurrentStations()
+	currentStations, err := getCurrentPredictionStations()
 	if err != nil {
 		return nil, err
 	}
 	if len(currentStations) == 0 {
-		return nil, fmt.Errorf("NOAA metadata returned no current stations")
+		return nil, fmt.Errorf("NOAA metadata returned no current prediction stations")
 	}
 
-	for i := range currentStations {
-		currentStations[i].DistanceNM = distanceNM(
+	// Work on a request-local copy because DistanceNM depends on the selected
+	// wind station and must not mutate the shared cache.
+	candidates := append([]CurrentStation(nil), currentStations...)
+
+	for i := range candidates {
+		candidates[i].DistanceNM = distanceNM(
 			windStation.Lat,
 			windStation.Lon,
-			currentStations[i].Lat,
-			currentStations[i].Lon,
+			candidates[i].Lat,
+			candidates[i].Lon,
 		)
+
+		candidates[i].SelectionScore =
+			currentStationSelectionScore(
+				candidates[i],
+			)
 	}
 
 	sort.Slice(
-		currentStations,
+		candidates,
 		func(i, j int) bool {
-			return currentStations[i].DistanceNM <
-				currentStations[j].DistanceNM
+			if candidates[i].SelectionScore ==
+				candidates[j].SelectionScore {
+				return candidates[i].DistanceNM <
+					candidates[j].DistanceNM
+			}
+
+			return candidates[i].SelectionScore <
+				candidates[j].SelectionScore
 		},
 	)
 
-	currentStation := currentStations[0]
+	if debugCurrentStationsEnabled() {
+		printCurrentStationCandidates(
+			windStation,
+			candidates,
+			10,
+		)
+	}
+
+	// Automatic mode uses a shallow/open-water heuristic rather than raw
+	// nearest-distance selection. Explicit station/bin overrides still win.
+	currentStation := candidates[0]
+
+	if strings.TrimSpace(currentStationOverride) != "" {
+		overrideID := strings.ToUpper(
+			strings.TrimSpace(currentStationOverride),
+		)
+
+		var matched *CurrentStation
+
+		for i := range candidates {
+			if !strings.EqualFold(candidates[i].ID, overrideID) {
+				continue
+			}
+
+			if currentBinOverride > 0 &&
+				candidates[i].CurrBin != currentBinOverride {
+				continue
+			}
+
+			copy := candidates[i]
+			matched = &copy
+			break
+		}
+
+		if matched == nil {
+			if currentBinOverride > 0 {
+				return nil, fmt.Errorf(
+					"NOAA current prediction station %s bin %d not found in metadata",
+					overrideID,
+					currentBinOverride,
+				)
+			}
+
+			return nil, fmt.Errorf(
+				"NOAA current prediction station %s not found in metadata",
+				overrideID,
+			)
+		}
+
+		currentStation = *matched
+	}
+
+	if currentBinOverride > 0 {
+		currentStation.CurrBin = currentBinOverride
+	}
 
 	dateString := date.In(loc).Format("20060102")
 
 	predictions, units, err := fetchCurrentPredictions(
 		currentStation.ID,
+		currentStation.CurrBin,
 		dateString,
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf(
+			"current prediction failed for %s bin %d: %w",
+			currentStation.ID,
+			currentStation.CurrBin,
+			err,
+		)
 	}
 
 	timed, err := parseCurrentPredictions(predictions, loc)
@@ -197,9 +376,16 @@ func BuildCurrentReport(
 		events = append(events, currentEvent)
 	}
 
+	selectionMode := "automatic-scored"
+	if strings.TrimSpace(currentStationOverride) != "" ||
+		currentBinOverride > 0 {
+		selectionMode = "override"
+	}
+
 	report := &CurrentReport{
 		WindReference:  &windStation,
 		CurrentStation: &currentStation,
+		SelectionMode:  selectionMode,
 		Start:          start,
 		End:            end,
 		Outlook:        outlook,
@@ -210,6 +396,13 @@ func BuildCurrentReport(
 	if len(relevant) > 0 {
 		report.Depth = relevant[0].Prediction.Depth
 		report.Bin = relevant[0].Prediction.Bin
+	} else {
+		if currentStation.Depth > 0 {
+			report.Depth = strconv.FormatFloat(currentStation.Depth, 'f', -1, 64)
+		}
+		if currentStation.CurrBin > 0 {
+			report.Bin = strconv.Itoa(currentStation.CurrBin)
+		}
 	}
 
 	return report, nil
@@ -233,6 +426,28 @@ func writeCurrentText(
 		return
 	}
 
+	if report.SelectionMode != "" {
+		fmt.Fprintf(
+			w,
+			"Selection: %s.\n",
+			report.SelectionMode,
+		)
+	}
+
+	if !report.Start.IsZero() && !report.End.IsZero() {
+		fmt.Fprintf(
+			w,
+			"Prediction date: %s.\n",
+			report.Start.Format("Mon Jan 2, 2006"),
+		)
+		fmt.Fprintf(
+			w,
+			"Sailing window: %s–%s.\n",
+			report.Start.Format("3:04 PM"),
+			report.End.Format("3:04 PM"),
+		)
+	}
+
 	if report.CurrentStation != nil {
 		fmt.Fprintf(
 			w,
@@ -242,14 +457,37 @@ func writeCurrentText(
 			report.CurrentStation.DistanceNM,
 			report.WindReference.ID,
 		)
+
+		if report.CurrentStation.PredictionType != "" {
+			fmt.Fprintf(
+				w,
+				"Prediction station type: %s.\n",
+				currentPredictionTypeName(report.CurrentStation.PredictionType),
+			)
+		}
 	}
 
 	if report.Depth != "" {
 		fmt.Fprintf(
 			w,
-			"Prediction depth: %s ft.\n",
+			"Prediction depth: %s ft",
 			report.Depth,
 		)
+
+		if report.CurrentStation != nil &&
+			report.CurrentStation.DepthType != "" {
+			fmt.Fprintf(
+				w,
+				" (%s)",
+				currentDepthTypeName(report.CurrentStation.DepthType),
+			)
+		}
+
+		fmt.Fprintln(w, ".")
+	}
+
+	if report.Bin != "" {
+		fmt.Fprintf(w, "Prediction bin: %s.\n", report.Bin)
 	}
 
 	for _, line := range report.Outlook {
@@ -330,13 +568,50 @@ func fetchNDBCStation(stationID string) (NDBCStation, error) {
 	)
 }
 
-func fetchCurrentStations() ([]CurrentStation, error) {
-	client := &http.Client{Timeout: 15 * time.Second}
+// getCurrentPredictionStations returns a cached copy of NOAA's
+// currentpredictions catalog, refreshing it at most once per cache TTL.
+func getCurrentPredictionStations() ([]CurrentStation, error) {
+	currentStationCache.RLock()
+	if len(currentStationCache.stations) > 0 &&
+		time.Since(currentStationCache.loadedAt) < currentMetadataCacheTTL {
+		result := append([]CurrentStation(nil), currentStationCache.stations...)
+		currentStationCache.RUnlock()
+		return result, nil
+	}
+	currentStationCache.RUnlock()
+
+	currentStationCache.Lock()
+	defer currentStationCache.Unlock()
+
+	// Another request may have populated the cache while we waited for the lock.
+	if len(currentStationCache.stations) > 0 &&
+		time.Since(currentStationCache.loadedAt) < currentMetadataCacheTTL {
+		return append([]CurrentStation(nil), currentStationCache.stations...), nil
+	}
+
+	stations, err := fetchCurrentPredictionStations()
+	if err != nil {
+		// If a stale cache exists, prefer stale metadata over breaking the entire
+		// sailing report because NOAA MDAPI is temporarily unavailable.
+		if len(currentStationCache.stations) > 0 {
+			return append([]CurrentStation(nil), currentStationCache.stations...), nil
+		}
+		return nil, err
+	}
+
+	currentStationCache.stations = append([]CurrentStation(nil), stations...)
+	currentStationCache.loadedAt = time.Now()
+
+	return append([]CurrentStation(nil), stations...), nil
+}
+
+func fetchCurrentPredictionStations() ([]CurrentStation, error) {
+	client := &http.Client{Timeout: 20 * time.Second}
 
 	resp, err := client.Get(currentMetadataURL)
 	if err != nil {
 		return nil, fmt.Errorf(
-			"NOAA current metadata request failed: %w",
+			"NOAA current-prediction metadata request failed: %w",
 			err,
 		)
 	}
@@ -344,60 +619,293 @@ func fetchCurrentStations() ([]CurrentStation, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf(
-			"NOAA current metadata returned HTTP %d",
+			"NOAA current-prediction metadata returned HTTP %d",
 			resp.StatusCode,
 		)
 	}
 
-	var raw map[string]interface{}
+	var raw currentMetadataResponse
 
 	decoder := json.NewDecoder(resp.Body)
 	decoder.UseNumber()
 
 	if err := decoder.Decode(&raw); err != nil {
-		return nil, err
-	}
-
-	rawStations, ok := raw["stations"].([]interface{})
-	if !ok {
 		return nil, fmt.Errorf(
-			"NOAA metadata response did not contain stations",
+			"unable to decode NOAA current-prediction metadata: %w",
+			err,
 		)
 	}
 
-	var stations []CurrentStation
+	records := raw.Stations
+	if len(records) == 0 {
+		records = raw.StationList
+	}
 
-	for _, item := range rawStations {
-		record, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
+	if len(records) == 0 {
+		return nil, fmt.Errorf(
+			"NOAA current-prediction metadata contained no stations",
+		)
+	}
 
-		id := stringValue(record["id"])
-		name := stringValue(record["name"])
-		lat, latOK := floatValue(record["lat"])
-		lon, lonOK := floatValue(record["lng"])
+	stations := make([]CurrentStation, 0, len(records))
 
-		if id == "" || !latOK || !lonOK {
+	for _, record := range records {
+		id := strings.TrimSpace(record.ID)
+		name := strings.TrimSpace(record.Name)
+		lat := float64(record.Lat)
+		lon := float64(record.Lng)
+
+		// Lat/lon of 0,0 is not a useful marine station and usually means
+		// incomplete metadata. Keep legitimate zero latitude or longitude
+		// stations, but reject an all-zero coordinate pair.
+		if id == "" || (lat == 0 && lon == 0) {
 			continue
 		}
 
 		stations = append(
 			stations,
 			CurrentStation{
-				ID:   id,
-				Name: name,
-				Lat:  lat,
-				Lon:  lon,
+				ID:             id,
+				Name:           name,
+				Lat:            lat,
+				Lon:            lon,
+				CurrBin:        int(record.CurrBin),
+				Depth:          float64(record.Depth),
+				DepthType:      strings.ToUpper(strings.TrimSpace(record.DepthType)),
+				PredictionType: strings.ToUpper(strings.TrimSpace(record.PredictionType)),
 			},
+		)
+	}
+
+	if len(stations) == 0 {
+		return nil, fmt.Errorf(
+			"NOAA current-prediction metadata had no usable station records",
 		)
 	}
 
 	return stations, nil
 }
 
+// currentStationSelectionScore ranks NOAA current-prediction candidates.
+//
+// Lower scores are better.
+//
+// The goal is not to encode specific station IDs. Instead, this heuristic
+// favors the sort of current prediction useful to a small-boat sailor:
+//
+//   - nearby
+//   - harmonic/reference station
+//   - shallow prediction depth, centered around about 6 ft
+//   - open-water / point locations rather than narrow sloughs, creeks,
+//     rivers, bridges, channels, or entrances
+//
+// This is intentionally transparent and tunable. The explicit
+// current_station/bin override remains available whenever local knowledge
+// should take precedence over the automatic heuristic.
+func currentStationSelectionScore(
+	station CurrentStation,
+) float64 {
+	score := station.DistanceNM
+
+	// Prefer harmonic/reference prediction stations over subordinate
+	// stations because they carry direct harmonic predictions for their
+	// location/depth.
+	switch strings.ToUpper(
+		strings.TrimSpace(
+			station.PredictionType,
+		),
+	) {
+	case "H":
+		// No penalty.
+	case "S":
+		score += 3.0
+	case "W":
+		score += 4.0
+	default:
+		score += 1.0
+	}
+
+	// Prefer shallow predictions around 6 ft, roughly matching the
+	// near-surface current depth BASK uses at Simmons Point.
+	if station.Depth > 0 {
+		score += math.Abs(station.Depth-6.0) * 0.15
+	} else {
+		score += 1.0
+	}
+
+	// Avoid automatically selecting a nearby but hydrodynamically narrow
+	// feature when the sailing area is broader water. These are generic
+	// location-type penalties, not station-ID mappings.
+	name := strings.ToLower(station.Name)
+
+	narrowFeaturePenalties := map[string]float64{
+		"slough":   2.0,
+		"creek":    2.0,
+		"river":    2.0,
+		"bridge":   1.25,
+		"channel":  1.25,
+		"entrance": 0.75,
+	}
+
+	for word, penalty := range narrowFeaturePenalties {
+		if strings.Contains(name, word) {
+			score += penalty
+		}
+	}
+
+	return score
+}
+
+func debugCurrentStationsEnabled() bool {
+	value := strings.ToLower(
+		strings.TrimSpace(
+			os.Getenv("DEBUG_CURRENT_STATIONS"),
+		),
+	)
+
+	switch value {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func printCurrentStationCandidates(
+	wind NDBCStation,
+	candidates []CurrentStation,
+	limit int,
+) {
+	if limit <= 0 || limit > len(candidates) {
+		limit = len(candidates)
+	}
+
+	fmt.Fprintf(
+		os.Stderr,
+		"\nNEAREST NOAA CURRENT-PREDICTION CANDIDATES TO %s — %s\n",
+		wind.ID,
+		wind.Name,
+	)
+	fmt.Fprintln(
+		os.Stderr,
+		"--------------------------------------------------------------------------------",
+	)
+	fmt.Fprintf(
+		os.Stderr,
+		"%-3s %-14s %-34s %8s %8s %6s %9s %-14s %-10s\n",
+		"#",
+		"ID",
+		"Name",
+		"Dist",
+		"Score",
+		"Bin",
+		"Depth",
+		"DepthType",
+		"Type",
+	)
+
+	for i := 0; i < limit; i++ {
+		s := candidates[i]
+
+		fmt.Fprintf(
+			os.Stderr,
+			"%-3d %-14s %-34.34s %6.2fNM %8.2f %6d %7.1fft %-14s %-10s\n",
+			i+1,
+			s.ID,
+			s.Name,
+			s.DistanceNM,
+			s.SelectionScore,
+			s.CurrBin,
+			s.Depth,
+			currentDepthTypeName(s.DepthType),
+			currentPredictionTypeName(s.PredictionType),
+		)
+	}
+
+	fmt.Fprintln(
+		os.Stderr,
+		"--------------------------------------------------------------------------------",
+	)
+
+	// Print every Simmons Point / SFB1325 metadata row. NOAA may publish
+	// multiple prediction bins/depths under the same station ID. BASK's
+	// reference is SFB1325_9, so seeing all rows lets us verify exactly
+	// which NOAA currbin/depth corresponds to that prediction.
+	fmt.Fprintln(os.Stderr, "ALL SFB1325 / SIMMONS POINT CANDIDATES")
+	fmt.Fprintln(
+		os.Stderr,
+		"--------------------------------------------------------------------------------",
+	)
+
+	foundSimmons := false
+
+	for _, s := range candidates {
+		id := strings.ToUpper(strings.TrimSpace(s.ID))
+		name := strings.ToLower(strings.TrimSpace(s.Name))
+
+		if id != "SFB1325" &&
+			!strings.Contains(id, "SFB1325_") &&
+			!strings.Contains(name, "simmons point") {
+			continue
+		}
+
+		foundSimmons = true
+
+		compositeID := s.ID
+		if s.CurrBin > 0 &&
+			!strings.HasSuffix(
+				strings.ToUpper(compositeID),
+				fmt.Sprintf("_%d", s.CurrBin),
+			) {
+			compositeID = fmt.Sprintf("%s_%d", s.ID, s.CurrBin)
+		}
+
+		fmt.Fprintf(
+			os.Stderr,
+			"ID=%-12s NOAA_ID=%-14s distance=%5.2fNM score=%5.2f bin=%-3d depth=%5.1fft depthType=%-18s type=%s name=%q\n",
+			s.ID,
+			compositeID,
+			s.DistanceNM,
+			s.SelectionScore,
+			s.CurrBin,
+			s.Depth,
+			currentDepthTypeName(s.DepthType),
+			currentPredictionTypeName(s.PredictionType),
+			s.Name,
+		)
+	}
+
+	if !foundSimmons {
+		fmt.Fprintln(
+			os.Stderr,
+			"No SFB1325 / Simmons Point rows were found in the NOAA currentpredictions metadata cache.",
+		)
+	}
+
+	fmt.Fprintln(
+		os.Stderr,
+		"--------------------------------------------------------------------------------",
+	)
+	fmt.Fprintln(os.Stderr)
+}
+
+// dataGetterStationID handles composite metadata labels such as SFB1325_9.
+// NOAA's Data Retrieval API expects the station portion and bin separately.
+func dataGetterStationID(id string) string {
+	id = strings.TrimSpace(id)
+
+	if cut := strings.LastIndex(id, "_"); cut > 0 && cut < len(id)-1 {
+		if _, err := strconv.Atoi(id[cut+1:]); err == nil {
+			return id[:cut]
+		}
+	}
+
+	return id
+}
+
 func fetchCurrentPredictions(
 	station string,
+	bin int,
 	date string,
 ) ([]CurrentPrediction, string, error) {
 	params := url.Values{}
@@ -406,11 +914,15 @@ func fetchCurrentPredictions(
 	params.Set("application", "pittsburg-saildata")
 	params.Set("begin_date", date)
 	params.Set("end_date", date)
-	params.Set("station", station)
+	params.Set("station", dataGetterStationID(station))
 	params.Set("time_zone", "lst_ldt")
 	params.Set("units", "english")
 	params.Set("interval", "max_slack")
 	params.Set("format", "json")
+
+	if bin > 0 {
+		params.Set("bin", strconv.Itoa(bin))
+	}
 
 	requestURL := currentDataURL + "?" + params.Encode()
 
@@ -442,9 +954,43 @@ func fetchCurrentPredictions(
 		)
 	}
 
+	if len(data.CurrentPredictions.CP) == 0 {
+		return nil, "", fmt.Errorf(
+			"NOAA returned no current predictions for station %s bin %d",
+			station,
+			bin,
+		)
+	}
+
 	return data.CurrentPredictions.CP,
 		data.CurrentPredictions.Units,
 		nil
+}
+
+func currentPredictionTypeName(value string) string {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "H":
+		return "harmonic/reference"
+	case "S":
+		return "subordinate"
+	case "W":
+		return "weak/variable"
+	default:
+		return value
+	}
+}
+
+func currentDepthTypeName(value string) string {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "S":
+		return "below surface"
+	case "B":
+		return "below chart datum"
+	case "U":
+		return "depth reference unknown"
+	default:
+		return value
+	}
 }
 
 func parseCurrentPredictions(

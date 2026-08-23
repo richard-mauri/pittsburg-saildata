@@ -69,6 +69,8 @@ func main() {
 	at := flag.String("at", "", `historical date/time, e.g. "2026-08-20 15:00"`)
 	port := flag.String("port", "8080", "HTTP server port")
 	station := flag.String("station", defaultWindStation, "NDBC wind station ID")
+	currentStation := flag.String("current-station", "", "NOAA current prediction station override, e.g. SFB1325")
+	currentBin := flag.Int("current-bin", 0, "NOAA current prediction bin override, e.g. 9")
 	startHour := flag.Int("start", defaultStartHour, "current-report sailing window start hour")
 	endHour := flag.Int("end", defaultEndHour, "current-report sailing window end hour")
 
@@ -100,11 +102,30 @@ func main() {
 		if err != nil {
 			fatal(err)
 		}
+
+		current, currentErr := BuildCurrentReport(
+			stationID,
+			*currentStation,
+			*currentBin,
+			report.Historical.Requested,
+			*startHour,
+			*endHour,
+			loc,
+		)
+		if currentErr != nil {
+			report.Current = &CurrentReport{
+				Error: currentErr.Error(),
+			}
+		} else {
+			report.Current = current
+		}
 	} else {
 		report = buildCurrentWindReport(stationID, observations, loc)
 
 		current, currentErr := BuildCurrentReport(
 			stationID,
+			*currentStation,
+			*currentBin,
 			report.ReportTime,
 			*startHour,
 			*endHour,
@@ -164,20 +185,44 @@ func runServer(
 		at := r.URL.Query().Get("at")
 		var report *SailingReport
 
+		startHour := queryInt(r, "start", defaultStart)
+		endHour := queryInt(r, "end", defaultEnd)
+
+		currentStation := strings.TrimSpace(
+			r.URL.Query().Get("current_station"),
+		)
+		currentBin := queryInt(r, "bin", 0)
+
 		if at != "" {
 			report, err = buildHistoricalWindReport(stationID, observations, at, loc)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-		} else {
-			report = buildCurrentWindReport(stationID, observations, loc)
-
-			startHour := queryInt(r, "start", defaultStart)
-			endHour := queryInt(r, "end", defaultEnd)
 
 			current, currentErr := BuildCurrentReport(
 				stationID,
+				currentStation,
+				currentBin,
+				report.Historical.Requested,
+				startHour,
+				endHour,
+				loc,
+			)
+			if currentErr != nil {
+				report.Current = &CurrentReport{
+					Error: currentErr.Error(),
+				}
+			} else {
+				report.Current = current
+			}
+		} else {
+			report = buildCurrentWindReport(stationID, observations, loc)
+
+			current, currentErr := BuildCurrentReport(
+				stationID,
+				currentStation,
+				currentBin,
 				report.ReportTime,
 				startHour,
 				endHour,
@@ -442,6 +487,12 @@ func writeTextReport(
 ) {
 	if report.Historical != nil {
 		writeHistoricalWindText(w, report, loc)
+
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "CURRENT")
+		fmt.Fprintln(w, "--------------------------------")
+		writeCurrentText(w, report.Current)
+
 		return
 	}
 
@@ -522,212 +573,84 @@ func writeBottomLineText(
 		return
 	}
 
-	now := report.ReportTime
-
-	if now.Before(report.Current.Start) {
-		phase := currentPhaseAtStart(report.Current)
-
-		if phase != "" {
-			fmt.Fprintf(
-				w,
-				"At %s, current is predicted to be %s.\n",
-				report.Current.Start.Format("3:04 PM"),
-				currentPhaseWord(phase),
-			)
+	// Determine the predicted current phase at the beginning of the
+	// configured sailing window from the event sequence.
+	startPhase := ""
+	for _, line := range report.Current.Outlook {
+		switch {
+		case strings.Contains(line, "starts on a flood"):
+			startPhase = "flooding"
+		case strings.Contains(line, "starts on an ebb"):
+			startPhase = "ebbing"
+		case strings.Contains(line, "begins close to slack"):
+			startPhase = "near slack"
 		}
-
-		if slack, next := firstSlackAndNextPhase(
-			report.Current,
-			report.Current.Start,
-		); slack != nil {
-			if next != nil {
-				fmt.Fprintf(
-					w,
-					"Slack is around %s, then the current turns to a %s %s.\n",
-					slack.Time.Format("3:04 PM"),
-					currentStrength(next.SpeedKT),
-					next.Type,
-				)
-			} else {
-				fmt.Fprintf(
-					w,
-					"Slack is around %s.\n",
-					slack.Time.Format("3:04 PM"),
-				)
-			}
+		if startPhase != "" {
+			break
 		}
-
-		printOverallCurrentAssessment(w, report.Current)
-		return
 	}
 
-	prev, next := surroundingCurrentEvents(
-		report.Current.Events,
-		now,
-	)
-
-	phase := currentPhaseNow(prev, next)
-
-	switch phase {
-	case "flood":
-		fmt.Fprintln(w, "Current is predicted to be flooding now.")
-	case "ebb":
-		fmt.Fprintln(w, "Current is predicted to be ebbing now.")
-	case "slack":
-		fmt.Fprintln(w, "Current is predicted to be near slack now.")
-	}
-
-	if next != nil {
-		switch next.Type {
-		case "slack":
-			fmt.Fprintf(
-				w,
-				"Next slack is around %s.\n",
-				next.Time.Format("3:04 PM"),
-			)
-		case "flood":
-			fmt.Fprintf(
-				w,
-				"Flood builds toward about %.1f kt around %s.\n",
-				next.SpeedKT,
-				next.Time.Format("3:04 PM"),
-			)
-		case "ebb":
-			fmt.Fprintf(
-				w,
-				"Ebb builds toward about %.1f kt around %s.\n",
-				next.SpeedKT,
-				next.Time.Format("3:04 PM"),
-			)
-		}
-	} else if prev != nil && prev.Type == "slack" {
+	if startPhase != "" {
 		fmt.Fprintf(
 			w,
-			"Slack was around %s.\n",
-			prev.Time.Format("3:04 PM"),
+			"At %s, current is predicted to be %s.\n",
+			report.Current.Start.Format("3:04 PM"),
+			startPhase,
 		)
 	}
 
-	printOverallCurrentAssessment(w, report.Current)
-}
-
-func currentPhaseWord(phase string) string {
-	switch phase {
-	case "flood":
-		return "flooding"
-	case "ebb":
-		return "ebbing"
-	case "slack":
-		return "near slack"
-	default:
-		return phase
-	}
-}
-
-func firstSlackAndNextPhase(
-	report *CurrentReport,
-	from time.Time,
-) (*CurrentEvent, *CurrentEvent) {
-	for i := range report.Events {
-		event := report.Events[i]
-
-		if event.Type != "slack" || event.Time.Before(from) {
+	// Find the first slack within the sailing window and the following phase.
+	for i, event := range report.Current.Events {
+		if event.Type != "slack" ||
+			event.Time.Before(report.Current.Start) ||
+			event.Time.After(report.Current.End) {
 			continue
 		}
 
-		slack := event
-		for j := i + 1; j < len(report.Events); j++ {
-			next := report.Events[j]
-			if next.Type == "flood" || next.Type == "ebb" {
-				copy := next
-				return &slack, &copy
+		var next *CurrentEvent
+		for j := i + 1; j < len(report.Current.Events); j++ {
+			if report.Current.Events[j].Type == "flood" ||
+				report.Current.Events[j].Type == "ebb" {
+				copy := report.Current.Events[j]
+				next = &copy
+				break
 			}
 		}
-		return &slack, nil
-	}
-	return nil, nil
-}
 
-func surroundingCurrentEvents(
-	events []CurrentEvent,
-	now time.Time,
-) (*CurrentEvent, *CurrentEvent) {
-	var previous *CurrentEvent
-	var next *CurrentEvent
-
-	for i := range events {
-		event := events[i]
-		if !event.Time.After(now) {
-			copy := event
-			previous = &copy
-			continue
+		if next != nil {
+			fmt.Fprintf(
+				w,
+				"Slack is around %s, then the current turns to a %s %s.\n",
+				event.Time.Format("3:04 PM"),
+				currentStrength(next.SpeedKT),
+				next.Type,
+			)
+		} else {
+			fmt.Fprintf(
+				w,
+				"Slack is around %s.\n",
+				event.Time.Format("3:04 PM"),
+			)
 		}
-		copy := event
-		next = &copy
 		break
 	}
-	return previous, next
-}
 
-func currentPhaseNow(
-	previous *CurrentEvent,
-	next *CurrentEvent,
-) string {
-	if previous != nil && previous.Type == "slack" {
-		if next != nil {
-			switch next.Type {
-			case "flood":
-				return "flood"
-			case "ebb":
-				return "ebb"
-			}
+	// End with a compact strength assessment.
+	if len(report.Current.Outlook) > 0 {
+		assessment := report.Current.Outlook[len(report.Current.Outlook)-1]
+
+		switch {
+		case strings.Contains(assessment, "relatively mild"):
+			fmt.Fprintln(w, "Overall, current should be relatively mild during the sailing window.")
+		case strings.Contains(assessment, "very light"):
+			fmt.Fprintln(w, "Overall, current should be very light during the sailing window.")
+		case strings.Contains(assessment, "moderate"):
+			fmt.Fprintln(w, "Overall, expect moderate current during the sailing window.")
+		case strings.Contains(assessment, "fairly strong"):
+			fmt.Fprintln(w, "Overall, expect fairly strong current during part of the sailing window.")
+		case strings.Contains(assessment, "strong"):
+			fmt.Fprintln(w, "Overall, expect strong current during part of the sailing window.")
 		}
-		return "slack"
-	}
-
-	if previous != nil {
-		switch previous.Type {
-		case "flood":
-			return "flood"
-		case "ebb":
-			return "ebb"
-		}
-	}
-
-	if next != nil {
-		switch next.Type {
-		case "flood":
-			return "flood"
-		case "ebb":
-			return "ebb"
-		case "slack":
-			return "slack"
-		}
-	}
-	return ""
-}
-
-func printOverallCurrentAssessment(
-	w io.Writer,
-	report *CurrentReport,
-) {
-	if report == nil || len(report.Outlook) == 0 {
-		return
-	}
-
-	assessment := report.Outlook[len(report.Outlook)-1]
-
-	switch {
-	case strings.Contains(assessment, "relatively mild"):
-		fmt.Fprintln(w, "Overall, current should be relatively mild during the sailing window.")
-	case strings.Contains(assessment, "very light"):
-		fmt.Fprintln(w, "Overall, current should be very light during the sailing window.")
-	case strings.Contains(assessment, "moderate"):
-		fmt.Fprintln(w, "Overall, expect moderate current during the sailing window.")
-	case strings.Contains(assessment, "fairly strong"):
-		fmt.Fprintln(w, "Overall, expect fairly strong current during part of the sailing window.")
-	case strings.Contains(assessment, "strong"):
-		fmt.Fprintln(w, "Overall, expect strong current during part of the sailing window.")
 	}
 }
 
@@ -745,12 +668,21 @@ Options:
   -station STATION
         NDBC wind station ID. Default: PSBC1
 
+  -current-station ID
+        Optional NOAA current prediction station override.
+        Example: SFB1325
+
+  -current-bin BIN
+        Optional NOAA current prediction bin override.
+        Example: 9
+
   -port PORT
         Local HTTP server port. Default: 8080
         Render's PORT environment variable takes precedence.
 
   -at DATETIME
-        Historical wind report, e.g.:
+        Historical wind report plus current predictions for the
+        same local date, e.g.:
           2026-08-20T15:00
           2026-08-20 15:00
 
@@ -770,7 +702,7 @@ Examples:
   Richmond-area combined report:
     ./sailing-go -station RCMC1
 
-  Historical wind report:
+  Historical wind + current report:
     ./sailing-go -at "2026-08-20T15:00"
 
   Start REST server:
@@ -781,6 +713,9 @@ Examples:
 
   Richmond report:
     curl -sS "http://localhost:8080/report?station=RCMC1"
+
+  Force Simmons Point current prediction for PSBC1:
+    curl -sS       "http://localhost:8080/report?station=PSBC1&current_station=SFB1325&bin=9"
 
   Change current window:
     curl -sS "http://localhost:8080/report?station=PSBC1&start=11&end=18"
