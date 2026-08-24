@@ -257,14 +257,17 @@ func BuildCurrentReport(
 	endHour int,
 	loc *time.Location,
 ) (*CurrentReport, error) {
-	if startHour < 0 || startHour > 23 {
-		return nil, fmt.Errorf("invalid current start hour %d", startHour)
-	}
-	if endHour < 1 || endHour > 24 {
-		return nil, fmt.Errorf("invalid current end hour %d", endHour)
-	}
-	if endHour <= startHour {
-		return nil, fmt.Errorf("current end hour must be later than start hour")
+	autoDaylight := startHour < 0 && endHour < 0
+	if !autoDaylight {
+		if startHour < 0 || startHour > 23 {
+			return nil, fmt.Errorf("invalid current start hour %d", startHour)
+		}
+		if endHour < 1 || endHour > 24 {
+			return nil, fmt.Errorf("invalid current end hour %d", endHour)
+		}
+		if endHour <= startHour {
+			return nil, fmt.Errorf("current end hour must be later than start hour")
+		}
 	}
 
 	windStation, err := fetchNDBCStation(windStationID)
@@ -389,12 +392,22 @@ func BuildCurrentReport(
 		return nil, err
 	}
 
-	start, end, err := currentWindow(
-		dateString,
-		startHour,
-		endHour,
-		loc,
-	)
+	var start, end time.Time
+	if autoDaylight {
+		start, end, err = daylightWindow(
+			date.In(loc),
+			windStation.Lat,
+			windStation.Lon,
+			loc,
+		)
+	} else {
+		start, end, err = currentWindow(
+			dateString,
+			startHour,
+			endHour,
+			loc,
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -518,7 +531,7 @@ func writeCurrentText(
 	}
 	if !report.Start.IsZero() && !report.End.IsZero() {
 		fmt.Fprintf(w, "Prediction date: %s.\n", report.Start.Format("Mon Jan 2, 2006"))
-		fmt.Fprintf(w, "Sailing window: %s–%s.\n",
+		fmt.Fprintf(w, "Conditions window: %s–%s.\n",
 			report.Start.Format("3:04 PM"),
 			report.End.Format("3:04 PM"))
 	}
@@ -1476,6 +1489,124 @@ func parseCurrentPredictions(
 	return result, nil
 }
 
+// daylightWindow calculates local sunrise and sunset for the report date
+// and wind-reference location. The standard 90.833-degree solar zenith
+// approximately accounts for refraction and the apparent radius of the Sun.
+// This keeps the default conditions window seasonal and works for historical
+// dates without another network dependency.
+func daylightWindow(
+	date time.Time,
+	lat float64,
+	lon float64,
+	loc *time.Location,
+) (time.Time, time.Time, error) {
+	riseUTC, okRise := solarEventUTC(date, lat, lon, true)
+	setUTC, okSet := solarEventUTC(date, lat, lon, false)
+	if !okRise || !okSet {
+		return time.Time{}, time.Time{},
+			fmt.Errorf("unable to calculate daylight for %.4f, %.4f", lat, lon)
+	}
+	rise := alignSolarEventToLocalDate(riseUTC, date, loc)
+	set := alignSolarEventToLocalDate(setUTC, date, loc)
+
+	if !set.After(rise) {
+		return time.Time{}, time.Time{},
+			fmt.Errorf(
+				"calculated sunset %s is not after sunrise %s",
+				set.Format(time.RFC3339),
+				rise.Format(time.RFC3339),
+			)
+	}
+	return rise, set, nil
+}
+
+func alignSolarEventToLocalDate(
+	eventUTC time.Time,
+	targetDate time.Time,
+	loc *time.Location,
+) time.Time {
+	event := eventUTC.In(loc)
+	targetY, targetM, targetD := targetDate.In(loc).Date()
+
+	// The sunrise/sunset algorithm returns a UTC hour normalized to 0–24.
+	// For western longitudes, local sunset commonly occurs after 00:00 UTC
+	// on the following UTC date. Normalize the result back to the intended
+	// local calendar day.
+	for {
+		y, m, d := event.Date()
+		if y == targetY && m == targetM && d == targetD {
+			return event
+		}
+
+		eventDate := time.Date(y, m, d, 12, 0, 0, 0, loc)
+		target := time.Date(targetY, targetM, targetD, 12, 0, 0, 0, loc)
+
+		if eventDate.Before(target) {
+			event = event.Add(24 * time.Hour)
+			continue
+		}
+		event = event.Add(-24 * time.Hour)
+	}
+}
+
+func solarEventUTC(date time.Time, lat, lon float64, sunrise bool) (time.Time, bool) {
+	const zenith = 90.833
+	y, m, d := date.Date()
+	n := date.YearDay()
+	lngHour := lon / 15.0
+
+	var t float64
+	if sunrise {
+		t = float64(n) + (6.0-lngHour)/24.0
+	} else {
+		t = float64(n) + (18.0-lngHour)/24.0
+	}
+
+	mAnom := 0.9856*t - 3.289
+	trueLong := mAnom +
+		1.916*math.Sin(degToRad(mAnom)) +
+		0.020*math.Sin(2*degToRad(mAnom)) +
+		282.634
+	trueLong = normalizeDegrees(trueLong)
+
+	ra := radToDeg(math.Atan(0.91764 * math.Tan(degToRad(trueLong))))
+	ra = normalizeDegrees(ra)
+	ra += math.Floor(trueLong/90.0)*90.0 - math.Floor(ra/90.0)*90.0
+	ra /= 15.0
+
+	sinDec := 0.39782 * math.Sin(degToRad(trueLong))
+	cosDec := math.Cos(math.Asin(sinDec))
+	cosH := (math.Cos(degToRad(zenith)) -
+		sinDec*math.Sin(degToRad(lat))) /
+		(cosDec * math.Cos(degToRad(lat)))
+	if cosH > 1 || cosH < -1 {
+		return time.Time{}, false
+	}
+
+	var h float64
+	if sunrise {
+		h = 360.0 - radToDeg(math.Acos(cosH))
+	} else {
+		h = radToDeg(math.Acos(cosH))
+	}
+	h /= 15.0
+
+	localMean := h + ra - 0.06571*t - 6.622
+	utcHours := math.Mod(localMean-lngHour+24.0, 24.0)
+	base := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+	return base.Add(time.Duration(utcHours * float64(time.Hour))), true
+}
+
+func degToRad(v float64) float64 { return v * math.Pi / 180.0 }
+func radToDeg(v float64) float64 { return v * 180.0 / math.Pi }
+func normalizeDegrees(v float64) float64 {
+	v = math.Mod(v, 360.0)
+	if v < 0 {
+		v += 360.0
+	}
+	return v
+}
+
 func currentWindow(
 	date string,
 	startHour int,
@@ -1582,17 +1713,17 @@ func buildCurrentOutlook(
 	case "flood":
 		lines = append(
 			lines,
-			"The sailing window starts on a flood current.",
+			"The conditions window starts on a flood current.",
 		)
 	case "ebb":
 		lines = append(
 			lines,
-			"The sailing window starts on an ebb current.",
+			"The conditions window starts on an ebb current.",
 		)
 	case "slack":
 		lines = append(
 			lines,
-			"The sailing window begins close to slack water.",
+			"The conditions window begins close to slack water.",
 		)
 	}
 
@@ -1784,11 +1915,11 @@ func currentOverallAssessment(
 	}
 
 	if peak == nil {
-		return "No maximum-current event falls inside the sailing window."
+		return "No maximum-current event falls inside the conditions window."
 	}
 
 	return fmt.Sprintf(
-		"Peak predicted current during the sailing window is %.1f kt (%s) around %s.",
+		"Peak predicted current during the conditions window is %.1f kt (%s) around %s.",
 		absFloat(peak.Prediction.Velocity),
 		peak.Prediction.Type,
 		peak.Time.Format("3:04 PM"),

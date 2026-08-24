@@ -1,145 +1,128 @@
-# Mauri's Sailing Outlook
+# Mauri's Bay & Delta Conditions
 
-A Go service that combines NOAA/NDBC wind observations with NOAA CO-OPS
-current predictions to produce a sailing-oriented outlook for the San
-Francisco Bay and Delta.
+A Go service for exploring **wind and predicted currents** around the
+San Francisco Bay and Delta. It is intended for sailors, paddlers,
+kayakers, rowers, and other people planning time on the water.
 
-The project began as a command-line utility centered on Pittsburg/Suisun
-Bay. It now includes a branded HTML report, automatic wind-station
-selection from latitude/longitude, nearby-station browsing, current
-comparisons, and an interactive map for choosing where you plan to sail.
+## Try it
 
-## Highlights
+Welcome page:
 
--   NOAA/NDBC real-time wind observations
--   NOAA CO-OPS current predictions
--   Default wind station: **PSBC1 --- Pittsburg (Suisun Bay), CA**
--   Interactive Bay/Delta map chooser
--   Click a sailing location instead of knowing a station ID
--   Automatic nearest-usable wind-station selection from decimal `lat` /
-    `lon`
--   Concurrent probing of nearby meteorological stations
--   Nearby wind-station browser with clickable station choices
--   `AUTO` and `SELECTED` station states when comparing stations
--   Current-event timeline and smooth current graph
--   Relative comparison of today's ebb/flood maxima
--   Comparison with recent current cycles
--   Branded HTML output: **Mauri's Sailing Outlook**
--   Plain-text and JSON API output
--   Historical wind reports
--   Compact output for assistants and integrations
--   Render deployment
+``` text
+https://pittsburg-saildata.onrender.com/welcome
+```
 
-## Try the web interface
-
-Production service:
+Conditions page:
 
 ``` text
 https://pittsburg-saildata.onrender.com/report?format=html
 ```
 
-The HTML report includes a **Choose Sailing Location** map.
+The easiest workflow is: click where you expect to be on the map, click
+**Show Conditions**, read the Bottom Line, then explore the wind-station
+choices and current details if useful.
 
-1.  Click approximately where you plan to sail.
-2.  The map shows the selected latitude/longitude.
-3.  Click **Generate Sailing Outlook**.
-4.  The service finds a nearby NDBC station with usable recent wind and
-    generates the report.
-5.  Use **Nearby Wind Stations** to compare or manually select another
-    station.
+## Daylight-aware conditions window
 
-The map also shows the selected sailing location, wind observation
-station, and current prediction station when those locations are
-available.
+The default current analysis now covers **local sunrise through local
+sunset** for the report date.
 
-The map UI uses Leaflet and OpenStreetMap tiles in the browser. The Go
-server does not host map tiles.
+Sunrise and sunset are calculated astronomically by the Go service using
+the location of the selected wind-reference station. Because that
+station is chosen near the requested map point, this provides a local
+daylight window without another external API.
 
-## How location-based wind selection works
+The daylight window automatically changes with:
 
-A request such as:
+-   the season and changing day length;
+-   the report date;
+-   the geographic area being examined;
+-   historical dates supplied with `at`.
+
+The HTML Current card identifies the default as:
 
 ``` text
-/report?lat=38.042&lon=-121.838&format=html
+Daylight window · sunrise to sunset
+6:31 AM → 7:49 PM
 ```
 
-uses decimal latitude/longitude as the sailing location.
+(the actual times depend on date and location).
 
-The service loads active NDBC station metadata, considers nearby
-meteorological-capable stations, sorts them by distance, probes them
-concurrently for usable recent wind, and selects the nearest usable
-station. The resulting wind reference is then used to build the sailing
-outlook and select current data.
+### Custom time windows
 
-Wind-station diagnostics can be exposed with `debug_wind=1`:
+Existing `start` and `end` overrides are preserved. Supplying them
+replaces the daylight default:
 
-``` bash
-curl -sS "http://localhost:8080/report?lat=37.9105&lon=-122.3602&debug_wind=1"
+``` text
+/report?lat=38.042&lon=-121.838&start=7&end=10&format=html
 ```
 
-The automatic search is bounded so a difficult inland coordinate does
-not make the report wait through a long sequence of failed station
-requests.
+The command-line `-start` and `-end` flags work the same way. If both
+are omitted, sunrise-to-sunset is used.
 
-## Nearby Wind Stations
+## Wind
 
-HTML reports include a clickable **Nearby Wind Stations** table.
+Wind observations come from NOAA's National Data Buoy Center (NDBC).
 
-When a report started with a `lat` / `lon`, that sailing location
-remains the geographic anchor while you compare stations.
+For a map-selected latitude/longitude, the service caches active
+meteorological station metadata, sorts candidates by distance, probes
+nearby stations concurrently, and chooses the nearest station with
+recent usable wind.
 
-When browsing without a supplied location, the selected station acts as
-the browsing anchor. The default page therefore starts at PSBC1 and lets
-you explore neighboring stations across the Bay and Delta.
+The **Nearby Wind Stations** table lets you explore alternatives. `AUTO`
+is the automatic choice and `SELECTED` is the station currently driving
+the report.
 
-`AUTO` identifies the station the automatic resolver prefers. `SELECTED`
-identifies the station currently driving the report.
+With no location supplied, the service retains **PSBC1 --- Pittsburg
+(Suisun Bay), CA** as the default browsing anchor.
 
-## Data sources
+## Current
 
-### Wind
+Current predictions come from NOAA CO-OPS.
 
-Wind observations come from the NOAA National Data Buoy Center (NDBC),
-primarily its `realtime2` station data. Wind speed and gust are
-converted to knots.
+The report intentionally describes **current**, not tide height. It
+includes ebb, flood, slack, maximum predicted speeds, relative
+comparisons between current maxima, recent-cycle context, and a smooth
+current graph.
 
-### Current
+The current graph shades the active **conditions window**. By default
+that shaded interval is sunrise-to-sunset.
 
-Current predictions come from NOAA CO-OPS current-prediction data.
+## Interactive map
 
-The report intentionally calls these **current** predictions rather than
-tide data. It reports current events and speeds, including maximum ebb,
-maximum flood, and slack-water transitions when available.
+The HTML report includes a Leaflet/OpenStreetMap chooser. Clicking the
+map generates decimal `lat` / `lon` parameters and feeds the existing
+wind/current resolution logic.
 
-Current strength is described primarily through measured speeds and
-relative comparisons rather than potentially misleading absolute
-adjectives.
+The map can show the selected location, wind observation station, and
+current prediction station.
 
-## Build
+## Welcome page
+
+`/welcome` is the nontechnical introduction. It includes a short
+explanation, Q&A, a direct link into the conditions map, and GitHub
+links for Star, Watch, Issues, and Pull Requests.
+
+## Build and run
 
 ``` bash
 go build -o sailing-go .
-```
-
-Run the default command-line report:
-
-``` bash
-./sailing-go
-```
-
-Start the REST server:
-
-``` bash
 ./sailing-go -server
 ```
 
 Then open:
 
 ``` text
+http://127.0.0.1:8080/welcome
+```
+
+or:
+
+``` text
 http://127.0.0.1:8080/report?format=html
 ```
 
-## REST API examples
+## API examples
 
 Default text report:
 
@@ -147,153 +130,68 @@ Default text report:
 curl -sS "http://localhost:8080/report"
 ```
 
-Explicit wind station:
-
-``` bash
-curl -sS "http://localhost:8080/report?station=RCMC1"
-```
-
-Automatic selection from a sailing location:
-
-``` bash
-curl -sS "http://localhost:8080/report?lat=37.9105&lon=-122.3602"
-```
-
-HTML:
+Location-based HTML report:
 
 ``` text
 http://127.0.0.1:8080/report?lat=37.9105&lon=-122.3602&format=html
 ```
 
-Diagnostics:
+Custom conditions window:
+
+``` bash
+curl -sS "http://localhost:8080/report?lat=37.9105&lon=-122.3602&start=7&end=10"
+```
+
+Wind-selection diagnostics:
 
 ``` bash
 curl -sS "http://localhost:8080/report?lat=37.9105&lon=-122.3602&debug_wind=1"
 ```
 
-Current-station override:
+JSON:
 
 ``` bash
-curl -sS "http://localhost:8080/report?station=PSBC1&current_station=SFB1325&bin=9"
+curl -sS "http://localhost:8080/report?lat=37.9105&lon=-122.3602&format=json"
 ```
-
-Change sailing window:
-
-``` bash
-curl -sS "http://localhost:8080/report?station=PSBC1&start=11&end=18"
-```
-
-Full JSON:
-
-``` bash
-curl -sS "http://localhost:8080/report?station=PSBC1&format=json"
-```
-
-Compact text:
-
-``` bash
-curl -sS "http://localhost:8080/report?station=PSBC1&compact=1"
-```
-
-Compact JSON:
-
-``` bash
-curl -sS "http://localhost:8080/report?station=PSBC1&format=json&compact=1"
-```
-
-`Accept: application/json` is also supported.
 
 ## Important query parameters
 
   -----------------------------------------------------------------------
   Parameter                           Purpose
   ----------------------------------- -----------------------------------
-  `format=html`                       Branded interactive HTML report
+  `format=html`                       Interactive HTML report
 
-  `format=json`                       JSON report
+  `format=json`                       JSON output
 
-  `station=ID`                        Explicit NDBC wind-station override
+  `lat`, `lon`                        Decimal location
 
-  `lat=...&lon=...`                   Decimal sailing location for
-                                      automatic station selection
+  `station`                           Explicit NDBC wind-station override
 
-  `debug_wind=1`                      Wind-station candidate diagnostics
+  `start`, `end`                      Optional custom conditions-window
+                                      hours; omit both for
+                                      sunrise-to-sunset
 
-  `current_station=ID`                NOAA current-prediction station
-                                      override
+  `current_station`                   NOAA current-station override
 
-  `bin=N`                             Current-prediction bin override
+  `bin`                               NOAA current-bin override
 
-  `start=HOUR`                        Sailing-window start hour
+  `debug_wind=1`                      Wind-station diagnostics
 
-  `end=HOUR`                          Sailing-window end hour
-
-  `at=DATETIME`                       Historical report time
+  `at`                                Historical report date/time
 
   `compact=1`                         Compact output
   -----------------------------------------------------------------------
 
-Latitude and longitude are intentionally decimal degrees.
+## Data and safety
 
-## HTML report
+This is a conditions-planning and exploration tool, **not a navigation
+system**. Wind observations can be delayed, missing, or unrepresentative
+of a particular piece of water. Current predictions are predictions
+rather than measurements at your boat. Use appropriate forecasts,
+observations, charts, local knowledge, and judgment.
 
-The HTML version currently includes:
-
--   branded sailing photograph and social-preview metadata
--   Bottom Line summary
--   wind direction, speed, gust, and observation time
--   selected wind-station context
--   interactive sailing-location map
--   nearby clickable wind stations
--   current prediction station
--   current events with predicted speeds
--   relative ebb/flood comparisons
--   smooth current-speed graph
--   full text report for reference
-
-## Deployment
-
-The service is deployed from GitHub to Render. Render supplies the
-`PORT` environment variable, which the server honors.
-
-Production:
+## Project
 
 ``` text
-https://pittsburg-saildata.onrender.com
+https://github.com/richard-mauri/pittsburg-saildata
 ```
-
-Typical workflow:
-
-``` text
-edit
-  ↓
-gofmt
-  ↓
-go build
-  ↓
-git diff
-  ↓
-git commit
-  ↓
-git push
-  ↓
-GitHub
-  ↓
-Render automatic deployment
-```
-
-## Notes
-
-This is a sailing-planning utility, **not a navigation system**.
-Observations and predictions can be delayed, missing, geographically
-unrepresentative, or affected by local station exposure. Use appropriate
-marine forecasts, observations, charts, and seamanship judgment when
-making sailing decisions.
-
-Map locations are a convenient way to choose the area of interest;
-clicking a point does not imply that the point is navigable water or
-safe for sailing.
-
-## Author
-
-Personal sailing-data project by Richard Mauri.
