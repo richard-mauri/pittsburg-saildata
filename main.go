@@ -1750,29 +1750,17 @@ func writeBottomLineText(
 	report *SailingReport,
 ) {
 	if report == nil || report.Latest == nil {
-		fmt.Fprintln(w, "Insufficient data for a combined sailing summary.")
+		fmt.Fprintln(w, "Insufficient data for a combined conditions summary.")
 		return
 	}
 
 	latest := report.Latest
-
 	if latest.GustKT > 0 {
-		fmt.Fprintf(
-			w,
-			"Latest wind at %s: %s %.0f kt, gusting %.0f kt.\n",
-			latest.Time.Format("3:04 PM"),
-			latest.Direction,
-			latest.WindKT,
-			latest.GustKT,
-		)
+		fmt.Fprintf(w, "Latest wind at %s: %s %.0f kt, gusting %.0f kt.\n",
+			latest.Time.Format("3:04 PM"), latest.Direction, latest.WindKT, latest.GustKT)
 	} else {
-		fmt.Fprintf(
-			w,
-			"Latest wind at %s: %s %.0f kt.\n",
-			latest.Time.Format("3:04 PM"),
-			latest.Direction,
-			latest.WindKT,
-		)
+		fmt.Fprintf(w, "Latest wind at %s: %s %.0f kt.\n",
+			latest.Time.Format("3:04 PM"), latest.Direction, latest.WindKT)
 	}
 
 	if report.Current == nil || report.Current.Error != "" {
@@ -1780,42 +1768,53 @@ func writeBottomLineText(
 		return
 	}
 
-	// Determine the predicted current phase at the beginning of the
-	// configured sailing window from the event sequence.
-	startPhase := ""
-	for _, line := range report.Current.Outlook {
+	// Daylight is the context window; Bottom Line is oriented to report time.
+	// For historical reports ReportTime is the requested historical time.
+	reference := report.ReportTime
+	if reference.IsZero() {
+		reference = latest.Time
+	}
+
+	phaseTime := reference
+	if phaseTime.Before(report.Current.Start) {
+		phaseTime = report.Current.Start
+	}
+	if phaseTime.After(report.Current.End) {
+		phaseTime = report.Current.End
+	}
+
+	if phase := predictedCurrentPhaseAt(report.Current, phaseTime); phase != "" {
 		switch {
-		case strings.Contains(line, "starts on a flood"):
-			startPhase = "flooding"
-		case strings.Contains(line, "starts on an ebb"):
-			startPhase = "ebbing"
-		case strings.Contains(line, "begins close to slack"):
-			startPhase = "near slack"
-		}
-		if startPhase != "" {
-			break
+		case phaseTime.Equal(reference):
+			fmt.Fprintf(w, "At %s, current is predicted to be %s.\n",
+				phaseTime.Format("3:04 PM"), phase)
+		case reference.Before(report.Current.Start):
+			fmt.Fprintf(w, "At sunrise (%s), current is predicted to be %s.\n",
+				phaseTime.Format("3:04 PM"), phase)
+		default:
+			fmt.Fprintf(w, "At sunset (%s), current is predicted to be %s.\n",
+				phaseTime.Format("3:04 PM"), phase)
 		}
 	}
 
-	if startPhase != "" {
-		fmt.Fprintf(
-			w,
-			"At %s, current is predicted to be %s.\n",
-			report.Current.Start.Format("3:04 PM"),
-			startPhase,
-		)
+	// Report the next slack from now/requested time, not the first one after sunrise.
+	eventFloor := reference
+	if eventFloor.Before(report.Current.Start) {
+		eventFloor = report.Current.Start
 	}
 
-	// Find the first slack within the sailing window and the following phase.
 	for i, event := range report.Current.Events {
 		if event.Type != "slack" ||
-			event.Time.Before(report.Current.Start) ||
+			event.Time.Before(eventFloor) ||
 			event.Time.After(report.Current.End) {
 			continue
 		}
 
 		var next *CurrentEvent
 		for j := i + 1; j < len(report.Current.Events); j++ {
+			if report.Current.Events[j].Time.After(report.Current.End) {
+				break
+			}
 			if report.Current.Events[j].Type == "flood" ||
 				report.Current.Events[j].Type == "ebb" {
 				copy := report.Current.Events[j]
@@ -1825,25 +1824,15 @@ func writeBottomLineText(
 		}
 
 		if next != nil {
-			fmt.Fprintf(
-				w,
-				"Slack is around %s, then the current turns to a %s, peaking around %s at %.2f kt",
-				event.Time.Format("3:04 PM"),
-				next.Type,
-				next.Time.Format("3:04 PM"),
-				next.SpeedKT,
-			)
+			fmt.Fprintf(w,
+				"Next slack is around %s, then the current turns to a %s, peaking around %s at %.2f kt",
+				event.Time.Format("3:04 PM"), next.Type,
+				next.Time.Format("3:04 PM"), next.SpeedKT)
 
 			if comparison := findCurrentComparison(report.Current, *next); comparison != nil {
-				if comparison.TodayComparison != "" &&
-					comparison.OtherTodaySpeedKT > 0 {
-					fmt.Fprintf(
-						w,
-						", %s (other %s max: %.2f kt)",
-						comparison.TodayComparison,
-						next.Type,
-						comparison.OtherTodaySpeedKT,
-					)
+				if comparison.TodayComparison != "" && comparison.OtherTodaySpeedKT > 0 {
+					fmt.Fprintf(w, ", %s (other %s max: %.2f kt)",
+						comparison.TodayComparison, next.Type, comparison.OtherTodaySpeedKT)
 				}
 				if comparison.Prior7DayComparison != "" {
 					fmt.Fprintf(w, "; %s", comparison.Prior7DayComparison)
@@ -1851,16 +1840,12 @@ func writeBottomLineText(
 			}
 			fmt.Fprintln(w, ".")
 		} else {
-			fmt.Fprintf(
-				w,
-				"Slack is around %s.\n",
-				event.Time.Format("3:04 PM"),
-			)
+			fmt.Fprintf(w, "Next slack is around %s.\n", event.Time.Format("3:04 PM"))
 		}
 		break
 	}
 
-	// Finish with a measured peak statement rather than an absolute adjective.
+	// Retain the full daylight-window peak as broader context.
 	for i := len(report.Current.Outlook) - 1; i >= 0; i-- {
 		line := report.Current.Outlook[i]
 		if strings.HasPrefix(line, "Peak predicted current") ||
@@ -1869,6 +1854,78 @@ func writeBottomLineText(
 			break
 		}
 	}
+}
+
+func predictedCurrentPhaseAt(current *CurrentReport, at time.Time) string {
+	if current == nil {
+		return ""
+	}
+
+	if len(current.Series) > 0 {
+		best := current.Series[0]
+		bestDelta := absDuration(best.Time.Sub(at))
+		for _, sample := range current.Series[1:] {
+			delta := absDuration(sample.Time.Sub(at))
+			if delta < bestDelta {
+				best = sample
+				bestDelta = delta
+			}
+		}
+
+		const slackThresholdKT = 0.05
+		switch {
+		case best.VelocityKT > slackThresholdKT:
+			return "flooding"
+		case best.VelocityKT < -slackThresholdKT:
+			return "ebbing"
+		default:
+			return "near slack"
+		}
+	}
+
+	var previous, next *CurrentEvent
+	for i := range current.Events {
+		event := current.Events[i]
+		if !event.Time.After(at) {
+			copy := event
+			previous = &copy
+			continue
+		}
+		copy := event
+		next = &copy
+		break
+	}
+
+	if previous != nil {
+		switch previous.Type {
+		case "flood":
+			return "flooding"
+		case "ebb":
+			return "ebbing"
+		case "slack":
+			if next != nil {
+				if next.Type == "flood" {
+					return "flooding"
+				}
+				if next.Type == "ebb" {
+					return "ebbing"
+				}
+			}
+			return "near slack"
+		}
+	}
+
+	if next != nil {
+		switch next.Type {
+		case "flood":
+			return "flooding"
+		case "ebb":
+			return "ebbing"
+		case "slack":
+			return "near slack"
+		}
+	}
+	return ""
 }
 
 func printUsage() {
