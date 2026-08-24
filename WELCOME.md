@@ -1,7 +1,7 @@
 # Mauri's Sailing Outlook ⛵
 
 [![Mauri's Sailing Outlook --- San Francisco Bay and Delta sailing
-conditions](hero.jpg)](https://pittsburg-saildata.onrender.com/report?format=html)
+conditions](assets/hero.jpg)](https://pittsburg-saildata.onrender.com/report?format=html)
 
 ## Pick where you're sailing. Get the outlook.
 
