@@ -1,12 +1,12 @@
-# Mauri's Sailing Outlook ⛵
+# Mauri's Wind & Current Conditions ⛵
 
-[![Mauri's Sailing Outlook --- San Francisco Bay and Delta sailing
-conditions](assets/hero.jpg)](https://pittsburg-saildata.onrender.com/report?format=html)
+[![Mauri's Wind & Current Conditions --- supported coastal and inland waters sailing
+conditions](hero.jpg)](https://pittsburg-saildata.onrender.com/report?format=html)
 
 ## Pick where you're sailing. Get the outlook.
 
-**Mauri's Sailing Outlook** is a free sailing-planning tool for the San
-Francisco Bay and Delta.
+**Mauri's Wind & Current Conditions** is a free sailing-planning tool for the San
+Francisco supported waters.
 
 You do **not** need to know NOAA station numbers, buoy IDs, or
 latitude/longitude.
@@ -14,7 +14,7 @@ latitude/longitude.
 **[Open the Sailing
 Outlook](https://pittsburg-saildata.onrender.com/report?format=html),
 click on the map where you're thinking about sailing, then click
-*Generate Sailing Outlook*.**
+*Generate Wind & Current Conditions*.**
 
 The report combines nearby **real-time wind observations** with
 **predicted currents** and puts the useful sailing information up front.
@@ -23,9 +23,9 @@ The report combines nearby **real-time wind observations** with
 
 ## The 30-second version
 
-1.  Open the Sailing Outlook.
+1.  Open the Wind & Current Conditions.
 2.  Click your sailing area on the map.
-3.  Click **Generate Sailing Outlook**.
+3.  Click **Generate Wind & Current Conditions**.
 4.  Read the **Bottom Line** first.
 5.  Scroll down when you want the details.
 
@@ -37,7 +37,7 @@ can change as the tool selects data sources appropriate to the area.
 
 ------------------------------------------------------------------------
 
-# Questions sailors will probably ask
+# Questions people on the water will probably ask
 
 ## Is this tide data or current data?
 
@@ -131,7 +131,7 @@ particularly useful.
 
 If something looks questionable, that is worth reporting. Examples:
 
--   "That wind station isn't representative of Alameda."
+-   "That wind station isn't representative of this area."
 -   "The current wording is confusing here."
 -   "I expected the ebb to be much stronger at this time."
 -   "This station would be a better choice for this sailing area."
@@ -204,7 +204,7 @@ GitHub](https://github.com/richard-mauri/pittsburg-saildata)**.
 
 ## The best way to help
 
-**Try it somewhere you actually sail.**
+**Try it somewhere you actually go on the water.**
 
 If the result looks good, great.
 

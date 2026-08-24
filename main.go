@@ -1182,18 +1182,18 @@ var welcomeHTMLTemplate = template.Must(template.New("welcome").Parse(`<!doctype
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="description" content="Mauri’s Bay & Delta Conditions — a Bay & Delta conditions tool using NOAA wind observations and current predictions for sailors, paddlers, and other people on the water.">
-<meta property="og:title" content="Mauri’s Bay & Delta Conditions">
-<meta property="og:description" content="Pick where you're sailing. Get nearby wind observations and predicted currents.">
+<meta name="description" content="Mauri’s Wind & Current Conditions — wind observations and predicted currents for supported waters, presented for sailors, paddlers, and other people on the water.">
+<meta property="og:title" content="Mauri’s Wind & Current Conditions">
+<meta property="og:description" content="Pick where you’re going. See nearby wind observations and predicted currents.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://pittsburg-saildata.onrender.com/welcome">
 <meta property="og:image" content="https://pittsburg-saildata.onrender.com/assets/hero.jpg">
-<meta property="og:image:alt" content="Sailing on the San Francisco Bay and Delta">
+<meta property="og:image:alt" content="Sailing on the supported coastal and inland waters">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Mauri’s Bay & Delta Conditions">
-<meta name="twitter:description" content="Pick where you're sailing. Get nearby wind observations and predicted currents.">
+<meta name="twitter:title" content="Mauri’s Wind & Current Conditions">
+<meta name="twitter:description" content="Pick where you’re going. See nearby wind observations and predicted currents.">
 <meta name="twitter:image" content="https://pittsburg-saildata.onrender.com/assets/hero.jpg">
-<title>Mauri’s Bay & Delta Conditions — Welcome</title>
+<title>Mauri’s Wind & Current Conditions — Welcome</title>
 <style>
 :root{--navy:#082b45;--blue:#126b91;--sea:#0b8793;--ink:#153242;--muted:#607886;--paper:#f5fafc;--card:#fff;--line:#d8e7ed;--shadow:0 12px 34px rgba(8,43,69,.10)}
 *{box-sizing:border-box}
@@ -1229,11 +1229,11 @@ h3{margin:1.2rem 0 .35rem;color:var(--navy)}
 <body>
 <main class="shell">
 <section class="hero">
-<div class="eyebrow">Mauri’s Bay & Delta Conditions</div>
+<div class="eyebrow">Mauri’s Wind & Current Conditions</div>
 <h1>Pick where you’re going. See the wind & current.</h1>
-<p>A free Bay & Delta conditions tool for sailors, paddlers, and other people on the water, using nearby NOAA wind observations and predicted currents.</p>
+<p>A free wind and current conditions tool for sailors, paddlers, and other people on the water, using nearby observations and predicted currents where supported.</p>
 <div class="cta-row">
-<a class="cta primary" href="/report?format=html">See Bay & Delta Conditions</a>
+<a class="cta primary" href="/report?format=html">See Wind & Current Conditions</a>
 <a class="cta secondary" href="https://github.com/richard-mauri/pittsburg-saildata">View on GitHub</a>
 </div>
 </section>
@@ -1242,7 +1242,7 @@ h3{margin:1.2rem 0 .35rem;color:var(--navy)}
 <section class="card quick">
 <h2>The 30-second version</h2>
 <ol>
-<li>Open the Bay & Delta Conditions.</li>
+<li>Open the Wind & Current Conditions.</li>
 <li>Click where you plan to sail on the map.</li>
 <li>Click <strong>Show Conditions</strong>.</li>
 <li>Read the <strong>Bottom Line</strong> first.</li>
@@ -1259,19 +1259,19 @@ h3{margin:1.2rem 0 .35rem;color:var(--navy)}
 </section>
 
 <section class="card full qa">
-<h2>Questions sailors will probably ask</h2>
+<h2>Questions people on the water will probably ask</h2>
 <details open><summary>Is this tide data or current data?</summary><p><strong>Current data.</strong> The report is about the predicted speed and direction of moving water — ebb, flood, maximum current, and slack. Tide height and current are related, but they are not the same thing.</p></details>
 <details><summary>How does it choose the wind station?</summary><p>Clicking the map gives the service a latitude/longitude. It looks at nearby NOAA/NDBC meteorological stations, checks them for usable wind observations, and chooses the nearest usable one.</p></details>
 <details><summary>Can I choose another wind station?</summary><p>Yes. The Nearby Wind Stations section is clickable. <strong>AUTO</strong> is the service's preferred station; <strong>SELECTED</strong> is the station currently driving the report.</p></details>
 <details><summary>What does the current graph show?</summary><p>Predicted current speed through the day. Flood is above zero, ebb is below zero, and crossings indicate slack water.</p></details>
 <details><summary>Why compare one ebb or flood with another?</summary><p>A raw knot value can be misleading without context. The report can show that an afternoon ebb, for example, is only about half as strong as the other ebb that day, and can compare it with recent cycles.</p></details>
-<details><summary>Is this for navigation or safety decisions?</summary><p>No. It is a sailing-planning and conditions-exploration tool. Observations can be delayed or missing, station exposure differs, and current predictions are predictions. Use normal marine forecasts, charts, local knowledge, and seamanship.</p></details>
+<details><summary>Is this for navigation or safety decisions?</summary><p>No. It is a conditions-planning and exploration tool. Observations can be delayed or missing, station exposure differs, and current predictions are predictions. Use normal marine forecasts, charts, local knowledge, and seamanship.</p></details>
 </section>
 
 <section class="card full">
 <h2>Know these waters? Your feedback is useful.</h2>
 <p>If something looks questionable, that's worth reporting. Examples: a wind station that doesn't represent Alameda well, confusing current wording, an unexpectedly weak or strong ebb, or a feature that would make the report more useful.</p>
-<p>You do not need to be a programmer to contribute useful sailing knowledge.</p>
+<p>You do not need to be a programmer to contribute useful local knowledge.</p>
 </section>
 
 <section class="card full">
@@ -1284,7 +1284,7 @@ h3{margin:1.2rem 0 .35rem;color:var(--navy)}
 <a href="https://github.com/richard-mauri/pittsburg-saildata/issues">💡 Open an Issue</a>
 <a href="https://github.com/richard-mauri/pittsburg-saildata/pulls">🔧 View / submit Pull Requests</a>
 </div>
-<p class="note">Issues are not just for software bugs. Sailing terminology, station-selection concerns, and feature ideas are all useful.</p>
+<p class="note">Issues are not just for software bugs. Local conditions knowledge, terminology, station-selection concerns, and feature ideas are all useful.</p>
 </section>
 
 <section class="card full">
@@ -1293,32 +1293,32 @@ h3{margin:1.2rem 0 .35rem;color:var(--navy)}
 </section>
 </div>
 
-<div class="footer">Mauri’s Bay & Delta Conditions · San Francisco Bay & Delta · Sailing-planning utility, not a navigation system.</div>
+<div class="footer">Mauri’s Wind & Current Conditions · Conditions-planning utility, not a navigation system.</div>
 </main>
 </body>
 </html>`))
 
 var sailingHTMLTemplate = template.Must(template.New("sailing").Parse(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="description" content="Live sailing-oriented wind and current outlook using NOAA/NDBC observations and NOAA CO-OPS predictions.">
-<meta property="og:title" content="Mauri’s Bay & Delta Conditions">
-<meta property="og:description" content="Live sailing-oriented wind and current outlook using NOAA/NDBC observations and NOAA CO-OPS predictions.">
+<meta name="description" content="Wind observations and predicted currents for supported waters, presented for people planning time on the water.">
+<meta property="og:title" content="Mauri’s Wind & Current Conditions">
+<meta property="og:description" content="Wind observations and predicted currents for supported waters, presented for people planning time on the water.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://pittsburg-saildata.onrender.com/">
 <meta property="og:image" content="https://pittsburg-saildata.onrender.com/assets/hero.jpg">
-<meta property="og:image:alt" content="Sailing on the San Francisco Bay and Delta">
+<meta property="og:image:alt" content="Sailing on the supported coastal and inland waters">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Mauri’s Bay & Delta Conditions">
-<meta name="twitter:description" content="Live sailing-oriented wind and current outlook using NOAA/NDBC observations and NOAA CO-OPS predictions.">
+<meta name="twitter:title" content="Mauri’s Wind & Current Conditions">
+<meta name="twitter:description" content="Wind observations and predicted currents for supported waters, presented for people planning time on the water.">
 <meta name="twitter:image" content="https://pittsburg-saildata.onrender.com/assets/hero.jpg">
-<title>Mauri’s Bay & Delta Conditions — {{.Title}}</title>
+<title>Mauri’s Wind & Current Conditions — {{.Title}}</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <style>:root{--navy:#082b45;--blue:#126b91;--sea:#0b8793;--ink:#153242;--muted:#607886;--paper:#f5fafc;--card:#fff;--line:#d8e7ed;--flood:#087f8c;--ebb:#365f91;--slack:#756d64;--shadow:0 12px 34px rgba(8,43,69,.10)}*{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#dff3f8,#f7fbfc 32rem);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Avenir Next",Avenir,Helvetica,Arial,sans-serif;line-height:1.45}.shell{max-width:880px;margin:auto;padding:28px 18px 64px}.hero{color:#fff;padding:34px 30px 30px;border-radius:24px;min-height:360px;display:flex;flex-direction:column;justify-content:flex-end;background:
 linear-gradient(180deg,rgba(4,24,38,.06) 12%,rgba(4,24,38,.24) 48%,rgba(4,24,38,.86) 100%),
 url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text-shadow:0 2px 12px rgba(0,0,0,.45)}.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-weight:800;font-size:.76rem;opacity:.8}.photo-tag{margin-top:14px;font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;opacity:.72}h1{font-size:clamp(1.8rem,6vw,3.2rem);line-height:1.05;margin:.4rem 0 .6rem;letter-spacing:-.035em}.sub{opacity:.82}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}.full{grid-column:1/-1}h2{font-size:.82rem;letter-spacing:.13em;text-transform:uppercase;color:var(--blue);margin:0 0 16px}.bottom{font-size:1.13rem}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.metric{background:var(--paper);border-radius:15px;padding:14px}.label{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700}.value{font-size:1.55rem;font-weight:800;color:var(--navy)}.meta{color:var(--muted);font-size:.88rem;margin-top:12px}.station{font-weight:800;font-size:1.1rem;color:var(--navy)}.wind-summary{white-space:pre-line;margin-top:14px;padding:13px 14px;background:#eef7fa;border-left:4px solid var(--sea);border-radius:10px;color:var(--ink);font-size:.92rem}.event{display:grid;grid-template-columns:88px 12px 1fr;gap:12px;align-items:center;min-height:58px}.time{font-weight:800;color:var(--navy)}.dot{width:12px;height:12px;border-radius:50%;background:var(--slack);box-shadow:0 0 0 5px #edf3f5}.flood .dot{background:var(--flood)}.ebb .dot{background:var(--ebb)}.eventbody{border-left:2px solid var(--line);padding:8px 0 8px 18px}.eventlabel{font-weight:800}.eventdata{color:var(--muted);font-size:.9rem}.badge{display:inline-block;border-radius:999px;padding:5px 10px;background:#e9f6fb;color:var(--blue);font-size:.75rem;font-weight:800;margin-top:12px}.footer{text-align:center;color:var(--muted);font-size:.78rem;margin-top:22px}.full-report{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:.88rem;line-height:1.55;background:#071f31;color:#e7f4f8;border-radius:14px;padding:18px;overflow-x:auto}.details-note{color:var(--muted);font-size:.88rem;margin:-4px 0 14px}.current-chart-wrap{margin-top:16px}.current-chart-svg{display:block;width:100%;height:auto;background:#f8fbfc;border:1px solid var(--line);border-radius:16px}.grid-line{stroke:#d9e4e8;stroke-width:1}.v-grid-line{stroke:#e6eef1;stroke-width:1}.zero-line{stroke:#17384a;stroke-width:2}.axis-label{fill:#657d89;font-size:11px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.y-label{text-anchor:end}.x-label{text-anchor:middle}.axis-title{fill:#657d89;font-size:11px;text-anchor:middle}.sail-window{fill:#dcebf0;opacity:.55}.flood-area{fill:#6d8fd0;opacity:.86}.ebb-area{fill:#0b9d83;opacity:.90}.current-line{fill:none;stroke:#214b62;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}.event-point{stroke:#fff;stroke-width:1.5}.event-point.flood{fill:#5478bd}.event-point.ebb{fill:#078a75}.event-point.slack{fill:#756d64}.now-line{stroke:#c63a2b;stroke-width:2.5}.now-label{fill:#c63a2b;font-size:11px;font-weight:800}.chart-explainer{color:var(--ink);font-size:.94rem;line-height:1.45;margin:2px 0 12px}.chart-note{color:var(--muted);font-size:.82rem;margin-top:9px}.candidate-table{width:100%;border-collapse:collapse;font-size:.86rem}.candidate-table th,.candidate-table td{padding:10px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}.candidate-table th{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}.candidate-table td.num,.candidate-table th.num{text-align:right;white-space:nowrap}.candidate-good td.status{font-weight:800}.candidate-bad{opacity:.82}.candidate-selected{background:rgba(20,120,100,.08)}.candidate-selected td:first-child{font-weight:800}.candidate-note{color:var(--muted);font-size:.82rem;margin:0 0 12px}.candidate-scroll{overflow-x:auto}.candidate-link{color:var(--blue);text-decoration:none;font-weight:800}.candidate-link:hover{text-decoration:underline}.candidate-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:0 0 12px}.nearest-link{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:7px 12px;color:var(--blue);font-weight:800;text-decoration:none;background:#fff}.nearest-link:hover{background:var(--paper)}.map-card{overflow:hidden}.map-intro{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px}.map-help{color:var(--muted);font-size:.9rem;max-width:600px}.map-wrap{border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#dfecef}.location-map{height:390px;width:100%}.map-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px}.map-coordinate{font-variant-numeric:tabular-nums;color:var(--muted);font-size:.9rem}.map-go{display:inline-block;border:0;border-radius:999px;padding:10px 16px;background:var(--blue);color:#fff;font-weight:850;text-decoration:none;cursor:pointer}.map-go[aria-disabled="true"]{opacity:.45;pointer-events:none}.map-reset{border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:800;cursor:pointer}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#db7b20}.map-dot.current{background:#7d55a6}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}.error-card{border-left:5px solid #b64735;background:#fff7f4}.error-card h2{color:#8f3025}.error-message{font-weight:650;line-height:1.5}.error-help{color:var(--muted);font-size:.9rem}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}</style></head><body><main class="shell">
-<section class="hero"><div class="eyebrow">Mauri’s Bay & Delta Conditions</div><h1>{{.Title}}</h1><div class="sub">{{.ReportTime}} · {{.Station}}</div>{{if .Historical}}<span class="badge">Historical · {{.RequestedTime}}</span>{{end}}<div class="photo-tag">Bay sailing</div></section><div class="grid">
+<section class="hero"><div class="eyebrow">Mauri’s Wind & Current Conditions</div><h1>{{.Title}}</h1><div class="sub">{{.ReportTime}} · {{.Station}}</div>{{if .Historical}}<span class="badge">Historical · {{.RequestedTime}}</span>{{end}}<div class="photo-tag">Bay sailing</div></section><div class="grid">
 <section class="card full bottom"><h2>Bottom line</h2>{{range .BottomLine}}<p>{{.}}</p>{{else}}<p>Summary unavailable.</p>{{end}}</section>
-<section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click anywhere on the map to choose where you’ll be on the water. Mauri’s Bay & Delta Conditions will use that latitude/longitude to find nearby wind observations and current predictions.</div></div></div><div id="sailing-location-map" class="location-map" aria-label="Interactive San Francisco Bay and Delta conditions map"></div><div class="map-controls"><span id="map-coordinate" class="map-coordinate">{{if .MapHasRequest}}Selected: {{printf "%.5f" .MapRequestLat}}, {{printf "%.5f" .MapRequestLon}}{{else}}Click the map to choose a location.{{end}}</span><a id="map-go" class="map-go" href="#" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}">Show Conditions</a>{{if .MapHasRequest}}<button id="map-reset" class="map-reset" type="button">Clear chosen point</button>{{end}}</div><div class="map-legend">{{if .MapHasRequest}}<span class="map-key"><span class="map-dot request"></span>Selected location</span>{{end}}{{if .MapHasWind}}<span class="map-key"><span class="map-dot wind"></span>Wind station {{.MapWindStation}}</span>{{end}}{{if .MapHasCurrent}}<span class="map-key"><span class="map-dot current"></span>Current station {{.MapCurrentStation}}</span>{{end}}</div></section>
+<section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click anywhere on the map to choose where you’ll be on the water. Mauri’s Wind & Current Conditions will use that latitude/longitude to find nearby wind observations and current predictions.</div></div></div><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div class="map-controls"><span id="map-coordinate" class="map-coordinate">{{if .MapHasRequest}}Selected: {{printf "%.5f" .MapRequestLat}}, {{printf "%.5f" .MapRequestLon}}{{else}}Click the map to choose a location.{{end}}</span><a id="map-go" class="map-go" href="#" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}">Show Conditions</a>{{if .MapHasRequest}}<button id="map-reset" class="map-reset" type="button">Clear chosen point</button>{{end}}</div><div class="map-legend">{{if .MapHasRequest}}<span class="map-key"><span class="map-dot request"></span>Selected location</span>{{end}}{{if .MapHasWind}}<span class="map-key"><span class="map-dot wind"></span>Wind station {{.MapWindStation}}</span>{{end}}{{if .MapHasCurrent}}<span class="map-key"><span class="map-dot current"></span>Current station {{.MapCurrentStation}}</span>{{end}}</div></section>
 {{if .WindError}}<section class="card full error-card"><h2>Wind station selection unavailable</h2><p class="error-message">{{.WindError}}</p><p class="error-help">The page is still available so you can inspect the request and nearby station diagnostics. Try nearby coordinates or an explicit NDBC station ID.</p></section>{{end}}
 <section class="card"><h2>Wind</h2>
 <div class="metrics">
@@ -1336,7 +1336,7 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 {{if .CurrentChart}}<section class="card full"><h2>Tidal Current Through the Day</h2><div class="chart-explainer"><strong>This is current, not tide height.</strong> Above zero = flood; below zero = ebb; crossings = slack water.</div><div class="current-chart-wrap">{{.CurrentChart}}</div><div class="chart-note">NOAA 6-minute harmonic current predictions. Shaded band marks the conditions window; red line marks report time.</div></section>{{end}}
 <section class="card full"><h2>Current timeline</h2>{{range .CurrentEvents}}<div class="event {{.Class}}"><div class="time">{{.Time}}</div><div class="dot"></div><div class="eventbody"><div class="eventlabel">{{.Label}}</div>{{if .Speed}}<div class="eventdata">{{.Speed}} · {{.Direction}}</div>{{end}}</div></div>{{else}}<p>No current events in the conditions window.</p>{{end}}</section>
 <section class="card full"><h2>Full report details</h2><p class="details-note">Complete CLI/text report. This section includes every detail available from the text endpoint.</p><pre class="full-report">{{.FullText}}</pre></section></div>
-<div class="footer"><strong>Mauri’s Bay & Delta Conditions</strong><br>NOAA/NDBC observations + NOAA CO-OPS current predictions · Conditions-planning aid, not a navigation system</div></main><script>
+<div class="footer"><strong>Mauri’s Wind & Current Conditions</strong><br>NOAA/NDBC observations + NOAA CO-OPS current predictions · Conditions-planning aid, not a navigation system</div></main><script>
 (function(){
   var el = document.getElementById("sailing-location-map");
   if (!el || typeof L === "undefined") return;
@@ -1595,7 +1595,7 @@ func writeCompactTextReport(
 		}
 	}
 
-	fmt.Fprintf(w, "BAY & DELTA CONDITIONS — %s (%s)\n", headingName, report.Station)
+	fmt.Fprintf(w, "WIND & CURRENT CONDITIONS — %s (%s)\n", headingName, report.Station)
 	fmt.Fprintln(w, "================================")
 	fmt.Fprintf(
 		w,
@@ -1709,7 +1709,7 @@ func writeTextReport(
 
 	fmt.Fprintf(
 		w,
-		"BAY & DELTA CONDITIONS — %s (%s)\n",
+		"WIND & CURRENT CONDITIONS — %s (%s)\n",
 		headingName,
 		report.Station,
 	)

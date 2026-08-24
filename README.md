@@ -1,7 +1,7 @@
-# Mauri's Bay & Delta Conditions
+# Mauri's Wind & Current Conditions
 
 A Go service for exploring **wind and predicted currents** around the
-San Francisco Bay and Delta. It is intended for sailors, paddlers,
+supported coastal and inland waters. It is intended for sailors, paddlers,
 kayakers, rowers, and other people planning time on the water.
 
 ## Try it
