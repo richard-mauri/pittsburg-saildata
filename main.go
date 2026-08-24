@@ -660,6 +660,12 @@ type htmlReportData struct {
 	DebugWind                                        bool
 	WindError                                        string
 	UseNearestURL                                    string
+	MapCenterLat, MapCenterLon                       float64
+	MapRequestLat, MapRequestLon                     float64
+	MapWindLat, MapWindLon                           float64
+	MapCurrentLat, MapCurrentLon                     float64
+	MapHasRequest, MapHasWind, MapHasCurrent         bool
+	MapWindStation, MapCurrentStation                string
 	CurrentStation, CurrentMeta                      string
 	CurrentOutlook                                   []string
 	CurrentEvents                                    []htmlCurrentEvent
@@ -878,6 +884,59 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 			}
 			d.UseNearestURL = "/report?" + nearestQuery.Encode()
 		}
+	}
+
+	// Map chooser: the user's requested lat/lon is the primary point.
+	// Otherwise center on the selected/default wind station. Also expose
+	// wind/current source locations so the user can see where the data come from.
+	if lat, lon, ok, _ := parseOptionalLatLon(report.RequestQuery); ok {
+		d.MapHasRequest = true
+		d.MapRequestLat = lat
+		d.MapRequestLon = lon
+		d.MapCenterLat = lat
+		d.MapCenterLon = lon
+	}
+
+	if report.WindSelection != nil &&
+		(report.WindSelection.StationLat != 0 ||
+			report.WindSelection.StationLon != 0) {
+		d.MapHasWind = true
+		d.MapWindLat = report.WindSelection.StationLat
+		d.MapWindLon = report.WindSelection.StationLon
+		d.MapWindStation = report.WindSelection.StationID
+
+		if !d.MapHasRequest {
+			d.MapCenterLat = d.MapWindLat
+			d.MapCenterLon = d.MapWindLon
+		}
+	} else if stationMeta, err := fetchNDBCStation(report.Station); err == nil {
+		d.MapHasWind = true
+		d.MapWindLat = stationMeta.Lat
+		d.MapWindLon = stationMeta.Lon
+		d.MapWindStation = stationMeta.ID
+
+		if !d.MapHasRequest {
+			d.MapCenterLat = stationMeta.Lat
+			d.MapCenterLon = stationMeta.Lon
+		}
+	}
+
+	if report.Current != nil &&
+		report.Current.CurrentStation != nil {
+		currentStation := report.Current.CurrentStation
+		if currentStation.Lat != 0 || currentStation.Lon != 0 {
+			d.MapHasCurrent = true
+			d.MapCurrentLat = currentStation.Lat
+			d.MapCurrentLon = currentStation.Lon
+			d.MapCurrentStation = currentStation.ID
+		}
+	}
+
+	// Last-resort Bay/Delta center. This should rarely be needed because the
+	// default PSBC1 station normally supplies the center.
+	if d.MapCenterLat == 0 && d.MapCenterLon == 0 {
+		d.MapCenterLat = 37.90
+		d.MapCenterLon = -122.05
 	}
 
 	if report.Current != nil && report.Current.Error == "" {
@@ -1107,11 +1166,14 @@ var sailingHTMLTemplate = template.Must(template.New("sailing").Parse(`<!doctype
 <meta name="twitter:description" content="Live sailing-oriented wind and current outlook using NOAA/NDBC observations and NOAA CO-OPS predictions.">
 <meta name="twitter:image" content="https://pittsburg-saildata.onrender.com/assets/hero.jpg">
 <title>Mauri’s Sailing Outlook — {{.Title}}</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <style>:root{--navy:#082b45;--blue:#126b91;--sea:#0b8793;--ink:#153242;--muted:#607886;--paper:#f5fafc;--card:#fff;--line:#d8e7ed;--flood:#087f8c;--ebb:#365f91;--slack:#756d64;--shadow:0 12px 34px rgba(8,43,69,.10)}*{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#dff3f8,#f7fbfc 32rem);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Avenir Next",Avenir,Helvetica,Arial,sans-serif;line-height:1.45}.shell{max-width:880px;margin:auto;padding:28px 18px 64px}.hero{color:#fff;padding:34px 30px 30px;border-radius:24px;min-height:360px;display:flex;flex-direction:column;justify-content:flex-end;background:
 linear-gradient(180deg,rgba(4,24,38,.06) 12%,rgba(4,24,38,.24) 48%,rgba(4,24,38,.86) 100%),
-url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text-shadow:0 2px 12px rgba(0,0,0,.45)}.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-weight:800;font-size:.76rem;opacity:.8}.photo-tag{margin-top:14px;font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;opacity:.72}h1{font-size:clamp(1.8rem,6vw,3.2rem);line-height:1.05;margin:.4rem 0 .6rem;letter-spacing:-.035em}.sub{opacity:.82}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}.full{grid-column:1/-1}h2{font-size:.82rem;letter-spacing:.13em;text-transform:uppercase;color:var(--blue);margin:0 0 16px}.bottom{font-size:1.13rem}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.metric{background:var(--paper);border-radius:15px;padding:14px}.label{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700}.value{font-size:1.55rem;font-weight:800;color:var(--navy)}.meta{color:var(--muted);font-size:.88rem;margin-top:12px}.station{font-weight:800;font-size:1.1rem;color:var(--navy)}.wind-summary{white-space:pre-line;margin-top:14px;padding:13px 14px;background:#eef7fa;border-left:4px solid var(--sea);border-radius:10px;color:var(--ink);font-size:.92rem}.event{display:grid;grid-template-columns:88px 12px 1fr;gap:12px;align-items:center;min-height:58px}.time{font-weight:800;color:var(--navy)}.dot{width:12px;height:12px;border-radius:50%;background:var(--slack);box-shadow:0 0 0 5px #edf3f5}.flood .dot{background:var(--flood)}.ebb .dot{background:var(--ebb)}.eventbody{border-left:2px solid var(--line);padding:8px 0 8px 18px}.eventlabel{font-weight:800}.eventdata{color:var(--muted);font-size:.9rem}.badge{display:inline-block;border-radius:999px;padding:5px 10px;background:#e9f6fb;color:var(--blue);font-size:.75rem;font-weight:800;margin-top:12px}.footer{text-align:center;color:var(--muted);font-size:.78rem;margin-top:22px}.full-report{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:.88rem;line-height:1.55;background:#071f31;color:#e7f4f8;border-radius:14px;padding:18px;overflow-x:auto}.details-note{color:var(--muted);font-size:.88rem;margin:-4px 0 14px}.current-chart-wrap{margin-top:16px}.current-chart-svg{display:block;width:100%;height:auto;background:#f8fbfc;border:1px solid var(--line);border-radius:16px}.grid-line{stroke:#d9e4e8;stroke-width:1}.v-grid-line{stroke:#e6eef1;stroke-width:1}.zero-line{stroke:#17384a;stroke-width:2}.axis-label{fill:#657d89;font-size:11px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.y-label{text-anchor:end}.x-label{text-anchor:middle}.axis-title{fill:#657d89;font-size:11px;text-anchor:middle}.sail-window{fill:#dcebf0;opacity:.55}.flood-area{fill:#6d8fd0;opacity:.86}.ebb-area{fill:#0b9d83;opacity:.90}.current-line{fill:none;stroke:#214b62;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}.event-point{stroke:#fff;stroke-width:1.5}.event-point.flood{fill:#5478bd}.event-point.ebb{fill:#078a75}.event-point.slack{fill:#756d64}.now-line{stroke:#c63a2b;stroke-width:2.5}.now-label{fill:#c63a2b;font-size:11px;font-weight:800}.chart-explainer{color:var(--ink);font-size:.94rem;line-height:1.45;margin:2px 0 12px}.chart-note{color:var(--muted);font-size:.82rem;margin-top:9px}.candidate-table{width:100%;border-collapse:collapse;font-size:.86rem}.candidate-table th,.candidate-table td{padding:10px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}.candidate-table th{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}.candidate-table td.num,.candidate-table th.num{text-align:right;white-space:nowrap}.candidate-good td.status{font-weight:800}.candidate-bad{opacity:.82}.candidate-selected{background:rgba(20,120,100,.08)}.candidate-selected td:first-child{font-weight:800}.candidate-note{color:var(--muted);font-size:.82rem;margin:0 0 12px}.candidate-scroll{overflow-x:auto}.candidate-link{color:var(--blue);text-decoration:none;font-weight:800}.candidate-link:hover{text-decoration:underline}.candidate-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:0 0 12px}.nearest-link{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:7px 12px;color:var(--blue);font-weight:800;text-decoration:none;background:#fff}.nearest-link:hover{background:var(--paper)}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}.error-card{border-left:5px solid #b64735;background:#fff7f4}.error-card h2{color:#8f3025}.error-message{font-weight:650;line-height:1.5}.error-help{color:var(--muted);font-size:.9rem}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}</style></head><body><main class="shell">
+url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text-shadow:0 2px 12px rgba(0,0,0,.45)}.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-weight:800;font-size:.76rem;opacity:.8}.photo-tag{margin-top:14px;font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;opacity:.72}h1{font-size:clamp(1.8rem,6vw,3.2rem);line-height:1.05;margin:.4rem 0 .6rem;letter-spacing:-.035em}.sub{opacity:.82}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}.full{grid-column:1/-1}h2{font-size:.82rem;letter-spacing:.13em;text-transform:uppercase;color:var(--blue);margin:0 0 16px}.bottom{font-size:1.13rem}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.metric{background:var(--paper);border-radius:15px;padding:14px}.label{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700}.value{font-size:1.55rem;font-weight:800;color:var(--navy)}.meta{color:var(--muted);font-size:.88rem;margin-top:12px}.station{font-weight:800;font-size:1.1rem;color:var(--navy)}.wind-summary{white-space:pre-line;margin-top:14px;padding:13px 14px;background:#eef7fa;border-left:4px solid var(--sea);border-radius:10px;color:var(--ink);font-size:.92rem}.event{display:grid;grid-template-columns:88px 12px 1fr;gap:12px;align-items:center;min-height:58px}.time{font-weight:800;color:var(--navy)}.dot{width:12px;height:12px;border-radius:50%;background:var(--slack);box-shadow:0 0 0 5px #edf3f5}.flood .dot{background:var(--flood)}.ebb .dot{background:var(--ebb)}.eventbody{border-left:2px solid var(--line);padding:8px 0 8px 18px}.eventlabel{font-weight:800}.eventdata{color:var(--muted);font-size:.9rem}.badge{display:inline-block;border-radius:999px;padding:5px 10px;background:#e9f6fb;color:var(--blue);font-size:.75rem;font-weight:800;margin-top:12px}.footer{text-align:center;color:var(--muted);font-size:.78rem;margin-top:22px}.full-report{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:.88rem;line-height:1.55;background:#071f31;color:#e7f4f8;border-radius:14px;padding:18px;overflow-x:auto}.details-note{color:var(--muted);font-size:.88rem;margin:-4px 0 14px}.current-chart-wrap{margin-top:16px}.current-chart-svg{display:block;width:100%;height:auto;background:#f8fbfc;border:1px solid var(--line);border-radius:16px}.grid-line{stroke:#d9e4e8;stroke-width:1}.v-grid-line{stroke:#e6eef1;stroke-width:1}.zero-line{stroke:#17384a;stroke-width:2}.axis-label{fill:#657d89;font-size:11px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.y-label{text-anchor:end}.x-label{text-anchor:middle}.axis-title{fill:#657d89;font-size:11px;text-anchor:middle}.sail-window{fill:#dcebf0;opacity:.55}.flood-area{fill:#6d8fd0;opacity:.86}.ebb-area{fill:#0b9d83;opacity:.90}.current-line{fill:none;stroke:#214b62;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}.event-point{stroke:#fff;stroke-width:1.5}.event-point.flood{fill:#5478bd}.event-point.ebb{fill:#078a75}.event-point.slack{fill:#756d64}.now-line{stroke:#c63a2b;stroke-width:2.5}.now-label{fill:#c63a2b;font-size:11px;font-weight:800}.chart-explainer{color:var(--ink);font-size:.94rem;line-height:1.45;margin:2px 0 12px}.chart-note{color:var(--muted);font-size:.82rem;margin-top:9px}.candidate-table{width:100%;border-collapse:collapse;font-size:.86rem}.candidate-table th,.candidate-table td{padding:10px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}.candidate-table th{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}.candidate-table td.num,.candidate-table th.num{text-align:right;white-space:nowrap}.candidate-good td.status{font-weight:800}.candidate-bad{opacity:.82}.candidate-selected{background:rgba(20,120,100,.08)}.candidate-selected td:first-child{font-weight:800}.candidate-note{color:var(--muted);font-size:.82rem;margin:0 0 12px}.candidate-scroll{overflow-x:auto}.candidate-link{color:var(--blue);text-decoration:none;font-weight:800}.candidate-link:hover{text-decoration:underline}.candidate-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:0 0 12px}.nearest-link{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:7px 12px;color:var(--blue);font-weight:800;text-decoration:none;background:#fff}.nearest-link:hover{background:var(--paper)}.map-card{overflow:hidden}.map-intro{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px}.map-help{color:var(--muted);font-size:.9rem;max-width:600px}.map-wrap{border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#dfecef}.location-map{height:390px;width:100%}.map-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px}.map-coordinate{font-variant-numeric:tabular-nums;color:var(--muted);font-size:.9rem}.map-go{display:inline-block;border:0;border-radius:999px;padding:10px 16px;background:var(--blue);color:#fff;font-weight:850;text-decoration:none;cursor:pointer}.map-go[aria-disabled="true"]{opacity:.45;pointer-events:none}.map-reset{border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:800;cursor:pointer}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#db7b20}.map-dot.current{background:#7d55a6}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}.error-card{border-left:5px solid #b64735;background:#fff7f4}.error-card h2{color:#8f3025}.error-message{font-weight:650;line-height:1.5}.error-help{color:var(--muted);font-size:.9rem}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}</style></head><body><main class="shell">
 <section class="hero"><div class="eyebrow">Mauri’s Sailing Outlook</div><h1>{{.Title}}</h1><div class="sub">{{.ReportTime}} · {{.Station}}</div>{{if .Historical}}<span class="badge">Historical · {{.RequestedTime}}</span>{{end}}<div class="photo-tag">Bay sailing</div></section><div class="grid">
 <section class="card full bottom"><h2>Bottom line</h2>{{range .BottomLine}}<p>{{.}}</p>{{else}}<p>Summary unavailable.</p>{{end}}</section>
+<section class="card full map-card"><div class="map-intro"><div><h2>Choose Sailing Location</h2><div class="map-help">Click anywhere on the map to choose where you plan to sail. Mauri’s Sailing Outlook will use that latitude/longitude to find the nearest usable wind station and an appropriate current prediction.</div></div></div><div id="sailing-location-map" class="location-map" aria-label="Interactive San Francisco Bay and Delta sailing location map"></div><div class="map-controls"><span id="map-coordinate" class="map-coordinate">{{if .MapHasRequest}}Selected: {{printf "%.5f" .MapRequestLat}}, {{printf "%.5f" .MapRequestLon}}{{else}}Click the map to choose a sailing location.{{end}}</span><a id="map-go" class="map-go" href="#" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}">Generate Sailing Outlook</a>{{if .MapHasRequest}}<button id="map-reset" class="map-reset" type="button">Clear chosen point</button>{{end}}</div><div class="map-legend">{{if .MapHasRequest}}<span class="map-key"><span class="map-dot request"></span>Sailing location</span>{{end}}{{if .MapHasWind}}<span class="map-key"><span class="map-dot wind"></span>Wind station {{.MapWindStation}}</span>{{end}}{{if .MapHasCurrent}}<span class="map-key"><span class="map-dot current"></span>Current station {{.MapCurrentStation}}</span>{{end}}</div></section>
 {{if .WindError}}<section class="card full error-card"><h2>Wind station selection unavailable</h2><p class="error-message">{{.WindError}}</p><p class="error-help">The page is still available so you can inspect the request and nearby station diagnostics. Try nearby coordinates or an explicit NDBC station ID.</p></section>{{end}}
 <section class="card"><h2>Wind</h2>
 <div class="metrics">
@@ -1129,7 +1191,136 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 {{if .CurrentChart}}<section class="card full"><h2>Tidal Current Through the Day</h2><div class="chart-explainer"><strong>This is current, not tide height.</strong> Above zero = flood; below zero = ebb; crossings = slack water.</div><div class="current-chart-wrap">{{.CurrentChart}}</div><div class="chart-note">NOAA 6-minute harmonic current predictions. Shaded band marks the sailing window; red line marks report time.</div></section>{{end}}
 <section class="card full"><h2>Current timeline</h2>{{range .CurrentEvents}}<div class="event {{.Class}}"><div class="time">{{.Time}}</div><div class="dot"></div><div class="eventbody"><div class="eventlabel">{{.Label}}</div>{{if .Speed}}<div class="eventdata">{{.Speed}} · {{.Direction}}</div>{{end}}</div></div>{{else}}<p>No current events in the selected sailing window.</p>{{end}}</section>
 <section class="card full"><h2>Full report details</h2><p class="details-note">Complete CLI/text report. This section includes every detail available from the text endpoint.</p><pre class="full-report">{{.FullText}}</pre></section></div>
-<div class="footer"><strong>Mauri’s Sailing Outlook</strong><br>NOAA/NDBC observations + NOAA CO-OPS current predictions · Sailing aid, not a navigation system</div></main></body></html>`))
+<div class="footer"><strong>Mauri’s Sailing Outlook</strong><br>NOAA/NDBC observations + NOAA CO-OPS current predictions · Sailing aid, not a navigation system</div></main><script>
+(function(){
+  var el = document.getElementById("sailing-location-map");
+  if (!el || typeof L === "undefined") return;
+
+  var centerLat = {{printf "%.6f" .MapCenterLat}};
+  var centerLon = {{printf "%.6f" .MapCenterLon}};
+  var map = L.map(el, {scrollWheelZoom:true}).setView([centerLat, centerLon], 9);
+
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 18,
+    attribution: '&copy; OpenStreetMap contributors'
+  }).addTo(map);
+
+  var selectedMarker = null;
+  var sourcePoints = [];
+
+  function circleMarker(lat, lon, color, label) {
+    var marker = L.circleMarker([lat, lon], {
+      radius: 7,
+      color: "#ffffff",
+      weight: 2,
+      fillColor: color,
+      fillOpacity: 1
+    }).addTo(map);
+    marker.bindPopup(label);
+    sourcePoints.push([lat, lon]);
+    return marker;
+  }
+
+  {{if .MapHasRequest}}
+  selectedMarker = circleMarker(
+    {{printf "%.6f" .MapRequestLat}},
+    {{printf "%.6f" .MapRequestLon}},
+    "#126b91",
+    "Selected sailing location"
+  );
+  {{end}}
+
+  {{if .MapHasWind}}
+  circleMarker(
+    {{printf "%.6f" .MapWindLat}},
+    {{printf "%.6f" .MapWindLon}},
+    "#db7b20",
+    "Wind station {{.MapWindStation}}"
+  );
+  {{end}}
+
+  {{if .MapHasCurrent}}
+  circleMarker(
+    {{printf "%.6f" .MapCurrentLat}},
+    {{printf "%.6f" .MapCurrentLon}},
+    "#7d55a6",
+    "Current station {{.MapCurrentStation}}"
+  );
+  {{end}}
+
+  if (sourcePoints.length > 1) {
+    map.fitBounds(sourcePoints, {padding:[35,35], maxZoom:10});
+  }
+
+  var coord = document.getElementById("map-coordinate");
+  var go = document.getElementById("map-go");
+  var reset = document.getElementById("map-reset");
+  var chosen = {{if .MapHasRequest}}{
+    lat: {{printf "%.6f" .MapRequestLat}},
+    lon: {{printf "%.6f" .MapRequestLon}}
+  }{{else}}null{{end}};
+
+  function updateGo() {
+    if (!chosen) {
+      go.setAttribute("aria-disabled","true");
+      go.setAttribute("href","#");
+      return;
+    }
+
+    var target = new URL(window.location.href);
+    target.pathname = "/report";
+    target.searchParams.set("lat", chosen.lat.toFixed(5));
+    target.searchParams.set("lon", chosen.lon.toFixed(5));
+    target.searchParams.set("format","html");
+
+    // A new sailing location should drive fresh automatic station selection.
+    target.searchParams.delete("station");
+    target.searchParams.delete("current_station");
+    target.searchParams.delete("bin");
+
+    go.href = target.pathname + "?" + target.searchParams.toString();
+    go.setAttribute("aria-disabled","false");
+  }
+
+  map.on("click", function(e) {
+    chosen = {lat:e.latlng.lat, lon:e.latlng.lng};
+
+    if (selectedMarker) {
+      selectedMarker.setLatLng(e.latlng);
+    } else {
+      selectedMarker = circleMarker(
+        e.latlng.lat,
+        e.latlng.lng,
+        "#126b91",
+        "Selected sailing location"
+      );
+    }
+
+    coord.textContent =
+      "Selected: " +
+      chosen.lat.toFixed(5) +
+      ", " +
+      chosen.lon.toFixed(5);
+
+    updateGo();
+  });
+
+  if (reset) {
+    reset.addEventListener("click", function() {
+      chosen = null;
+      if (selectedMarker) {
+        map.removeLayer(selectedMarker);
+        selectedMarker = null;
+      }
+      coord.textContent = "Click the map to choose a sailing location.";
+      updateGo();
+    });
+  }
+
+  updateGo();
+})();
+</script>
+</body></html>`))
 
 func queryInt(r *http.Request, key string, fallback int) int {
 	value := strings.TrimSpace(r.URL.Query().Get(key))
