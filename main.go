@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -21,14 +22,18 @@ const (
 )
 
 type SailingReport struct {
-	Station     string            `json:"station"`
-	ReportTime  time.Time         `json:"report_time"`
-	Latest      *WindObservation  `json:"latest,omitempty"`
-	Latest10    []WindObservation `json:"latest_10,omitempty"`
-	Last12Hours *WindStats        `json:"last_12_hours,omitempty"`
-	Afternoon   []PeriodReport    `json:"afternoon,omitempty"`
-	Current     *CurrentReport    `json:"current,omitempty"`
-	Historical  *HistoricalReport `json:"historical,omitempty"`
+	Station            string                `json:"station"`
+	ReportTime         time.Time             `json:"report_time"`
+	Latest             *WindObservation      `json:"latest,omitempty"`
+	Latest10           []WindObservation     `json:"latest_10,omitempty"`
+	Last12Hours        *WindStats            `json:"last_12_hours,omitempty"`
+	Afternoon          []PeriodReport        `json:"afternoon,omitempty"`
+	Current            *CurrentReport        `json:"current,omitempty"`
+	Historical         *HistoricalReport     `json:"historical,omitempty"`
+	WindSelection      *WindStationSelection `json:"wind_selection,omitempty"`
+	DebugWindSelection bool                  `json:"-"`
+	WindError          string                `json:"wind_error,omitempty"`
+	RequestQuery       url.Values            `json:"-"`
 }
 
 type CompactReport struct {
@@ -145,6 +150,313 @@ func main() {
 	writeTextReport(os.Stdout, report, loc)
 }
 
+func parseOptionalLatLon(
+	q url.Values,
+) (float64, float64, bool, error) {
+	latText := strings.TrimSpace(q.Get("lat"))
+	lonText := strings.TrimSpace(q.Get("lon"))
+
+	if latText == "" && lonText == "" {
+		return 0, 0, false, nil
+	}
+	if latText == "" || lonText == "" {
+		return 0, 0, false, fmt.Errorf(
+			"lat and lon must be provided together",
+		)
+	}
+
+	var lat, lon float64
+	if _, err := fmt.Sscanf(latText, "%f", &lat); err != nil {
+		return 0, 0, false, fmt.Errorf("invalid lat %q", latText)
+	}
+	if _, err := fmt.Sscanf(lonText, "%f", &lon); err != nil {
+		return 0, 0, false, fmt.Errorf("invalid lon %q", lonText)
+	}
+	if lat < -90 || lat > 90 {
+		return 0, 0, false, fmt.Errorf(
+			"lat must be between -90 and 90",
+		)
+	}
+	if lon < -180 || lon > 180 {
+		return 0, 0, false, fmt.Errorf(
+			"lon must be between -180 and 180",
+		)
+	}
+
+	return lat, lon, true, nil
+}
+
+func cloneQuery(values url.Values) url.Values {
+	copy := make(url.Values, len(values))
+	for key, list := range values {
+		copy[key] = append([]string(nil), list...)
+	}
+	return copy
+}
+
+func buildStationBrowseSelection(
+	station NDBCStation,
+	observations []Observation,
+) *WindStationSelection {
+	// Use the selected station's own coordinates as the browsing anchor.
+	// The automatic resolver then provides a distance-sorted candidate list
+	// around that point. The report remains driven by the explicitly selected
+	// station, not by whichever candidate AUTO prefers.
+	_, _, nearby, _ := findNearestUsableWindStation(
+		station.Lat,
+		station.Lon,
+	)
+
+	selection := &WindStationSelection{
+		Mode:              "station-browser",
+		RequestedLat:      station.Lat,
+		RequestedLon:      station.Lon,
+		StationID:         station.ID,
+		StationName:       station.Name,
+		StationLat:        station.Lat,
+		StationLon:        station.Lon,
+		DistanceNM:        0,
+		Candidates:        nearby.Candidates,
+		CandidatesChecked: nearby.CandidatesChecked,
+	}
+
+	if latest, ok := latestUsableWindTime(observations); ok {
+		age := time.Since(latest.UTC())
+		if age < 0 {
+			age = 0
+		}
+		selection.ObservationAgeMinutes =
+			int(age.Round(time.Minute) / time.Minute)
+	}
+
+	// Tag the resolver's preferred station as AUTO while keeping the user's
+	// current station as SELECTED.
+	for i := range selection.Candidates {
+		if strings.EqualFold(
+			selection.Candidates[i].StationID,
+			nearby.StationID,
+		) && !strings.HasPrefix(
+			selection.Candidates[i].Reason,
+			"[AUTO] ",
+		) {
+			selection.Candidates[i].Reason =
+				"[AUTO] " + selection.Candidates[i].Reason
+		}
+	}
+
+	return selection
+}
+
+func resolveHTTPWindStation(
+	r *http.Request,
+	defaultStation string,
+) (string, []Observation, *WindStationSelection, error) {
+	q := r.URL.Query()
+
+	explicitStation := strings.ToUpper(strings.TrimSpace(q.Get("station")))
+	lat, lon, hasLocation, locationErr := parseOptionalLatLon(q)
+	if locationErr != nil {
+		return "", nil, nil, locationErr
+	}
+
+	if explicitStation != "" {
+		if !validStationID(explicitStation) {
+			return "", nil, nil, fmt.Errorf(
+				"invalid station ID %q",
+				explicitStation,
+			)
+		}
+
+		observations, err := getWindStation(explicitStation)
+		if err != nil {
+			return explicitStation, observations, nil, err
+		}
+
+		stationMeta, metaErr := fetchNDBCStation(explicitStation)
+
+		if hasLocation {
+			// Keep the original sailing-location anchor while the user
+			// manually browses different nearby wind stations.
+			_, _, autoSelection, autoErr :=
+				findNearestUsableWindStation(lat, lon)
+
+			if metaErr != nil {
+				return explicitStation, observations, nil, nil
+			}
+
+			selection := &WindStationSelection{
+				Mode:         "manual-override",
+				RequestedLat: lat,
+				RequestedLon: lon,
+				StationID:    stationMeta.ID,
+				StationName:  stationMeta.Name,
+				StationLat:   stationMeta.Lat,
+				StationLon:   stationMeta.Lon,
+				DistanceNM: distanceNM(
+					lat,
+					lon,
+					stationMeta.Lat,
+					stationMeta.Lon,
+				),
+			}
+
+			if autoErr == nil || len(autoSelection.Candidates) > 0 {
+				selection.Candidates = autoSelection.Candidates
+				selection.CandidatesChecked =
+					autoSelection.CandidatesChecked
+
+				for i := range selection.Candidates {
+					if strings.EqualFold(
+						selection.Candidates[i].StationID,
+						autoSelection.StationID,
+					) {
+						selection.Candidates[i].Reason =
+							"[AUTO] " +
+								selection.Candidates[i].Reason
+					}
+				}
+			}
+
+			if latest, ok := latestUsableWindTime(observations); ok {
+				age := time.Since(latest.UTC())
+				if age < 0 {
+					age = 0
+				}
+				selection.ObservationAgeMinutes =
+					int(age.Round(time.Minute) / time.Minute)
+			}
+
+			return explicitStation, observations, selection, nil
+		}
+
+		// No lat/lon: make the selected station itself the browsing anchor.
+		if metaErr == nil {
+			return explicitStation,
+				observations,
+				buildStationBrowseSelection(stationMeta, observations),
+				nil
+		}
+
+		return explicitStation, observations, nil, nil
+	}
+
+	if hasLocation {
+		station, observations, selection, err :=
+			findNearestUsableWindStation(lat, lon)
+		if err != nil {
+			return "", nil, &selection, err
+		}
+
+		for i := range selection.Candidates {
+			if strings.EqualFold(
+				selection.Candidates[i].StationID,
+				selection.StationID,
+			) && !strings.HasPrefix(
+				selection.Candidates[i].Reason,
+				"[AUTO] ",
+			) {
+				selection.Candidates[i].Reason =
+					"[AUTO] " + selection.Candidates[i].Reason
+			}
+		}
+
+		return station.ID, observations, &selection, nil
+	}
+
+	// No parameters: retain PSBC1 (or configured default) as the report
+	// station, but use it as an anchor for the nearby station browser.
+	stationID := strings.ToUpper(strings.TrimSpace(defaultStation))
+	if !validStationID(stationID) {
+		return "", nil, nil, fmt.Errorf("invalid station ID %q", stationID)
+	}
+
+	observations, err := getWindStation(stationID)
+	if err != nil {
+		return stationID, observations, nil, err
+	}
+
+	if stationMeta, metaErr := fetchNDBCStation(stationID); metaErr == nil {
+		return stationID,
+			observations,
+			buildStationBrowseSelection(stationMeta, observations),
+			nil
+	}
+
+	return stationID, observations, nil, nil
+}
+
+func writeWindCandidateDiagnostics(
+	w io.Writer,
+	selection *WindStationSelection,
+) {
+	if selection == nil || len(selection.Candidates) == 0 {
+		return
+	}
+
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "WIND STATION CANDIDATES")
+	fmt.Fprintln(w, "--------------------------------")
+
+	for i, candidate := range selection.Candidates {
+		status := strings.ToUpper(candidate.WindStatus)
+		if status == "" {
+			status = "UNKNOWN"
+		}
+
+		fmt.Fprintf(
+			w,
+			"%2d  %-8s  %-38s %6.1f nmi  met=%-4s  %-8s",
+			i+1,
+			candidate.StationID,
+			truncateWindStationName(candidate.StationName, 38),
+			candidate.DistanceNM,
+			candidate.Met,
+			status,
+		)
+
+		if strings.TrimSpace(candidate.Reason) != "" {
+			fmt.Fprintf(w, "  %s", candidate.Reason)
+		}
+		fmt.Fprintln(w)
+	}
+}
+
+func truncateWindStationName(name string, width int) string {
+	name = strings.TrimSpace(name)
+	if len(name) <= width {
+		return name
+	}
+	if width <= 3 {
+		return name[:width]
+	}
+	return name[:width-3] + "..."
+}
+
+func writeWindSelectionText(
+	w io.Writer,
+	selection *WindStationSelection,
+) {
+	if selection == nil {
+		return
+	}
+
+	fmt.Fprintf(
+		w,
+		"Wind location: %.5f, %.5f. Selected %s",
+		selection.RequestedLat,
+		selection.RequestedLon,
+		selection.StationID,
+	)
+	if strings.TrimSpace(selection.StationName) != "" {
+		fmt.Fprintf(w, " — %s", selection.StationName)
+	}
+	fmt.Fprintf(
+		w,
+		", %.1f nmi away (nearest station with usable wind).\n",
+		selection.DistanceNM,
+	)
+}
+
 func runServer(
 	port string,
 	defaultStation string,
@@ -188,18 +500,41 @@ func runServer(
 			return
 		}
 
-		stationID := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("station")))
-		if stationID == "" {
-			stationID = defaultStation
-		}
-		if !validStationID(stationID) {
-			http.Error(w, "invalid station ID", http.StatusBadRequest)
-			return
-		}
+		requestedFormat := strings.ToLower(
+			strings.TrimSpace(r.URL.Query().Get("format")),
+		)
+		htmlRequested := requestedFormat == "html"
 
-		observations, err := getWindStation(stationID)
+		stationID, observations, windSelection, err :=
+			resolveHTTPWindStation(r, defaultStation)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			// Browser/HTML requests should always get a useful branded page,
+			// even if automatic wind-station selection or NOAA retrieval fails.
+			if htmlRequested {
+				report := &SailingReport{
+					Station:            "Requested location",
+					RequestQuery:       cloneQuery(r.URL.Query()),
+					ReportTime:         time.Now(),
+					WindSelection:      windSelection,
+					DebugWindSelection: queryBool(r, "debug_wind"),
+					WindError:          err.Error(),
+					Current: &CurrentReport{
+						Error: "Current prediction was not attempted because no usable wind reference station was resolved.",
+					},
+				}
+				writeHTMLReport(w, report, loc)
+				return
+			}
+
+			// Text diagnostics retain the detailed candidate output.
+			if queryBool(r, "debug_wind") &&
+				windSelection != nil {
+				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				fmt.Fprintf(w, "Wind station selection failed: %v\n", err)
+				writeWindCandidateDiagnostics(w, windSelection)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
@@ -258,8 +593,12 @@ func runServer(
 			}
 		}
 
+		report.WindSelection = windSelection
+		report.DebugWindSelection = queryBool(r, "debug_wind")
+		report.RequestQuery = cloneQuery(r.URL.Query())
+
 		compact := queryBool(r, "compact")
-		format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+		format := requestedFormat
 		if format == "html" {
 			writeHTMLReport(w, report, loc)
 			return
@@ -295,6 +634,20 @@ func runServer(
 	}
 }
 
+type htmlWindCandidate struct {
+	Rank       int
+	Station    string
+	Name       string
+	Distance   string
+	Met        string
+	Status     string
+	Reason     string
+	Class      string
+	URL        string
+	IsAuto     bool
+	IsSelected bool
+}
+
 type htmlCurrentEvent struct{ Time, Label, Speed, Direction, Class string }
 type htmlReportData struct {
 	Title, Station, ReportTime                       string
@@ -302,6 +655,11 @@ type htmlReportData struct {
 	RequestedTime                                    string
 	WindDirection, WindSpeed, WindGust, WindObserved string
 	WindSummary                                      string
+	WindSelection                                    string
+	WindCandidates                                   []htmlWindCandidate
+	DebugWind                                        bool
+	WindError                                        string
+	UseNearestURL                                    string
 	CurrentStation, CurrentMeta                      string
 	CurrentOutlook                                   []string
 	CurrentEvents                                    []htmlCurrentEvent
@@ -318,6 +676,8 @@ func writeHTMLReport(w http.ResponseWriter, report *SailingReport, loc *time.Loc
 }
 func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportData {
 	d := htmlReportData{Station: report.Station, Title: report.Station}
+	d.DebugWind = report.DebugWindSelection
+	d.WindError = strings.TrimSpace(report.WindError)
 	if !report.ReportTime.IsZero() {
 		d.ReportTime = report.ReportTime.In(loc).Format("Mon Jan 2, 2006 · 3:04 PM MST")
 	}
@@ -368,26 +728,157 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 		d.WindGust = "—"
 		d.WindObserved = "Wind observation unavailable"
 	}
-	// Generate the same wind summary used by the text report so the HTML
-	// card always has an authoritative fallback.
-	var windText strings.Builder
-	if report.Historical != nil {
-		if report.Historical.Closest != nil {
-			printWindObservation(
+	// Generate the same wind summary used by the text report when wind
+	// data are available. Error pages use the explicit WindError instead.
+	if d.WindError == "" {
+		var windText strings.Builder
+		if report.Historical != nil {
+			if report.Historical.Closest != nil {
+				printWindObservation(
+					&windText,
+					report.Historical.Closest,
+					loc,
+					report.Historical.Requested,
+				)
+			}
+		} else {
+			writeWindSummaryText(
 				&windText,
-				report.Historical.Closest,
+				report,
 				loc,
-				report.Historical.Requested,
 			)
 		}
-	} else {
-		writeWindSummaryText(
-			&windText,
-			report,
-			loc,
-		)
+		d.WindSummary = strings.TrimSpace(windText.String())
 	}
-	d.WindSummary = strings.TrimSpace(windText.String())
+
+	if report.WindSelection != nil {
+		s := report.WindSelection
+		name := strings.TrimSpace(s.StationName)
+		selectionPrefix := "Selected"
+		if strings.EqualFold(s.Mode, "manual-override") {
+			selectionPrefix = "Manual override"
+		}
+
+		if strings.EqualFold(s.Mode, "station-browser") {
+			if name != "" {
+				d.WindSelection = fmt.Sprintf(
+					"%s %s — %s; observation %d min old",
+					selectionPrefix,
+					s.StationID,
+					name,
+					s.ObservationAgeMinutes,
+				)
+			} else {
+				d.WindSelection = fmt.Sprintf(
+					"%s %s; observation %d min old",
+					selectionPrefix,
+					s.StationID,
+					s.ObservationAgeMinutes,
+				)
+			}
+		} else if strings.TrimSpace(s.StationID) == "" {
+			d.WindSelection = fmt.Sprintf(
+				"Requested location %.5f, %.5f",
+				s.RequestedLat,
+				s.RequestedLon,
+			)
+		} else if name != "" {
+			d.WindSelection = fmt.Sprintf(
+				"%s %s — %s, %.1f nmi from %.5f, %.5f; observation %d min old",
+				selectionPrefix,
+				s.StationID,
+				name,
+				s.DistanceNM,
+				s.RequestedLat,
+				s.RequestedLon,
+				s.ObservationAgeMinutes,
+			)
+		} else {
+			d.WindSelection = fmt.Sprintf(
+				"%s %s, %.1f nmi from %.5f, %.5f; observation %d min old",
+				selectionPrefix,
+				s.StationID,
+				s.DistanceNM,
+				s.RequestedLat,
+				s.RequestedLon,
+				s.ObservationAgeMinutes,
+			)
+		}
+	}
+
+	if report.WindSelection != nil {
+		for i, candidate := range report.WindSelection.Candidates {
+			className := "candidate-bad"
+			if strings.EqualFold(candidate.WindStatus, "usable") {
+				className = "candidate-good"
+			}
+
+			isSelected := strings.EqualFold(
+				candidate.StationID,
+				report.WindSelection.StationID,
+			)
+			isAuto := strings.HasPrefix(
+				candidate.Reason,
+				"[AUTO] ",
+			)
+			reason := strings.TrimPrefix(
+				candidate.Reason,
+				"[AUTO] ",
+			)
+
+			if isSelected {
+				className += " candidate-selected"
+			}
+			if isAuto {
+				className += " candidate-auto"
+			}
+
+			linkQuery := cloneQuery(report.RequestQuery)
+			linkQuery.Set(
+				"station",
+				strings.ToUpper(candidate.StationID),
+			)
+			linkQuery.Set("format", "html")
+			if report.DebugWindSelection {
+				linkQuery.Set("debug_wind", "1")
+			} else {
+				linkQuery.Del("debug_wind")
+			}
+
+			d.WindCandidates = append(
+				d.WindCandidates,
+				htmlWindCandidate{
+					Rank:       i + 1,
+					Station:    strings.ToUpper(candidate.StationID),
+					Name:       candidate.StationName,
+					Distance:   fmt.Sprintf("%.1f nmi", candidate.DistanceNM),
+					Met:        candidate.Met,
+					Status:     strings.ToUpper(candidate.WindStatus),
+					Reason:     reason,
+					Class:      className,
+					URL:        "/report?" + linkQuery.Encode(),
+					IsAuto:     isAuto,
+					IsSelected: isSelected,
+				},
+			)
+		}
+	}
+
+	if report.WindSelection != nil {
+		_, _, hasUserLocation, _ :=
+			parseOptionalLatLon(report.RequestQuery)
+		if hasUserLocation {
+			nearestQuery := cloneQuery(report.RequestQuery)
+			nearestQuery.Del("station")
+			nearestQuery.Set("format", "html")
+			if report.DebugWindSelection {
+				nearestQuery.Set("debug_wind", "1")
+			} else {
+				nearestQuery.Del("debug_wind")
+			}
+			d.UseNearestURL = "/report?" + nearestQuery.Encode()
+		}
+	}
 
 	if report.Current != nil && report.Current.Error == "" {
 		if report.Current.CurrentStation != nil {
@@ -414,17 +905,29 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 		}
 		d.CurrentChart = buildCurrentChartSVG(report.Current, report.ReportTime, loc)
 	}
-	var b strings.Builder
-	writeBottomLineText(&b, report)
-	for _, line := range strings.Split(strings.TrimSpace(b.String()), "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" && line != "BOTTOM LINE" && !strings.HasPrefix(line, "---") {
-			d.BottomLine = append(d.BottomLine, line)
+	if d.WindError != "" {
+		d.BottomLine = append(
+			d.BottomLine,
+			"Wind station selection is unavailable for the requested location.",
+			"Try nearby coordinates, an explicit NDBC station ID, or enable debug_wind=1 to inspect nearby candidates.",
+		)
+		d.FullText = fmt.Sprintf(
+			"WIND STATION SELECTION UNAVAILABLE\n--------------------------------\n%s",
+			d.WindError,
+		)
+	} else {
+		var b strings.Builder
+		writeBottomLineText(&b, report)
+		for _, line := range strings.Split(strings.TrimSpace(b.String()), "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" && line != "BOTTOM LINE" && !strings.HasPrefix(line, "---") {
+				d.BottomLine = append(d.BottomLine, line)
+			}
 		}
+		var full strings.Builder
+		writeTextReport(&full, report, loc)
+		d.FullText = strings.TrimSpace(full.String())
 	}
-	var full strings.Builder
-	writeTextReport(&full, report, loc)
-	d.FullText = strings.TrimSpace(full.String())
 
 	return d
 }
@@ -606,9 +1109,10 @@ var sailingHTMLTemplate = template.Must(template.New("sailing").Parse(`<!doctype
 <title>Mauri’s Sailing Outlook — {{.Title}}</title>
 <style>:root{--navy:#082b45;--blue:#126b91;--sea:#0b8793;--ink:#153242;--muted:#607886;--paper:#f5fafc;--card:#fff;--line:#d8e7ed;--flood:#087f8c;--ebb:#365f91;--slack:#756d64;--shadow:0 12px 34px rgba(8,43,69,.10)}*{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#dff3f8,#f7fbfc 32rem);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Avenir Next",Avenir,Helvetica,Arial,sans-serif;line-height:1.45}.shell{max-width:880px;margin:auto;padding:28px 18px 64px}.hero{color:#fff;padding:34px 30px 30px;border-radius:24px;min-height:360px;display:flex;flex-direction:column;justify-content:flex-end;background:
 linear-gradient(180deg,rgba(4,24,38,.06) 12%,rgba(4,24,38,.24) 48%,rgba(4,24,38,.86) 100%),
-url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text-shadow:0 2px 12px rgba(0,0,0,.45)}.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-weight:800;font-size:.76rem;opacity:.8}.photo-tag{margin-top:14px;font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;opacity:.72}h1{font-size:clamp(1.8rem,6vw,3.2rem);line-height:1.05;margin:.4rem 0 .6rem;letter-spacing:-.035em}.sub{opacity:.82}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}.full{grid-column:1/-1}h2{font-size:.82rem;letter-spacing:.13em;text-transform:uppercase;color:var(--blue);margin:0 0 16px}.bottom{font-size:1.13rem}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.metric{background:var(--paper);border-radius:15px;padding:14px}.label{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700}.value{font-size:1.55rem;font-weight:800;color:var(--navy)}.meta{color:var(--muted);font-size:.88rem;margin-top:12px}.station{font-weight:800;font-size:1.1rem;color:var(--navy)}.wind-summary{white-space:pre-line;margin-top:14px;padding:13px 14px;background:#eef7fa;border-left:4px solid var(--sea);border-radius:10px;color:var(--ink);font-size:.92rem}.event{display:grid;grid-template-columns:88px 12px 1fr;gap:12px;align-items:center;min-height:58px}.time{font-weight:800;color:var(--navy)}.dot{width:12px;height:12px;border-radius:50%;background:var(--slack);box-shadow:0 0 0 5px #edf3f5}.flood .dot{background:var(--flood)}.ebb .dot{background:var(--ebb)}.eventbody{border-left:2px solid var(--line);padding:8px 0 8px 18px}.eventlabel{font-weight:800}.eventdata{color:var(--muted);font-size:.9rem}.badge{display:inline-block;border-radius:999px;padding:5px 10px;background:#e9f6fb;color:var(--blue);font-size:.75rem;font-weight:800;margin-top:12px}.footer{text-align:center;color:var(--muted);font-size:.78rem;margin-top:22px}.full-report{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:.88rem;line-height:1.55;background:#071f31;color:#e7f4f8;border-radius:14px;padding:18px;overflow-x:auto}.details-note{color:var(--muted);font-size:.88rem;margin:-4px 0 14px}.current-chart-wrap{margin-top:16px}.current-chart-svg{display:block;width:100%;height:auto;background:#f8fbfc;border:1px solid var(--line);border-radius:16px}.grid-line{stroke:#d9e4e8;stroke-width:1}.v-grid-line{stroke:#e6eef1;stroke-width:1}.zero-line{stroke:#17384a;stroke-width:2}.axis-label{fill:#657d89;font-size:11px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.y-label{text-anchor:end}.x-label{text-anchor:middle}.axis-title{fill:#657d89;font-size:11px;text-anchor:middle}.sail-window{fill:#dcebf0;opacity:.55}.flood-area{fill:#6d8fd0;opacity:.86}.ebb-area{fill:#0b9d83;opacity:.90}.current-line{fill:none;stroke:#214b62;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}.event-point{stroke:#fff;stroke-width:1.5}.event-point.flood{fill:#5478bd}.event-point.ebb{fill:#078a75}.event-point.slack{fill:#756d64}.now-line{stroke:#c63a2b;stroke-width:2.5}.now-label{fill:#c63a2b;font-size:11px;font-weight:800}.chart-explainer{color:var(--ink);font-size:.94rem;line-height:1.45;margin:2px 0 12px}.chart-note{color:var(--muted);font-size:.82rem;margin-top:9px}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}</style></head><body><main class="shell">
+url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text-shadow:0 2px 12px rgba(0,0,0,.45)}.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-weight:800;font-size:.76rem;opacity:.8}.photo-tag{margin-top:14px;font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;opacity:.72}h1{font-size:clamp(1.8rem,6vw,3.2rem);line-height:1.05;margin:.4rem 0 .6rem;letter-spacing:-.035em}.sub{opacity:.82}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}.full{grid-column:1/-1}h2{font-size:.82rem;letter-spacing:.13em;text-transform:uppercase;color:var(--blue);margin:0 0 16px}.bottom{font-size:1.13rem}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.metric{background:var(--paper);border-radius:15px;padding:14px}.label{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700}.value{font-size:1.55rem;font-weight:800;color:var(--navy)}.meta{color:var(--muted);font-size:.88rem;margin-top:12px}.station{font-weight:800;font-size:1.1rem;color:var(--navy)}.wind-summary{white-space:pre-line;margin-top:14px;padding:13px 14px;background:#eef7fa;border-left:4px solid var(--sea);border-radius:10px;color:var(--ink);font-size:.92rem}.event{display:grid;grid-template-columns:88px 12px 1fr;gap:12px;align-items:center;min-height:58px}.time{font-weight:800;color:var(--navy)}.dot{width:12px;height:12px;border-radius:50%;background:var(--slack);box-shadow:0 0 0 5px #edf3f5}.flood .dot{background:var(--flood)}.ebb .dot{background:var(--ebb)}.eventbody{border-left:2px solid var(--line);padding:8px 0 8px 18px}.eventlabel{font-weight:800}.eventdata{color:var(--muted);font-size:.9rem}.badge{display:inline-block;border-radius:999px;padding:5px 10px;background:#e9f6fb;color:var(--blue);font-size:.75rem;font-weight:800;margin-top:12px}.footer{text-align:center;color:var(--muted);font-size:.78rem;margin-top:22px}.full-report{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:.88rem;line-height:1.55;background:#071f31;color:#e7f4f8;border-radius:14px;padding:18px;overflow-x:auto}.details-note{color:var(--muted);font-size:.88rem;margin:-4px 0 14px}.current-chart-wrap{margin-top:16px}.current-chart-svg{display:block;width:100%;height:auto;background:#f8fbfc;border:1px solid var(--line);border-radius:16px}.grid-line{stroke:#d9e4e8;stroke-width:1}.v-grid-line{stroke:#e6eef1;stroke-width:1}.zero-line{stroke:#17384a;stroke-width:2}.axis-label{fill:#657d89;font-size:11px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.y-label{text-anchor:end}.x-label{text-anchor:middle}.axis-title{fill:#657d89;font-size:11px;text-anchor:middle}.sail-window{fill:#dcebf0;opacity:.55}.flood-area{fill:#6d8fd0;opacity:.86}.ebb-area{fill:#0b9d83;opacity:.90}.current-line{fill:none;stroke:#214b62;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}.event-point{stroke:#fff;stroke-width:1.5}.event-point.flood{fill:#5478bd}.event-point.ebb{fill:#078a75}.event-point.slack{fill:#756d64}.now-line{stroke:#c63a2b;stroke-width:2.5}.now-label{fill:#c63a2b;font-size:11px;font-weight:800}.chart-explainer{color:var(--ink);font-size:.94rem;line-height:1.45;margin:2px 0 12px}.chart-note{color:var(--muted);font-size:.82rem;margin-top:9px}.candidate-table{width:100%;border-collapse:collapse;font-size:.86rem}.candidate-table th,.candidate-table td{padding:10px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}.candidate-table th{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}.candidate-table td.num,.candidate-table th.num{text-align:right;white-space:nowrap}.candidate-good td.status{font-weight:800}.candidate-bad{opacity:.82}.candidate-selected{background:rgba(20,120,100,.08)}.candidate-selected td:first-child{font-weight:800}.candidate-note{color:var(--muted);font-size:.82rem;margin:0 0 12px}.candidate-scroll{overflow-x:auto}.candidate-link{color:var(--blue);text-decoration:none;font-weight:800}.candidate-link:hover{text-decoration:underline}.candidate-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:0 0 12px}.nearest-link{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:7px 12px;color:var(--blue);font-weight:800;text-decoration:none;background:#fff}.nearest-link:hover{background:var(--paper)}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}.error-card{border-left:5px solid #b64735;background:#fff7f4}.error-card h2{color:#8f3025}.error-message{font-weight:650;line-height:1.5}.error-help{color:var(--muted);font-size:.9rem}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}</style></head><body><main class="shell">
 <section class="hero"><div class="eyebrow">Mauri’s Sailing Outlook</div><h1>{{.Title}}</h1><div class="sub">{{.ReportTime}} · {{.Station}}</div>{{if .Historical}}<span class="badge">Historical · {{.RequestedTime}}</span>{{end}}<div class="photo-tag">Bay sailing</div></section><div class="grid">
 <section class="card full bottom"><h2>Bottom line</h2>{{range .BottomLine}}<p>{{.}}</p>{{else}}<p>Summary unavailable.</p>{{end}}</section>
+{{if .WindError}}<section class="card full error-card"><h2>Wind station selection unavailable</h2><p class="error-message">{{.WindError}}</p><p class="error-help">The page is still available so you can inspect the request and nearby station diagnostics. Try nearby coordinates or an explicit NDBC station ID.</p></section>{{end}}
 <section class="card"><h2>Wind</h2>
 <div class="metrics">
 <div class="metric"><div class="label">Direction</div><div class="value">{{if .WindDirection}}{{.WindDirection}}{{else}}—{{end}}</div></div>
@@ -616,8 +1120,11 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 <div class="metric"><div class="label">Gust</div><div class="value">{{if .WindGust}}{{.WindGust}}{{else}}—{{end}}</div></div>
 </div>
 <div class="meta"><strong>Observed:</strong> {{if .WindObserved}}{{.WindObserved}}{{else}}unavailable{{end}}</div>
+{{if .WindSelection}}<div class="meta"><strong>Wind station:</strong> {{.WindSelection}}</div>{{end}}
 {{if .WindSummary}}<div class="wind-summary">{{.WindSummary}}</div>{{end}}
 </section>
+{{if .WindCandidates}}<section class="card full"><h2>Nearby Wind Stations</h2><p class="candidate-note">{{if .DebugWind}}Nearby stations are probed concurrently and sorted by distance. Click any station to reload the outlook using that station.{{else}}Click a station to explore its wind and sailing outlook. Stations are ordered by distance from the current browsing location.{{end}}</p>{{if .UseNearestURL}}<div class="candidate-actions"><a class="nearest-link" href="{{.UseNearestURL}}">Use nearest usable station</a></div>{{end}}<div class="candidate-scroll"><table class="candidate-table"><thead><tr><th>#</th><th>Station</th><th>Name</th><th>State</th><th class="num">Distance</th>{{if .DebugWind}}<th>Met</th><th>Status</th><th>Reason</th>{{end}}</tr></thead><tbody>{{range .WindCandidates}}<tr class="{{.Class}}"><td>{{.Rank}}</td><td><a class="candidate-link" href="{{.URL}}">{{.Station}}</a></td><td><a class="candidate-link" href="{{.URL}}">{{.Name}}</a></td><td><div class="candidate-state">{{if .IsAuto}}<span class="candidate-badge badge-auto">AUTO</span>{{end}}{{if .IsSelected}}<span class="candidate-badge badge-selected">SELECTED</span>{{end}}</div></td><td class="num">{{.Distance}}</td>{{if $.DebugWind}}<td>{{.Met}}</td><td class="status">{{.Status}}</td><td>{{.Reason}}</td>{{end}}</tr>{{end}}</tbody></table></div></section>{{end}}
+
 <section class="card"><h2>Current</h2>{{if .CurrentStation}}<div class="station">{{.CurrentStation}}</div><div class="meta">{{.CurrentMeta}}</div>{{range .CurrentOutlook}}<p>{{.}}</p>{{end}}{{else}}<p>Current prediction unavailable.</p>{{end}}</section>
 {{if .CurrentChart}}<section class="card full"><h2>Tidal Current Through the Day</h2><div class="chart-explainer"><strong>This is current, not tide height.</strong> Above zero = flood; below zero = ebb; crossings = slack water.</div><div class="current-chart-wrap">{{.CurrentChart}}</div><div class="chart-note">NOAA 6-minute harmonic current predictions. Shaded band marks the sailing window; red line marks report time.</div></section>{{end}}
 <section class="card full"><h2>Current timeline</h2>{{range .CurrentEvents}}<div class="event {{.Class}}"><div class="time">{{.Time}}</div><div class="dot"></div><div class="eventbody"><div class="eventlabel">{{.Label}}</div>{{if .Speed}}<div class="eventdata">{{.Speed}} · {{.Direction}}</div>{{end}}</div></div>{{else}}<p>No current events in the selected sailing window.</p>{{end}}</section>
@@ -756,9 +1263,14 @@ func writeCompactTextReport(
 	fmt.Fprintln(w, "================================")
 	fmt.Fprintf(
 		w,
-		"Report time: %s\n\n",
+		"Report time: %s\n",
 		report.ReportTime.In(loc).Format("Mon Jan 2, 2006 3:04:05 PM MST"),
 	)
+	writeWindSelectionText(w, report.WindSelection)
+	if report.DebugWindSelection {
+		writeWindCandidateDiagnostics(w, report.WindSelection)
+	}
+	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "BOTTOM LINE")
 	fmt.Fprintln(w, "--------------------------------")
@@ -868,9 +1380,14 @@ func writeTextReport(
 	fmt.Fprintln(w, "================================")
 	fmt.Fprintf(
 		w,
-		"Report time: %s\n\n",
+		"Report time: %s\n",
 		report.ReportTime.In(loc).Format("Mon Jan 2, 2006 3:04:05 PM MST"),
 	)
+	writeWindSelectionText(w, report.WindSelection)
+	if report.DebugWindSelection {
+		writeWindCandidateDiagnostics(w, report.WindSelection)
+	}
+	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "BOTTOM LINE")
 	fmt.Fprintln(w, "--------------------------------")
@@ -1077,6 +1594,12 @@ Examples:
 
   Richmond report:
     curl -sS "http://localhost:8080/report?station=RCMC1"
+
+  Resolve nearest usable wind station from decimal coordinates:
+    curl -sS "http://localhost:8080/report?lat=37.9105&lon=-122.3602"
+
+  Diagnose wind-station selection:
+    curl -sS "http://localhost:8080/report?lat=37.9105&lon=-122.3602&debug_wind=1"
 
   Force Simmons Point current prediction for PSBC1:
     curl -sS       "http://localhost:8080/report?station=PSBC1&current_station=SFB1325&bin=9"

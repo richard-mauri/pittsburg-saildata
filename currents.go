@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -29,7 +30,12 @@ const (
 
 	// Metadata changes infrequently. Cache it to avoid an MDAPI request for
 	// every sailing report while still refreshing periodically.
-	currentMetadataCacheTTL = 24 * time.Hour
+	currentMetadataCacheTTL  = 24 * time.Hour
+	windMetadataCacheTTL     = 24 * time.Hour
+	windStationProbeTimeout  = 5 * time.Second
+	windStationProbeWorkers  = 8
+	windStationMaxCandidates = 20
+	windStationMaxDistanceNM = 75.0
 )
 
 type NDBCStations struct {
@@ -42,6 +48,29 @@ type NDBCStation struct {
 	Lat  float64 `xml:"lat,attr" json:"lat"`
 	Lon  float64 `xml:"lon,attr" json:"lon"`
 	Met  string  `xml:"met,attr" json:"met,omitempty"`
+}
+
+type WindStationCandidateDiagnostic struct {
+	StationID   string  `json:"station_id"`
+	StationName string  `json:"station_name,omitempty"`
+	DistanceNM  float64 `json:"distance_nm"`
+	Met         string  `json:"met,omitempty"`
+	WindStatus  string  `json:"wind_status"`
+	Reason      string  `json:"reason,omitempty"`
+}
+
+type WindStationSelection struct {
+	Mode                  string                           `json:"mode"`
+	RequestedLat          float64                          `json:"requested_lat,omitempty"`
+	RequestedLon          float64                          `json:"requested_lon,omitempty"`
+	StationID             string                           `json:"station_id"`
+	StationName           string                           `json:"station_name,omitempty"`
+	StationLat            float64                          `json:"station_lat,omitempty"`
+	StationLon            float64                          `json:"station_lon,omitempty"`
+	DistanceNM            float64                          `json:"distance_nm,omitempty"`
+	CandidatesChecked     int                              `json:"candidates_checked,omitempty"`
+	ObservationAgeMinutes int                              `json:"observation_age_minutes,omitempty"`
+	Candidates            []WindStationCandidateDiagnostic `json:"candidates,omitempty"`
 }
 
 // CurrentStation represents a NOAA CO-OPS CURRENT PREDICTION station.
@@ -210,6 +239,12 @@ func (i *flexibleInt) UnmarshalJSON(data []byte) error {
 var currentStationCache = struct {
 	sync.RWMutex
 	stations []CurrentStation
+	loadedAt time.Time
+}{}
+
+var windStationCache = struct {
+	sync.RWMutex
+	stations []NDBCStation
 	loadedAt time.Time
 }{}
 
@@ -558,34 +593,14 @@ func writeCurrentText(
 }
 
 func fetchNDBCStation(stationID string) (NDBCStation, error) {
-	client := &http.Client{Timeout: 15 * time.Second}
+	stationID = strings.ToUpper(strings.TrimSpace(stationID))
 
-	resp, err := client.Get(ndbcStationsURL)
+	stations, err := getActiveNDBCStations()
 	if err != nil {
-		return NDBCStation{}, fmt.Errorf(
-			"NDBC station metadata request failed: %w",
-			err,
-		)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return NDBCStation{}, fmt.Errorf(
-			"NDBC station metadata returned HTTP %d",
-			resp.StatusCode,
-		)
+		return NDBCStation{}, err
 	}
 
-	var stations NDBCStations
-
-	if err := xml.NewDecoder(resp.Body).Decode(&stations); err != nil {
-		return NDBCStation{}, fmt.Errorf(
-			"unable to parse NDBC station metadata: %w",
-			err,
-		)
-	}
-
-	for _, station := range stations.Stations {
+	for _, station := range stations {
 		if strings.EqualFold(station.ID, stationID) {
 			return station, nil
 		}
@@ -594,6 +609,321 @@ func fetchNDBCStation(stationID string) (NDBCStation, error) {
 	return NDBCStation{}, fmt.Errorf(
 		"NDBC station %q not found in active station list",
 		stationID,
+	)
+}
+
+func stationHasMeteorologicalData(station NDBCStation) bool {
+	switch strings.ToLower(strings.TrimSpace(station.Met)) {
+	case "y", "yes", "true", "1":
+		return true
+	default:
+		return false
+	}
+}
+
+func getActiveNDBCStations() ([]NDBCStation, error) {
+	windStationCache.RLock()
+	if len(windStationCache.stations) > 0 &&
+		time.Since(windStationCache.loadedAt) < windMetadataCacheTTL {
+		result := append([]NDBCStation(nil), windStationCache.stations...)
+		windStationCache.RUnlock()
+		return result, nil
+	}
+	windStationCache.RUnlock()
+
+	windStationCache.Lock()
+	defer windStationCache.Unlock()
+
+	if len(windStationCache.stations) > 0 &&
+		time.Since(windStationCache.loadedAt) < windMetadataCacheTTL {
+		return append([]NDBCStation(nil), windStationCache.stations...), nil
+	}
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Get(ndbcStationsURL)
+	if err != nil {
+		if len(windStationCache.stations) > 0 {
+			return append([]NDBCStation(nil), windStationCache.stations...), nil
+		}
+		return nil, fmt.Errorf("NDBC station metadata request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		if len(windStationCache.stations) > 0 {
+			return append([]NDBCStation(nil), windStationCache.stations...), nil
+		}
+		return nil, fmt.Errorf(
+			"NDBC station metadata returned HTTP %d",
+			resp.StatusCode,
+		)
+	}
+
+	var payload NDBCStations
+	if err := xml.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		if len(windStationCache.stations) > 0 {
+			return append([]NDBCStation(nil), windStationCache.stations...), nil
+		}
+		return nil, fmt.Errorf("unable to parse NDBC station metadata: %w", err)
+	}
+
+	usable := make([]NDBCStation, 0, len(payload.Stations))
+	for _, station := range payload.Stations {
+		station.ID = strings.ToUpper(strings.TrimSpace(station.ID))
+		if station.ID == "" ||
+			(station.Lat == 0 && station.Lon == 0) {
+			continue
+		}
+		if !stationHasMeteorologicalData(station) {
+			continue
+		}
+		usable = append(usable, station)
+	}
+
+	if len(usable) == 0 {
+		return nil, fmt.Errorf(
+			"NDBC active-station metadata contained no met-capable stations",
+		)
+	}
+
+	windStationCache.stations = append([]NDBCStation(nil), usable...)
+	windStationCache.loadedAt = time.Now()
+
+	return append([]NDBCStation(nil), usable...), nil
+}
+
+type windStationCandidate struct {
+	Station    NDBCStation
+	DistanceNM float64
+}
+
+type windStationProbeResult struct {
+	Index        int
+	Candidate    windStationCandidate
+	Observations []Observation
+	Latest       time.Time
+	Err          error
+	Usable       bool
+}
+
+func latestUsableWindTime(observations []Observation) (time.Time, bool) {
+	for _, observation := range observations {
+		if !observation.HasWind {
+			continue
+		}
+		return observation.Time, true
+	}
+	return time.Time{}, false
+}
+
+func findNearestUsableWindStation(
+	lat float64,
+	lon float64,
+) (NDBCStation, []Observation, WindStationSelection, error) {
+	stations, err := getActiveNDBCStations()
+	if err != nil {
+		return NDBCStation{}, nil, WindStationSelection{}, err
+	}
+
+	candidates := make([]windStationCandidate, 0, len(stations))
+	for _, station := range stations {
+		distance := distanceNM(lat, lon, station.Lat, station.Lon)
+		if distance > windStationMaxDistanceNM {
+			continue
+		}
+		candidates = append(candidates, windStationCandidate{
+			Station:    station,
+			DistanceNM: distance,
+		})
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].DistanceNM < candidates[j].DistanceNM
+	})
+
+	if len(candidates) > windStationMaxCandidates {
+		candidates = candidates[:windStationMaxCandidates]
+	}
+
+	selection := WindStationSelection{
+		Mode:         "nearest-usable",
+		RequestedLat: lat,
+		RequestedLon: lon,
+	}
+
+	if len(candidates) == 0 {
+		return NDBCStation{}, nil, selection, fmt.Errorf(
+			"no met-capable NDBC wind station found within %.0f nmi",
+			windStationMaxDistanceNM,
+		)
+	}
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		windStationProbeTimeout,
+	)
+	defer cancel()
+
+	jobs := make(chan int)
+	results := make(chan windStationProbeResult, len(candidates))
+
+	workerCount := windStationProbeWorkers
+	if workerCount > len(candidates) {
+		workerCount = len(candidates)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(workerCount)
+
+	for worker := 0; worker < workerCount; worker++ {
+		go func() {
+			defer wg.Done()
+
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case index, ok := <-jobs:
+					if !ok {
+						return
+					}
+
+					candidate := candidates[index]
+					observations, fetchErr :=
+						getWindStation(candidate.Station.ID)
+
+					result := windStationProbeResult{
+						Index:        index,
+						Candidate:    candidate,
+						Observations: observations,
+						Err:          fetchErr,
+					}
+
+					if fetchErr == nil &&
+						len(observations) > 0 {
+						if latest, ok :=
+							latestUsableWindTime(observations); ok {
+							result.Latest = latest
+							result.Usable = true
+						}
+					}
+
+					select {
+					case results <- result:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	go func() {
+		defer close(jobs)
+		for i := range candidates {
+			select {
+			case jobs <- i:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Collect results by original distance order. This lets us probe
+	// concurrently while still choosing the geographically nearest usable
+	// station rather than whichever HTTP request happens to finish first.
+	probeResults := make([]*windStationProbeResult, len(candidates))
+	now := time.Now().UTC()
+
+	for result := range results {
+		copy := result
+		probeResults[result.Index] = &copy
+	}
+
+	// Build diagnostics in the same sorted order.
+	for i, candidate := range candidates {
+		diag := WindStationCandidateDiagnostic{
+			StationID:   candidate.Station.ID,
+			StationName: candidate.Station.Name,
+			DistanceNM:  candidate.DistanceNM,
+			Met:         candidate.Station.Met,
+			WindStatus:  "unusable",
+		}
+
+		result := probeResults[i]
+
+		switch {
+		case result == nil:
+			diag.Reason = fmt.Sprintf(
+				"probe timed out after %s",
+				windStationProbeTimeout,
+			)
+
+		case result.Err != nil:
+			diag.Reason = result.Err.Error()
+
+		case len(result.Observations) == 0:
+			diag.Reason = "realtime2 returned no parsed observations"
+
+		case !result.Usable:
+			diag.Reason = "realtime2 contained no observation with usable wind speed"
+
+		default:
+			age := now.Sub(result.Latest.UTC())
+			if age < 0 {
+				age = 0
+			}
+			diag.WindStatus = "usable"
+			diag.Reason = fmt.Sprintf(
+				"latest usable wind observation %d minutes old",
+				int(age.Round(time.Minute)/time.Minute),
+			)
+		}
+
+		selection.Candidates = append(
+			selection.Candidates,
+			diag,
+		)
+	}
+
+	// Select the nearest usable station, preserving distance ordering.
+	for i, result := range probeResults {
+		if result == nil || !result.Usable {
+			continue
+		}
+
+		candidate := candidates[i]
+		age := now.Sub(result.Latest.UTC())
+		if age < 0 {
+			age = 0
+		}
+
+		selection.StationID = candidate.Station.ID
+		selection.StationName = candidate.Station.Name
+		selection.StationLat = candidate.Station.Lat
+		selection.StationLon = candidate.Station.Lon
+		selection.DistanceNM = candidate.DistanceNM
+		selection.CandidatesChecked = len(candidates)
+		selection.ObservationAgeMinutes =
+			int(age.Round(time.Minute) / time.Minute)
+
+		return candidate.Station,
+			result.Observations,
+			selection,
+			nil
+	}
+
+	selection.CandidatesChecked = len(candidates)
+
+	return NDBCStation{}, nil, selection, fmt.Errorf(
+		"no usable NDBC wind station found within %.0f nmi after probing %d nearby met-capable stations in parallel",
+		windStationMaxDistanceNM,
+		len(candidates),
 	)
 }
 

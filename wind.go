@@ -60,9 +60,10 @@ type HistoricalReport struct {
 }
 
 func getWindStation(station string) ([]Observation, error) {
+	station = strings.ToUpper(strings.TrimSpace(station))
 	url := fmt.Sprintf("%s/%s.txt", ndbcBaseURL, station)
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := &http.Client{Timeout: 4 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
 		return nil, err
