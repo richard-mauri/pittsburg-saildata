@@ -494,6 +494,17 @@ func runServer(
 		http.Redirect(w, r, "/report?"+q.Encode(), http.StatusTemporaryRedirect)
 	})
 
+	mux.HandleFunc("/welcome", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := welcomeHTMLTemplate.Execute(w, nil); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+
 	mux.HandleFunc("/report", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1152,6 +1163,127 @@ func buildCurrentChartSVG(
 
 	return template.HTML(svg.String())
 }
+
+var welcomeHTMLTemplate = template.Must(template.New("welcome").Parse(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="Mauri’s Sailing Outlook — a sailing-planning tool for the San Francisco Bay and Delta using NOAA wind observations and current predictions.">
+<meta property="og:title" content="Mauri’s Sailing Outlook">
+<meta property="og:description" content="Pick where you're sailing. Get nearby wind observations and predicted currents.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://pittsburg-saildata.onrender.com/welcome">
+<meta property="og:image" content="https://pittsburg-saildata.onrender.com/assets/hero.jpg">
+<meta property="og:image:alt" content="Sailing on the San Francisco Bay and Delta">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Mauri’s Sailing Outlook">
+<meta name="twitter:description" content="Pick where you're sailing. Get nearby wind observations and predicted currents.">
+<meta name="twitter:image" content="https://pittsburg-saildata.onrender.com/assets/hero.jpg">
+<title>Mauri’s Sailing Outlook — Welcome</title>
+<style>
+:root{--navy:#082b45;--blue:#126b91;--sea:#0b8793;--ink:#153242;--muted:#607886;--paper:#f5fafc;--card:#fff;--line:#d8e7ed;--shadow:0 12px 34px rgba(8,43,69,.10)}
+*{box-sizing:border-box}
+body{margin:0;background:linear-gradient(180deg,#dff3f8,#f7fbfc 32rem);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Avenir Next",Avenir,Helvetica,Arial,sans-serif;line-height:1.55}
+.shell{max-width:900px;margin:auto;padding:28px 18px 64px}
+.hero{color:#fff;padding:34px 30px 30px;border-radius:24px;min-height:390px;display:flex;flex-direction:column;justify-content:flex-end;background:
+linear-gradient(180deg,rgba(4,24,38,.05) 10%,rgba(4,24,38,.28) 48%,rgba(4,24,38,.88) 100%),
+url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text-shadow:0 2px 12px rgba(0,0,0,.45)}
+.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-weight:800;font-size:.76rem;opacity:.84}
+.hero h1{font-size:clamp(2rem,6vw,3.5rem);line-height:1.02;margin:.35rem 0 .6rem}
+.hero p{max-width:650px;font-size:1.05rem;margin:0 0 18px}
+.cta-row{display:flex;gap:10px;flex-wrap:wrap}
+.cta{display:inline-block;text-decoration:none;font-weight:850;border-radius:999px;padding:11px 17px}
+.cta.primary{background:#fff;color:var(--navy)}
+.cta.secondary{border:1px solid rgba(255,255,255,.72);color:#fff;background:rgba(255,255,255,.08)}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:18px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:22px;box-shadow:var(--shadow)}
+.card.full{grid-column:1/-1}
+h2{margin:.1rem 0 .7rem;color:var(--navy);font-size:1.28rem}
+h3{margin:1.2rem 0 .35rem;color:var(--navy)}
+.quick ol{padding-left:1.25rem}
+.qa details{border-top:1px solid var(--line);padding:12px 0}
+.qa details:first-of-type{border-top:0}
+.qa summary{cursor:pointer;font-weight:800;color:var(--navy)}
+.qa p{margin:.65rem 0 0}
+.note{color:var(--muted)}
+.github-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:12px}
+.github-actions a{display:block;text-decoration:none;border:1px solid var(--line);border-radius:14px;padding:12px 14px;color:var(--blue);font-weight:800;background:#fbfdfe}
+.footer{margin-top:18px;text-align:center;color:var(--muted);font-size:.88rem}
+@media(max-width:680px){.grid{grid-template-columns:1fr}.github-actions{grid-template-columns:1fr}.hero{min-height:340px;padding:26px 22px}}
+</style>
+</head>
+<body>
+<main class="shell">
+<section class="hero">
+<div class="eyebrow">Mauri’s Sailing Outlook</div>
+<h1>Pick where you're sailing. Get the outlook.</h1>
+<p>A free sailing-planning tool for the San Francisco Bay and Delta using nearby NOAA wind observations and predicted tidal currents.</p>
+<div class="cta-row">
+<a class="cta primary" href="/report?format=html">Try the Sailing Outlook</a>
+<a class="cta secondary" href="https://github.com/richard-mauri/pittsburg-saildata">View on GitHub</a>
+</div>
+</section>
+
+<div class="grid">
+<section class="card quick">
+<h2>The 30-second version</h2>
+<ol>
+<li>Open the Sailing Outlook.</li>
+<li>Click where you plan to sail on the map.</li>
+<li>Click <strong>Generate Sailing Outlook</strong>.</li>
+<li>Read the <strong>Bottom Line</strong> first.</li>
+<li>Scroll down for wind-station choices, current timing, and the current graph.</li>
+</ol>
+<p class="note">You do not need to know buoy IDs, NOAA station numbers, or coordinates.</p>
+</section>
+
+<section class="card">
+<h2>What it combines</h2>
+<p><strong>Wind:</strong> recent NOAA/NDBC observations from a nearby station with usable wind data.</p>
+<p><strong>Current:</strong> NOAA CO-OPS current predictions including ebb, flood, slack, maximum speeds, and a smooth current curve.</p>
+<p><strong>Context:</strong> nearby station alternatives and relative current comparisons instead of relying only on vague words like “strong.”</p>
+</section>
+
+<section class="card full qa">
+<h2>Questions sailors will probably ask</h2>
+<details open><summary>Is this tide data or current data?</summary><p><strong>Current data.</strong> The report is about the predicted speed and direction of moving water — ebb, flood, maximum current, and slack. Tide height and current are related, but they are not the same thing.</p></details>
+<details><summary>How does it choose the wind station?</summary><p>Clicking the map gives the service a latitude/longitude. It looks at nearby NOAA/NDBC meteorological stations, checks them for usable wind observations, and chooses the nearest usable one.</p></details>
+<details><summary>Can I choose another wind station?</summary><p>Yes. The Nearby Wind Stations section is clickable. <strong>AUTO</strong> is the service's preferred station; <strong>SELECTED</strong> is the station currently driving the report.</p></details>
+<details><summary>What does the current graph show?</summary><p>Predicted current speed through the day. Flood is above zero, ebb is below zero, and crossings indicate slack water.</p></details>
+<details><summary>Why compare one ebb or flood with another?</summary><p>A raw knot value can be misleading without context. The report can show that an afternoon ebb, for example, is only about half as strong as the other ebb that day, and can compare it with recent cycles.</p></details>
+<details><summary>Is this for navigation or safety decisions?</summary><p>No. It is a sailing-planning and conditions-exploration tool. Observations can be delayed or missing, station exposure differs, and current predictions are predictions. Use normal marine forecasts, charts, local knowledge, and seamanship.</p></details>
+</section>
+
+<section class="card full">
+<h2>Know these waters? Your feedback is useful.</h2>
+<p>If something looks questionable, that's worth reporting. Examples: a wind station that doesn't represent Alameda well, confusing current wording, an unexpectedly weak or strong ebb, or a feature that would make the report more useful.</p>
+<p>You do not need to be a programmer to contribute useful sailing knowledge.</p>
+</section>
+
+<section class="card full">
+<h2>Follow or help improve the project</h2>
+<p>The project is open source:</p>
+<p><strong><a href="https://github.com/richard-mauri/pittsburg-saildata">github.com/richard-mauri/pittsburg-saildata</a></strong></p>
+<div class="github-actions">
+<a href="https://github.com/richard-mauri/pittsburg-saildata">⭐ Star the repository</a>
+<a href="https://github.com/richard-mauri/pittsburg-saildata/subscription">👀 Watch project activity</a>
+<a href="https://github.com/richard-mauri/pittsburg-saildata/issues">💡 Open an Issue</a>
+<a href="https://github.com/richard-mauri/pittsburg-saildata/pulls">🔧 View / submit Pull Requests</a>
+</div>
+<p class="note">Issues are not just for software bugs. Sailing terminology, station-selection concerns, and feature ideas are all useful.</p>
+</section>
+
+<section class="card full">
+<h2>Want the geeky version?</h2>
+<p>The browser submits the map point as decimal latitude/longitude. The Go service caches active NDBC station metadata, computes geographic distance, probes nearby candidates concurrently for usable wind, then combines that with NOAA CO-OPS current predictions. The same service also exposes text and JSON output for scripts and integrations.</p>
+</section>
+</div>
+
+<div class="footer">Mauri’s Sailing Outlook · San Francisco Bay & Delta · Sailing-planning utility, not a navigation system.</div>
+</main>
+</body>
+</html>`))
 
 var sailingHTMLTemplate = template.Must(template.New("sailing").Parse(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="description" content="Live sailing-oriented wind and current outlook using NOAA/NDBC observations and NOAA CO-OPS predictions.">
