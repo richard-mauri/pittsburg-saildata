@@ -84,18 +84,39 @@ type CurrentEvent struct {
 	Direction int       `json:"direction,omitempty"`
 }
 
+type CurrentSample struct {
+	Time       time.Time `json:"time"`
+	VelocityKT float64   `json:"velocity_kt"`
+}
+
+type CurrentComparison struct {
+	Type                string    `json:"type"`
+	Time                time.Time `json:"time"`
+	SpeedKT             float64   `json:"speed_kt"`
+	OtherTodayTime      time.Time `json:"other_today_time,omitempty"`
+	OtherTodaySpeedKT   float64   `json:"other_today_speed_kt,omitempty"`
+	TodayComparison     string    `json:"today_comparison,omitempty"`
+	Prior7DayAverageKT  float64   `json:"prior_7_day_average_kt,omitempty"`
+	Prior7DayMinKT      float64   `json:"prior_7_day_min_kt,omitempty"`
+	Prior7DayMaxKT      float64   `json:"prior_7_day_max_kt,omitempty"`
+	Prior7DaySampleSize int       `json:"prior_7_day_sample_size,omitempty"`
+	Prior7DayComparison string    `json:"prior_7_day_comparison,omitempty"`
+}
+
 type CurrentReport struct {
-	WindReference  *NDBCStation    `json:"wind_reference,omitempty"`
-	CurrentStation *CurrentStation `json:"current_station,omitempty"`
-	SelectionMode  string          `json:"selection_mode,omitempty"`
-	Start          time.Time       `json:"window_start,omitempty"`
-	End            time.Time       `json:"window_end,omitempty"`
-	Outlook        []string        `json:"outlook,omitempty"`
-	Events         []CurrentEvent  `json:"events,omitempty"`
-	Units          string          `json:"units,omitempty"`
-	Depth          string          `json:"depth_ft,omitempty"`
-	Bin            string          `json:"bin,omitempty"`
-	Error          string          `json:"error,omitempty"`
+	WindReference  *NDBCStation        `json:"wind_reference,omitempty"`
+	CurrentStation *CurrentStation     `json:"current_station,omitempty"`
+	SelectionMode  string              `json:"selection_mode,omitempty"`
+	Start          time.Time           `json:"window_start,omitempty"`
+	End            time.Time           `json:"window_end,omitempty"`
+	Outlook        []string            `json:"outlook,omitempty"`
+	Events         []CurrentEvent      `json:"events,omitempty"`
+	Comparisons    []CurrentComparison `json:"comparisons,omitempty"`
+	Series         []CurrentSample     `json:"series,omitempty"`
+	Units          string              `json:"units,omitempty"`
+	Depth          string              `json:"depth_ft,omitempty"`
+	Bin            string              `json:"bin,omitempty"`
+	Error          string              `json:"error,omitempty"`
 }
 
 type currentAPIResponse struct {
@@ -355,25 +376,59 @@ func BuildCurrentReport(
 		end,
 	)
 
-	events := make([]CurrentEvent, 0, len(relevant))
-	for _, event := range relevant {
-		p := event.Prediction
+	// Show all max/slack events for the reporting calendar day. The prose
+	// remains sailing-window focused, but the event table gives the sailor
+	// enough context to compare the morning and evening cycles.
+	events := currentEventsFromTimed(timed)
 
-		currentEvent := CurrentEvent{
-			Type: p.Type,
-			Time: event.Time,
+	// Compare today's maxima with the previous seven days at the exact same
+	// NOAA station/bin. NOAA harmonic predictions already include the
+	// astronomical spring/neap cycle, so no separate lunar model is needed.
+	lookbackStart := date.In(loc).AddDate(0, 0, -7)
+	lookbackEnd := date.In(loc).AddDate(0, 0, -1)
+
+	var historicalEvents []CurrentEvent
+	historyPredictions, _, historyErr := fetchCurrentPredictionsRange(
+		currentStation.ID,
+		currentStation.CurrBin,
+		lookbackStart.Format("20060102"),
+		lookbackEnd.Format("20060102"),
+	)
+	if historyErr == nil {
+		if historyTimed, parseErr := parseCurrentPredictions(
+			historyPredictions,
+			loc,
+		); parseErr == nil {
+			historicalEvents = currentEventsFromTimed(historyTimed)
 		}
+	}
 
-		switch p.Type {
-		case "flood":
-			currentEvent.SpeedKT = absFloat(p.Velocity)
-			currentEvent.Direction = p.MeanFloodDir
-		case "ebb":
-			currentEvent.SpeedKT = absFloat(p.Velocity)
-			currentEvent.Direction = p.MeanEbbDir
+	comparisons := buildCurrentComparisons(events, historicalEvents)
+
+	for _, comparison := range comparisons {
+		if comparison.Time.Before(start) ||
+			comparison.Time.After(end) {
+			continue
 		}
+		if line := currentComparisonLine(comparison); line != "" {
+			outlook = append(outlook, line)
+		}
+	}
 
-		events = append(events, currentEvent)
+	var series []CurrentSample
+	if currentPredictionTypeName(currentStation.PredictionType) == "harmonic/reference" {
+		if densePredictions, _, denseErr := fetchCurrentDensePredictions(
+			currentStation.ID,
+			currentStation.CurrBin,
+			dateString,
+		); denseErr == nil {
+			if denseSamples, denseParseErr := currentSamplesFromPredictions(
+				densePredictions,
+				loc,
+			); denseParseErr == nil {
+				series = denseSamples
+			}
+		}
 	}
 
 	selectionMode := "automatic-scored"
@@ -390,12 +445,14 @@ func BuildCurrentReport(
 		End:            end,
 		Outlook:        outlook,
 		Events:         events,
+		Comparisons:    comparisons,
+		Series:         series,
 		Units:          units,
 	}
 
-	if len(relevant) > 0 {
-		report.Depth = relevant[0].Prediction.Depth
-		report.Bin = relevant[0].Prediction.Bin
+	if len(timed) > 0 {
+		report.Depth = timed[0].Prediction.Depth
+		report.Bin = timed[0].Prediction.Bin
 	} else {
 		if currentStation.Depth > 0 {
 			report.Depth = strconv.FormatFloat(currentStation.Depth, 'f', -1, 64)
@@ -416,76 +473,38 @@ func writeCurrentText(
 		fmt.Fprintln(w, "Current prediction unavailable.")
 		return
 	}
-
 	if report.Error != "" {
-		fmt.Fprintf(
-			w,
-			"Current prediction unavailable: %s\n",
-			report.Error,
-		)
+		fmt.Fprintf(w, "Current prediction unavailable: %s\n", report.Error)
 		return
 	}
 
 	if report.SelectionMode != "" {
-		fmt.Fprintf(
-			w,
-			"Selection: %s.\n",
-			report.SelectionMode,
-		)
+		fmt.Fprintf(w, "Selection: %s.\n", report.SelectionMode)
 	}
-
 	if !report.Start.IsZero() && !report.End.IsZero() {
-		fmt.Fprintf(
-			w,
-			"Prediction date: %s.\n",
-			report.Start.Format("Mon Jan 2, 2006"),
-		)
-		fmt.Fprintf(
-			w,
-			"Sailing window: %s–%s.\n",
+		fmt.Fprintf(w, "Prediction date: %s.\n", report.Start.Format("Mon Jan 2, 2006"))
+		fmt.Fprintf(w, "Sailing window: %s–%s.\n",
 			report.Start.Format("3:04 PM"),
-			report.End.Format("3:04 PM"),
-		)
+			report.End.Format("3:04 PM"))
 	}
-
 	if report.CurrentStation != nil {
-		fmt.Fprintf(
-			w,
-			"Using %s — %s, %.1f nmi from %s.\n",
+		fmt.Fprintf(w, "Using %s — %s, %.1f nmi from %s.\n",
 			report.CurrentStation.ID,
 			report.CurrentStation.Name,
 			report.CurrentStation.DistanceNM,
-			report.WindReference.ID,
-		)
-
+			report.WindReference.ID)
 		if report.CurrentStation.PredictionType != "" {
-			fmt.Fprintf(
-				w,
-				"Prediction station type: %s.\n",
-				currentPredictionTypeName(report.CurrentStation.PredictionType),
-			)
+			fmt.Fprintf(w, "Prediction station type: %s.\n",
+				currentPredictionTypeName(report.CurrentStation.PredictionType))
 		}
 	}
-
 	if report.Depth != "" {
-		fmt.Fprintf(
-			w,
-			"Prediction depth: %s ft",
-			report.Depth,
-		)
-
-		if report.CurrentStation != nil &&
-			report.CurrentStation.DepthType != "" {
-			fmt.Fprintf(
-				w,
-				" (%s)",
-				currentDepthTypeName(report.CurrentStation.DepthType),
-			)
+		fmt.Fprintf(w, "Prediction depth: %s ft", report.Depth)
+		if report.CurrentStation != nil && report.CurrentStation.DepthType != "" {
+			fmt.Fprintf(w, " (%s)", currentDepthTypeName(report.CurrentStation.DepthType))
 		}
-
 		fmt.Fprintln(w, ".")
 	}
-
 	if report.Bin != "" {
 		fmt.Fprintf(w, "Prediction bin: %s.\n", report.Bin)
 	}
@@ -496,34 +515,44 @@ func writeCurrentText(
 
 	if len(report.Events) > 0 {
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, "CURRENT EVENTS")
+		fmt.Fprintln(w, "CURRENT EVENTS — FULL DAY")
 		fmt.Fprintln(w, "--------------------------------")
-
 		for _, event := range report.Events {
 			switch event.Type {
 			case "flood":
-				fmt.Fprintf(
-					w,
-					"%8s  Max flood  %.2f kt → %03d°\n",
-					event.Time.Format("3:04 PM"),
-					event.SpeedKT,
-					event.Direction,
-				)
+				fmt.Fprintf(w, "%8s  Max flood  %.2f kt → %03d°\n",
+					event.Time.Format("3:04 PM"), event.SpeedKT, event.Direction)
 			case "ebb":
-				fmt.Fprintf(
-					w,
-					"%8s  Max ebb    %.2f kt → %03d°\n",
-					event.Time.Format("3:04 PM"),
-					event.SpeedKT,
-					event.Direction,
-				)
+				fmt.Fprintf(w, "%8s  Max ebb    %.2f kt → %03d°\n",
+					event.Time.Format("3:04 PM"), event.SpeedKT, event.Direction)
 			case "slack":
-				fmt.Fprintf(
-					w,
-					"%8s  Slack\n",
-					event.Time.Format("3:04 PM"),
-				)
+				fmt.Fprintf(w, "%8s  Slack\n", event.Time.Format("3:04 PM"))
 			}
+		}
+	}
+
+	if len(report.Comparisons) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "CURRENT CONTEXT")
+		fmt.Fprintln(w, "--------------------------------")
+		for _, c := range report.Comparisons {
+			fmt.Fprintf(w, "%8s  Max %-5s %.2f kt",
+				c.Time.Format("3:04 PM"), c.Type, c.SpeedKT)
+
+			if c.TodayComparison != "" && c.OtherTodaySpeedKT > 0 {
+				fmt.Fprintf(w, " — %s (other today: %.2f kt at %s)",
+					c.TodayComparison,
+					c.OtherTodaySpeedKT,
+					c.OtherTodayTime.Format("3:04 PM"))
+			}
+			if c.Prior7DayComparison != "" {
+				fmt.Fprintf(w, "; %s (7-day avg %.2f kt, range %.2f–%.2f kt)",
+					c.Prior7DayComparison,
+					c.Prior7DayAverageKT,
+					c.Prior7DayMinKT,
+					c.Prior7DayMaxKT)
+			}
+			fmt.Fprintln(w)
 		}
 	}
 }
@@ -908,12 +937,21 @@ func fetchCurrentPredictions(
 	bin int,
 	date string,
 ) ([]CurrentPrediction, string, error) {
+	return fetchCurrentPredictionsRange(station, bin, date, date)
+}
+
+func fetchCurrentPredictionsRange(
+	station string,
+	bin int,
+	beginDate string,
+	endDate string,
+) ([]CurrentPrediction, string, error) {
 	params := url.Values{}
 
 	params.Set("product", "currents_predictions")
 	params.Set("application", "pittsburg-saildata")
-	params.Set("begin_date", date)
-	params.Set("end_date", date)
+	params.Set("begin_date", beginDate)
+	params.Set("end_date", endDate)
 	params.Set("station", dataGetterStationID(station))
 	params.Set("time_zone", "lst_ldt")
 	params.Set("units", "english")
@@ -965,6 +1003,85 @@ func fetchCurrentPredictions(
 	return data.CurrentPredictions.CP,
 		data.CurrentPredictions.Units,
 		nil
+}
+
+func fetchCurrentDensePredictions(
+	station string,
+	bin int,
+	date string,
+) ([]CurrentPrediction, string, error) {
+	params := url.Values{}
+
+	params.Set("product", "currents_predictions")
+	params.Set("application", "pittsburg-saildata")
+	params.Set("begin_date", date)
+	params.Set("end_date", date)
+	params.Set("station", dataGetterStationID(station))
+	params.Set("time_zone", "lst_ldt")
+	params.Set("units", "english")
+	params.Set("interval", "6")
+	params.Set("format", "json")
+
+	if bin > 0 {
+		params.Set("bin", strconv.Itoa(bin))
+	}
+
+	requestURL := currentDataURL + "?" + params.Encode()
+	client := &http.Client{Timeout: 15 * time.Second}
+
+	resp, err := client.Get(requestURL)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf(
+			"NOAA dense current API returned HTTP %d",
+			resp.StatusCode,
+		)
+	}
+
+	var data currentAPIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil, "", err
+	}
+	if data.Error != nil {
+		return nil, "", fmt.Errorf(
+			"NOAA dense current error: %s",
+			strings.TrimSpace(data.Error.Message),
+		)
+	}
+	if len(data.CurrentPredictions.CP) == 0 {
+		return nil, "", fmt.Errorf(
+			"NOAA returned no 6-minute current predictions for station %s bin %d",
+			station,
+			bin,
+		)
+	}
+
+	return data.CurrentPredictions.CP,
+		data.CurrentPredictions.Units,
+		nil
+}
+
+func currentSamplesFromPredictions(
+	predictions []CurrentPrediction,
+	loc *time.Location,
+) ([]CurrentSample, error) {
+	timed, err := parseCurrentPredictions(predictions, loc)
+	if err != nil {
+		return nil, err
+	}
+
+	samples := make([]CurrentSample, 0, len(timed))
+	for _, item := range timed {
+		samples = append(samples, CurrentSample{
+			Time:       item.Time,
+			VelocityKT: item.Prediction.Velocity,
+		})
+	}
+	return samples, nil
 }
 
 func currentPredictionTypeName(value string) string {
@@ -1197,12 +1314,9 @@ func buildCurrentOutlook(
 			lines = append(
 				lines,
 				fmt.Sprintf(
-					"The flood peaks around %s at %.1f kt, which is %s.",
+					"The flood peaks around %s at %.1f kt.",
 					event.Time.Format("3:04 PM"),
 					absFloat(p.Velocity),
-					currentStrength(
-						absFloat(p.Velocity),
-					),
 				),
 			)
 
@@ -1210,12 +1324,9 @@ func buildCurrentOutlook(
 			lines = append(
 				lines,
 				fmt.Sprintf(
-					"The ebb peaks around %s at %.1f kt, which is %s.",
+					"The ebb peaks around %s at %.1f kt.",
 					event.Time.Format("3:04 PM"),
 					absFloat(p.Velocity),
-					currentStrength(
-						absFloat(p.Velocity),
-					),
 				),
 			)
 		}
@@ -1324,33 +1435,201 @@ func currentOverallAssessment(
 	start time.Time,
 	end time.Time,
 ) string {
-	maxVelocity := 0.0
+	var peak *TimedPrediction
 
-	for _, event := range events {
+	for i := range events {
+		event := events[i]
 		if event.Time.Before(start) ||
 			event.Time.After(end) ||
 			event.Prediction.Type == "slack" {
 			continue
 		}
 
-		v := absFloat(event.Prediction.Velocity)
-		if v > maxVelocity {
-			maxVelocity = v
+		if peak == nil ||
+			absFloat(event.Prediction.Velocity) >
+				absFloat(peak.Prediction.Velocity) {
+			copy := event
+			peak = &copy
 		}
 	}
 
-	switch {
-	case maxVelocity == 0:
-		return "Current should be very light during the sailing window."
-	case maxVelocity < 0.5:
-		return "Overall, currents should be relatively mild during the sailing window."
-	case maxVelocity < 1.0:
-		return "Overall, expect moderate current during the sailing window."
-	case maxVelocity < 1.5:
-		return "Overall, expect a fairly strong current during part of the sailing window."
-	default:
-		return "Overall, expect strong current during part of the sailing window."
+	if peak == nil {
+		return "No maximum-current event falls inside the sailing window."
 	}
+
+	return fmt.Sprintf(
+		"Peak predicted current during the sailing window is %.1f kt (%s) around %s.",
+		absFloat(peak.Prediction.Velocity),
+		peak.Prediction.Type,
+		peak.Time.Format("3:04 PM"),
+	)
+}
+
+func currentEventsFromTimed(timed []TimedPrediction) []CurrentEvent {
+	events := make([]CurrentEvent, 0, len(timed))
+	for _, event := range timed {
+		p := event.Prediction
+		e := CurrentEvent{Type: p.Type, Time: event.Time}
+		switch p.Type {
+		case "flood":
+			e.SpeedKT = absFloat(p.Velocity)
+			e.Direction = p.MeanFloodDir
+		case "ebb":
+			e.SpeedKT = absFloat(p.Velocity)
+			e.Direction = p.MeanEbbDir
+		}
+		events = append(events, e)
+	}
+	return events
+}
+
+func buildCurrentComparisons(today, history []CurrentEvent) []CurrentComparison {
+	var result []CurrentComparison
+
+	for _, event := range today {
+		if event.Type != "ebb" && event.Type != "flood" {
+			continue
+		}
+		c := CurrentComparison{
+			Type:    event.Type,
+			Time:    event.Time,
+			SpeedKT: event.SpeedKT,
+		}
+
+		for _, other := range today {
+			if other.Type == event.Type && !other.Time.Equal(event.Time) {
+				c.OtherTodayTime = other.Time
+				c.OtherTodaySpeedKT = other.SpeedKT
+				c.TodayComparison = relativeCurrentPhrase(event.SpeedKT, other.SpeedKT)
+				break
+			}
+		}
+
+		var vals []float64
+		for _, prior := range history {
+			if prior.Type == event.Type && prior.SpeedKT > 0 {
+				vals = append(vals, prior.SpeedKT)
+			}
+		}
+		if len(vals) > 0 {
+			sum, minV, maxV := 0.0, vals[0], vals[0]
+			for _, v := range vals {
+				sum += v
+				if v < minV {
+					minV = v
+				}
+				if v > maxV {
+					maxV = v
+				}
+			}
+			c.Prior7DaySampleSize = len(vals)
+			c.Prior7DayAverageKT = sum / float64(len(vals))
+			c.Prior7DayMinKT = minV
+			c.Prior7DayMaxKT = maxV
+			c.Prior7DayComparison = recentCurrentPhrase(
+				event.SpeedKT,
+				c.Prior7DayAverageKT,
+				minV,
+				maxV,
+			)
+		}
+		result = append(result, c)
+	}
+	return result
+}
+
+func relativeCurrentPhrase(value, other float64) string {
+	if value <= 0 || other <= 0 {
+		return ""
+	}
+	r := value / other
+	switch {
+	case r >= 0.80 && r <= 1.20:
+		return "similar in strength to the other same-phase maximum today"
+	case r >= 0.65:
+		return "somewhat weaker than the other same-phase maximum today"
+	case r >= 0.55:
+		return "substantially weaker than the other same-phase maximum today"
+	case r >= 0.45:
+		return "about half as strong as the other same-phase maximum today"
+	case r < 0.45:
+		return "much weaker than the other same-phase maximum today"
+	case r <= 1.35:
+		return "somewhat stronger than the other same-phase maximum today"
+	case r < 1.80:
+		return "substantially stronger than the other same-phase maximum today"
+	case r <= 2.20:
+		return "about twice as strong as the other same-phase maximum today"
+	default:
+		return "much stronger than the other same-phase maximum today"
+	}
+}
+
+func recentCurrentPhrase(value, average, minV, maxV float64) string {
+	if value <= 0 || average <= 0 {
+		return ""
+	}
+	span := maxV - minV
+	if span > 0 {
+		if value <= minV+0.15*span {
+			return "near the low end of the previous 7 days"
+		}
+		if value >= maxV-0.15*span {
+			return "near the high end of the previous 7 days"
+		}
+	}
+	r := value / average
+	switch {
+	case r < 0.80:
+		return "below the previous 7-day average"
+	case r > 1.20:
+		return "above the previous 7-day average"
+	default:
+		return "near the previous 7-day average"
+	}
+}
+
+func currentComparisonLine(c CurrentComparison) string {
+	var parts []string
+	if c.TodayComparison != "" && c.OtherTodaySpeedKT > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"%s; the other %s max is %.2f kt around %s",
+			c.TodayComparison,
+			c.Type,
+			c.OtherTodaySpeedKT,
+			c.OtherTodayTime.Format("3:04 PM"),
+		))
+	}
+	if c.Prior7DayComparison != "" {
+		parts = append(parts, fmt.Sprintf(
+			"%s (7-day average %.2f kt)",
+			c.Prior7DayComparison,
+			c.Prior7DayAverageKT,
+		))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"The %s max at %s (%.2f kt) is %s.",
+		c.Type,
+		c.Time.Format("3:04 PM"),
+		c.SpeedKT,
+		strings.Join(parts, "; "),
+	)
+}
+
+func findCurrentComparison(report *CurrentReport, event CurrentEvent) *CurrentComparison {
+	if report == nil {
+		return nil
+	}
+	for i := range report.Comparisons {
+		c := &report.Comparisons[i]
+		if c.Type == event.Type && c.Time.Equal(event.Time) {
+			return c
+		}
+	}
+	return nil
 }
 
 func currentStrength(knots float64) string {

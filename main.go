@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"strings"
@@ -304,6 +305,7 @@ type htmlReportData struct {
 	CurrentStation, CurrentMeta                      string
 	CurrentOutlook                                   []string
 	CurrentEvents                                    []htmlCurrentEvent
+	CurrentChart                                     template.HTML
 	BottomLine                                       []string
 	FullText                                         string
 }
@@ -410,6 +412,7 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 			}
 			d.CurrentEvents = append(d.CurrentEvents, x)
 		}
+		d.CurrentChart = buildCurrentChartSVG(report.Current, report.ReportTime, loc)
 	}
 	var b strings.Builder
 	writeBottomLineText(&b, report)
@@ -424,6 +427,168 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 	d.FullText = strings.TrimSpace(full.String())
 
 	return d
+}
+
+func buildCurrentChartSVG(
+	report *CurrentReport,
+	reportTime time.Time,
+	loc *time.Location,
+) template.HTML {
+	if report == nil || len(report.Series) < 2 {
+		return ""
+	}
+
+	const (
+		width  = 860.0
+		height = 330.0
+		left   = 54.0
+		right  = 18.0
+		top    = 18.0
+		bottom = 42.0
+	)
+
+	plotW := width - left - right
+	plotH := height - top - bottom
+
+	dayStart := time.Date(
+		report.Series[0].Time.In(loc).Year(),
+		report.Series[0].Time.In(loc).Month(),
+		report.Series[0].Time.In(loc).Day(),
+		0, 0, 0, 0,
+		loc,
+	)
+	dayEnd := dayStart.Add(24 * time.Hour)
+
+	maxAbs := 0.0
+	for _, sample := range report.Series {
+		if v := math.Abs(sample.VelocityKT); v > maxAbs {
+			maxAbs = v
+		}
+	}
+	if maxAbs < 0.5 {
+		maxAbs = 0.5
+	}
+	maxAbs = math.Ceil(maxAbs*2.0) / 2.0
+
+	xFor := func(t time.Time) float64 {
+		f := t.Sub(dayStart).Seconds() / dayEnd.Sub(dayStart).Seconds()
+		if f < 0 {
+			f = 0
+		}
+		if f > 1 {
+			f = 1
+		}
+		return left + f*plotW
+	}
+	yFor := func(v float64) float64 {
+		return top + (maxAbs-v)/(2*maxAbs)*plotH
+	}
+	zeroY := yFor(0)
+
+	var path strings.Builder
+	for i, sample := range report.Series {
+		x := xFor(sample.Time.In(loc))
+		y := yFor(sample.VelocityKT)
+		if i == 0 {
+			fmt.Fprintf(&path, "M %.2f %.2f", x, y)
+		} else {
+			fmt.Fprintf(&path, " L %.2f %.2f", x, y)
+		}
+	}
+
+	firstX := xFor(report.Series[0].Time.In(loc))
+	lastX := xFor(report.Series[len(report.Series)-1].Time.In(loc))
+	areaPath := fmt.Sprintf(
+		"M %.2f %.2f L %.2f %.2f %s L %.2f %.2f Z",
+		firstX, zeroY,
+		firstX, yFor(report.Series[0].VelocityKT),
+		strings.TrimPrefix(path.String(), fmt.Sprintf("M %.2f %.2f", firstX, yFor(report.Series[0].VelocityKT))),
+		lastX, zeroY,
+	)
+
+	var svg strings.Builder
+	fmt.Fprintf(&svg, `<svg class="current-chart-svg" viewBox="0 0 %.0f %.0f" role="img" aria-label="Predicted current velocity through the day">`, width, height)
+	fmt.Fprintf(&svg, `<defs><clipPath id="floodClip"><rect x="%.2f" y="%.2f" width="%.2f" height="%.2f"/></clipPath><clipPath id="ebbClip"><rect x="%.2f" y="%.2f" width="%.2f" height="%.2f"/></clipPath></defs>`,
+		left, top, plotW, zeroY-top,
+		left, zeroY, plotW, top+plotH-zeroY,
+	)
+
+	// Sailing window highlight.
+	if !report.Start.IsZero() && !report.End.IsZero() {
+		x1 := xFor(report.Start.In(loc))
+		x2 := xFor(report.End.In(loc))
+		fmt.Fprintf(&svg, `<rect class="sail-window" x="%.2f" y="%.2f" width="%.2f" height="%.2f"/>`,
+			x1, top, x2-x1, plotH)
+	}
+
+	// Horizontal grid and y labels.
+	for v := -maxAbs; v <= maxAbs+0.001; v += 0.5 {
+		y := yFor(v)
+		className := "grid-line"
+		if math.Abs(v) < 0.001 {
+			className = "zero-line"
+		}
+		fmt.Fprintf(&svg, `<line class="%s" x1="%.2f" y1="%.2f" x2="%.2f" y2="%.2f"/>`,
+			className, left, y, left+plotW, y)
+		if math.Abs(v*2-math.Round(v*2)) < 0.001 {
+			fmt.Fprintf(&svg, `<text class="axis-label y-label" x="%.2f" y="%.2f">%.1f</text>`,
+				left-10, y+4, v)
+		}
+	}
+
+	// Vertical time grid and labels every 3 hours.
+	for hour := 0; hour <= 24; hour += 3 {
+		t := dayStart.Add(time.Duration(hour) * time.Hour)
+		x := xFor(t)
+		fmt.Fprintf(&svg, `<line class="v-grid-line" x1="%.2f" y1="%.2f" x2="%.2f" y2="%.2f"/>`,
+			x, top, x, top+plotH)
+		if hour < 24 {
+			label := t.Format("3 PM")
+			if hour == 0 {
+				label = "12 AM"
+			}
+			if hour == 12 {
+				label = "Noon"
+			}
+			fmt.Fprintf(&svg, `<text class="axis-label x-label" x="%.2f" y="%.2f">%s</text>`,
+				x, height-13, label)
+		}
+	}
+
+	// Filled areas from the same NOAA 6-minute curve.
+	fmt.Fprintf(&svg, `<path class="flood-area" d="%s" clip-path="url(#floodClip)"/>`, areaPath)
+	fmt.Fprintf(&svg, `<path class="ebb-area" d="%s" clip-path="url(#ebbClip)"/>`, areaPath)
+	fmt.Fprintf(&svg, `<path class="current-line" d="%s"/>`, path.String())
+
+	// Mark maxima/slacks.
+	for _, event := range report.Events {
+		x := xFor(event.Time.In(loc))
+		y := zeroY
+		if event.Type == "flood" {
+			y = yFor(event.SpeedKT)
+		} else if event.Type == "ebb" {
+			y = yFor(-event.SpeedKT)
+		}
+		fmt.Fprintf(&svg, `<circle class="event-point %s" cx="%.2f" cy="%.2f" r="4"/>`,
+			event.Type, x, y)
+	}
+
+	// "Now" marker only when the report time falls on the plotted date.
+	nowLocal := reportTime.In(loc)
+	if nowLocal.Year() == dayStart.Year() &&
+		nowLocal.YearDay() == dayStart.YearDay() {
+		x := xFor(nowLocal)
+		fmt.Fprintf(&svg, `<line class="now-line" x1="%.2f" y1="%.2f" x2="%.2f" y2="%.2f"/>`,
+			x, top, x, top+plotH)
+		fmt.Fprintf(&svg, `<text class="now-label" x="%.2f" y="%.2f">NOW</text>`,
+			x+5, top+14)
+	}
+
+	fmt.Fprintf(&svg, `<text class="axis-title" x="15" y="%.2f" transform="rotate(-90 15 %.2f)">knots</text>`,
+		top+plotH/2, top+plotH/2)
+	svg.WriteString(`</svg>`)
+
+	return template.HTML(svg.String())
 }
 
 var sailingHTMLTemplate = template.Must(template.New("sailing").Parse(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -441,7 +606,7 @@ var sailingHTMLTemplate = template.Must(template.New("sailing").Parse(`<!doctype
 <title>Mauri’s Sailing Outlook — {{.Title}}</title>
 <style>:root{--navy:#082b45;--blue:#126b91;--sea:#0b8793;--ink:#153242;--muted:#607886;--paper:#f5fafc;--card:#fff;--line:#d8e7ed;--flood:#087f8c;--ebb:#365f91;--slack:#756d64;--shadow:0 12px 34px rgba(8,43,69,.10)}*{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#dff3f8,#f7fbfc 32rem);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Avenir Next",Avenir,Helvetica,Arial,sans-serif;line-height:1.45}.shell{max-width:880px;margin:auto;padding:28px 18px 64px}.hero{color:#fff;padding:34px 30px 30px;border-radius:24px;min-height:360px;display:flex;flex-direction:column;justify-content:flex-end;background:
 linear-gradient(180deg,rgba(4,24,38,.06) 12%,rgba(4,24,38,.24) 48%,rgba(4,24,38,.86) 100%),
-url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text-shadow:0 2px 12px rgba(0,0,0,.45)}.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-weight:800;font-size:.76rem;opacity:.8}.photo-tag{margin-top:14px;font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;opacity:.72}h1{font-size:clamp(1.8rem,6vw,3.2rem);line-height:1.05;margin:.4rem 0 .6rem;letter-spacing:-.035em}.sub{opacity:.82}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}.full{grid-column:1/-1}h2{font-size:.82rem;letter-spacing:.13em;text-transform:uppercase;color:var(--blue);margin:0 0 16px}.bottom{font-size:1.13rem}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.metric{background:var(--paper);border-radius:15px;padding:14px}.label{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700}.value{font-size:1.55rem;font-weight:800;color:var(--navy)}.meta{color:var(--muted);font-size:.88rem;margin-top:12px}.station{font-weight:800;font-size:1.1rem;color:var(--navy)}.wind-summary{white-space:pre-line;margin-top:14px;padding:13px 14px;background:#eef7fa;border-left:4px solid var(--sea);border-radius:10px;color:var(--ink);font-size:.92rem}.event{display:grid;grid-template-columns:88px 12px 1fr;gap:12px;align-items:center;min-height:58px}.time{font-weight:800;color:var(--navy)}.dot{width:12px;height:12px;border-radius:50%;background:var(--slack);box-shadow:0 0 0 5px #edf3f5}.flood .dot{background:var(--flood)}.ebb .dot{background:var(--ebb)}.eventbody{border-left:2px solid var(--line);padding:8px 0 8px 18px}.eventlabel{font-weight:800}.eventdata{color:var(--muted);font-size:.9rem}.badge{display:inline-block;border-radius:999px;padding:5px 10px;background:#e9f6fb;color:var(--blue);font-size:.75rem;font-weight:800;margin-top:12px}.footer{text-align:center;color:var(--muted);font-size:.78rem;margin-top:22px}.full-report{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:.88rem;line-height:1.55;background:#071f31;color:#e7f4f8;border-radius:14px;padding:18px;overflow-x:auto}.details-note{color:var(--muted);font-size:.88rem;margin:-4px 0 14px}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}</style></head><body><main class="shell">
+url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text-shadow:0 2px 12px rgba(0,0,0,.45)}.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-weight:800;font-size:.76rem;opacity:.8}.photo-tag{margin-top:14px;font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;opacity:.72}h1{font-size:clamp(1.8rem,6vw,3.2rem);line-height:1.05;margin:.4rem 0 .6rem;letter-spacing:-.035em}.sub{opacity:.82}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}.full{grid-column:1/-1}h2{font-size:.82rem;letter-spacing:.13em;text-transform:uppercase;color:var(--blue);margin:0 0 16px}.bottom{font-size:1.13rem}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.metric{background:var(--paper);border-radius:15px;padding:14px}.label{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700}.value{font-size:1.55rem;font-weight:800;color:var(--navy)}.meta{color:var(--muted);font-size:.88rem;margin-top:12px}.station{font-weight:800;font-size:1.1rem;color:var(--navy)}.wind-summary{white-space:pre-line;margin-top:14px;padding:13px 14px;background:#eef7fa;border-left:4px solid var(--sea);border-radius:10px;color:var(--ink);font-size:.92rem}.event{display:grid;grid-template-columns:88px 12px 1fr;gap:12px;align-items:center;min-height:58px}.time{font-weight:800;color:var(--navy)}.dot{width:12px;height:12px;border-radius:50%;background:var(--slack);box-shadow:0 0 0 5px #edf3f5}.flood .dot{background:var(--flood)}.ebb .dot{background:var(--ebb)}.eventbody{border-left:2px solid var(--line);padding:8px 0 8px 18px}.eventlabel{font-weight:800}.eventdata{color:var(--muted);font-size:.9rem}.badge{display:inline-block;border-radius:999px;padding:5px 10px;background:#e9f6fb;color:var(--blue);font-size:.75rem;font-weight:800;margin-top:12px}.footer{text-align:center;color:var(--muted);font-size:.78rem;margin-top:22px}.full-report{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:.88rem;line-height:1.55;background:#071f31;color:#e7f4f8;border-radius:14px;padding:18px;overflow-x:auto}.details-note{color:var(--muted);font-size:.88rem;margin:-4px 0 14px}.current-chart-wrap{margin-top:16px}.current-chart-svg{display:block;width:100%;height:auto;background:#f8fbfc;border:1px solid var(--line);border-radius:16px}.grid-line{stroke:#d9e4e8;stroke-width:1}.v-grid-line{stroke:#e6eef1;stroke-width:1}.zero-line{stroke:#17384a;stroke-width:2}.axis-label{fill:#657d89;font-size:11px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.y-label{text-anchor:end}.x-label{text-anchor:middle}.axis-title{fill:#657d89;font-size:11px;text-anchor:middle}.sail-window{fill:#dcebf0;opacity:.55}.flood-area{fill:#6d8fd0;opacity:.86}.ebb-area{fill:#0b9d83;opacity:.90}.current-line{fill:none;stroke:#214b62;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}.event-point{stroke:#fff;stroke-width:1.5}.event-point.flood{fill:#5478bd}.event-point.ebb{fill:#078a75}.event-point.slack{fill:#756d64}.now-line{stroke:#c63a2b;stroke-width:2.5}.now-label{fill:#c63a2b;font-size:11px;font-weight:800}.chart-note{color:var(--muted);font-size:.82rem;margin-top:9px}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}</style></head><body><main class="shell">
 <section class="hero"><div class="eyebrow">Mauri’s Sailing Outlook</div><h1>{{.Title}}</h1><div class="sub">{{.ReportTime}} · {{.Station}}</div>{{if .Historical}}<span class="badge">Historical · {{.RequestedTime}}</span>{{end}}<div class="photo-tag">Bay sailing</div></section><div class="grid">
 <section class="card full bottom"><h2>Bottom line</h2>{{range .BottomLine}}<p>{{.}}</p>{{else}}<p>Summary unavailable.</p>{{end}}</section>
 <section class="card"><h2>Wind</h2>
@@ -454,6 +619,7 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 {{if .WindSummary}}<div class="wind-summary">{{.WindSummary}}</div>{{end}}
 </section>
 <section class="card"><h2>Current</h2>{{if .CurrentStation}}<div class="station">{{.CurrentStation}}</div><div class="meta">{{.CurrentMeta}}</div>{{range .CurrentOutlook}}<p>{{.}}</p>{{end}}{{else}}<p>Current prediction unavailable.</p>{{end}}</section>
+{{if .CurrentChart}}<section class="card full"><h2>Current curve</h2><div class="current-chart-wrap">{{.CurrentChart}}</div><div class="chart-note">NOAA 6-minute harmonic current predictions. Shaded band marks the sailing window; red line marks report time.</div></section>{{end}}
 <section class="card full"><h2>Current timeline</h2>{{range .CurrentEvents}}<div class="event {{.Class}}"><div class="time">{{.Time}}</div><div class="dot"></div><div class="eventbody"><div class="eventlabel">{{.Label}}</div>{{if .Speed}}<div class="eventdata">{{.Speed}} · {{.Direction}}</div>{{end}}</div></div>{{else}}<p>No current events in the selected sailing window.</p>{{end}}</section>
 <section class="card full"><h2>Full report details</h2><p class="details-note">Complete CLI/text report. This section includes every detail available from the text endpoint.</p><pre class="full-report">{{.FullText}}</pre></section></div>
 <div class="footer"><strong>Mauri’s Sailing Outlook</strong><br>NOAA/NDBC observations + NOAA CO-OPS current predictions · Sailing aid, not a navigation system</div></main></body></html>`))
@@ -808,11 +974,29 @@ func writeBottomLineText(
 		if next != nil {
 			fmt.Fprintf(
 				w,
-				"Slack is around %s, then the current turns to a %s %s.\n",
+				"Slack is around %s, then the current turns to a %s, peaking around %s at %.2f kt",
 				event.Time.Format("3:04 PM"),
-				currentStrength(next.SpeedKT),
 				next.Type,
+				next.Time.Format("3:04 PM"),
+				next.SpeedKT,
 			)
+
+			if comparison := findCurrentComparison(report.Current, *next); comparison != nil {
+				if comparison.TodayComparison != "" &&
+					comparison.OtherTodaySpeedKT > 0 {
+					fmt.Fprintf(
+						w,
+						", %s (other %s max: %.2f kt)",
+						comparison.TodayComparison,
+						next.Type,
+						comparison.OtherTodaySpeedKT,
+					)
+				}
+				if comparison.Prior7DayComparison != "" {
+					fmt.Fprintf(w, "; %s", comparison.Prior7DayComparison)
+				}
+			}
+			fmt.Fprintln(w, ".")
 		} else {
 			fmt.Fprintf(
 				w,
@@ -823,21 +1007,13 @@ func writeBottomLineText(
 		break
 	}
 
-	// End with a compact strength assessment.
-	if len(report.Current.Outlook) > 0 {
-		assessment := report.Current.Outlook[len(report.Current.Outlook)-1]
-
-		switch {
-		case strings.Contains(assessment, "relatively mild"):
-			fmt.Fprintln(w, "Overall, current should be relatively mild during the sailing window.")
-		case strings.Contains(assessment, "very light"):
-			fmt.Fprintln(w, "Overall, current should be very light during the sailing window.")
-		case strings.Contains(assessment, "moderate"):
-			fmt.Fprintln(w, "Overall, expect moderate current during the sailing window.")
-		case strings.Contains(assessment, "fairly strong"):
-			fmt.Fprintln(w, "Overall, expect fairly strong current during part of the sailing window.")
-		case strings.Contains(assessment, "strong"):
-			fmt.Fprintln(w, "Overall, expect strong current during part of the sailing window.")
+	// Finish with a measured peak statement rather than an absolute adjective.
+	for i := len(report.Current.Outlook) - 1; i >= 0; i-- {
+		line := report.Current.Outlook[i]
+		if strings.HasPrefix(line, "Peak predicted current") ||
+			strings.HasPrefix(line, "No maximum-current") {
+			fmt.Fprintln(w, line)
+			break
 		}
 	}
 }
