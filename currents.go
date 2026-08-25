@@ -53,6 +53,8 @@ type NDBCStation struct {
 type WindStationCandidateDiagnostic struct {
 	StationID   string  `json:"station_id"`
 	StationName string  `json:"station_name,omitempty"`
+	Lat         float64 `json:"lat,omitempty"`
+	Lon         float64 `json:"lon,omitempty"`
 	DistanceNM  float64 `json:"distance_nm"`
 	Met         string  `json:"met,omitempty"`
 	WindStatus  string  `json:"wind_status"`
@@ -863,6 +865,8 @@ func findNearestUsableWindStation(
 		diag := WindStationCandidateDiagnostic{
 			StationID:   candidate.Station.ID,
 			StationName: candidate.Station.Name,
+			Lat:         candidate.Station.Lat,
+			Lon:         candidate.Station.Lon,
 			DistanceNM:  candidate.DistanceNM,
 			Met:         candidate.Station.Met,
 			WindStatus:  "unusable",

@@ -1,8 +1,8 @@
 # Mauri's Wind & Current Conditions
 
 A Go service for exploring **wind and predicted currents** around the
-supported coastal and inland waters. It is intended for sailors, paddlers,
-kayakers, rowers, and other people planning time on the water.
+supported coastal and inland waters. It is intended for sailors,
+paddlers, kayakers, rowers, and other people planning time on the water.
 
 ## Try it
 
@@ -122,6 +122,41 @@ or:
 http://127.0.0.1:8080/report?format=html
 ```
 
+## Choosing a wind station
+
+Wind observations are point measurements. The station closest to a
+selected location is not always the station that best represents the
+wind you will experience there, especially around coastlines, terrain,
+channels, bays, and other local features.
+
+When you choose a location on the map, Mauri's Wind & Current
+Conditions:
+
+-   finds nearby wind-station candidates with usable observations;
+-   shows those same candidates in the **Nearby Wind Stations** table
+    and as clickable markers on the map;
+-   reports each station's distance **From Selected Location**;
+-   automatically uses the nearest usable station as a convenient
+    starting point; and
+-   lets you click a station name or map marker to use a different
+    observation source while keeping your selected location.
+
+Use local knowledge when choosing among candidates. The automatic
+station is a recommendation for convenience, not a claim that it
+perfectly represents conditions at the selected point.
+
+### Distance warning
+
+If the selected wind station is **10 nautical miles or more** from the
+selected location, the Wind card displays a warning such as:
+
+> **Distance warning:** Wind station is 20.1 nmi from the selected
+> location. Local wind may differ significantly.
+
+The warning does not change station selection. It makes the geographic
+separation explicit so you can compare nearby candidates and decide
+which observation source is most relevant.
+
 ## API examples
 
 Default text report:
@@ -156,31 +191,32 @@ curl -sS "http://localhost:8080/report?lat=37.9105&lon=-122.3602&format=json"
 
 ## Important query parameters
 
-  -----------------------------------------------------------------------
-  Parameter                           Purpose
-  ----------------------------------- -----------------------------------
-  `format=html`                       Interactive HTML report
+  ---------------------------------------------------------------------
+  Parameter                          Purpose
+  ---------------------------------- ----------------------------------
+  `format=html`                      Interactive HTML report
 
-  `format=json`                       JSON output
+  `format=json`                      JSON output
 
-  `lat`, `lon`                        Decimal location
+  `lat`, `lon`                       Decimal location
 
-  `station`                           Explicit NDBC wind-station override
+  `station`                          Explicit NDBC wind-station
+                                     override
 
-  `start`, `end`                      Optional custom conditions-window
-                                      hours; omit both for
-                                      sunrise-to-sunset
+  `start`, `end`                     Optional custom conditions-window
+                                     hours; omit both for
+                                     sunrise-to-sunset
 
-  `current_station`                   NOAA current-station override
+  `current_station`                  NOAA current-station override
 
-  `bin`                               NOAA current-bin override
+  `bin`                              NOAA current-bin override
 
-  `debug_wind=1`                      Wind-station diagnostics
+  `debug_wind=1`                     Wind-station diagnostics
 
-  `at`                                Historical report date/time
+  `at`                               Historical report date/time
 
-  `compact=1`                         Compact output
-  -----------------------------------------------------------------------
+  `compact=1`                        Compact output
+  ---------------------------------------------------------------------
 
 ## Data and safety
 
