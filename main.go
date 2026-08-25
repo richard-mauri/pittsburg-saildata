@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"time"
 )
@@ -185,6 +186,97 @@ func parseOptionalLatLon(
 	}
 
 	return lat, lon, true, nil
+}
+
+func parseCurrentDate(
+	q url.Values,
+	fallback time.Time,
+	loc *time.Location,
+) (time.Time, error) {
+	value := strings.TrimSpace(q.Get("current_date"))
+	if value == "" {
+		return fallback.In(loc), nil
+	}
+
+	parsed, err := time.ParseInLocation("2006-01-02", value, loc)
+	if err != nil {
+		return time.Time{}, fmt.Errorf(
+			"invalid current_date %q; expected YYYY-MM-DD",
+			value,
+		)
+	}
+
+	// Noon is a stable representative time for a calendar date and avoids
+	// midnight/DST edge cases. BuildCurrentReport uses the calendar date.
+	return time.Date(
+		parsed.Year(),
+		parsed.Month(),
+		parsed.Day(),
+		12, 0, 0, 0,
+		loc,
+	), nil
+}
+
+func parseCurrentDays(q url.Values) int {
+	value := strings.TrimSpace(q.Get("current_days"))
+	switch value {
+	case "3":
+		return 3
+	case "7":
+		return 7
+	default:
+		return 1
+	}
+}
+
+func parsePlanningTime(q url.Values, key, fallback string) (int, string) {
+	value := strings.TrimSpace(q.Get(key))
+	if value == "" {
+		value = fallback
+	}
+	parsed, err := time.Parse("15:04", value)
+	if err != nil {
+		parsed, _ = time.Parse("15:04", fallback)
+		value = fallback
+	}
+	return parsed.Hour()*60 + parsed.Minute(), value
+}
+
+func parsePlanningMaxEbb(q url.Values) float64 {
+	value := strings.TrimSpace(q.Get("max_ebb"))
+	if value == "" {
+		return 1.5
+	}
+	var parsed float64
+	if _, err := fmt.Sscanf(value, "%f", &parsed); err != nil || parsed <= 0 || parsed > 10 {
+		return 1.5
+	}
+	// Keep UI/classification aligned with the one-decimal display.
+	return math.Round(parsed*10) / 10
+}
+
+func parsePlanningMaxFlood(q url.Values) float64 {
+	value := strings.TrimSpace(q.Get("max_flood"))
+	if value == "" {
+		return 1.5
+	}
+	var parsed float64
+	if _, err := fmt.Sscanf(value, "%f", &parsed); err != nil || parsed <= 0 || parsed > 10 {
+		return 1.5
+	}
+	return math.Round(parsed*10) / 10
+}
+
+func parsePlanningBuffer(q url.Values) int {
+	value := strings.TrimSpace(q.Get("planning_buffer"))
+	if value == "" {
+		return 60
+	}
+	var parsed int
+	if _, err := fmt.Sscanf(value, "%d", &parsed); err != nil || parsed < 0 || parsed > 360 {
+		return 60
+	}
+	return parsed
 }
 
 func cloneQuery(values url.Values) url.Values {
@@ -568,11 +660,21 @@ func runServer(
 				return
 			}
 
+			currentDate, currentDateErr := parseCurrentDate(
+				r.URL.Query(),
+				report.Historical.Requested,
+				loc,
+			)
+			if currentDateErr != nil {
+				http.Error(w, currentDateErr.Error(), http.StatusBadRequest)
+				return
+			}
+
 			current, currentErr := BuildCurrentReport(
 				stationID,
 				currentStation,
 				currentBin,
-				report.Historical.Requested,
+				currentDate,
 				startHour,
 				endHour,
 				loc,
@@ -587,11 +689,21 @@ func runServer(
 		} else {
 			report = buildCurrentWindReport(stationID, observations, loc)
 
+			currentDate, currentDateErr := parseCurrentDate(
+				r.URL.Query(),
+				report.ReportTime,
+				loc,
+			)
+			if currentDateErr != nil {
+				http.Error(w, currentDateErr.Error(), http.StatusBadRequest)
+				return
+			}
+
 			current, currentErr := BuildCurrentReport(
 				stationID,
 				currentStation,
 				currentBin,
-				report.ReportTime,
+				currentDate,
 				startHour,
 				endHour,
 				loc,
@@ -664,6 +776,11 @@ type htmlWindCandidate struct {
 }
 
 type htmlCurrentEvent struct{ Time, Label, Speed, Direction, Class string }
+
+type currentPlanningHint struct {
+	Date, Status, Class, Detail string
+}
+
 type htmlReportData struct {
 	Title, Station, ReportTime                       string
 	Historical                                       bool
@@ -684,8 +801,18 @@ type htmlReportData struct {
 	MapWindStation, MapCurrentStation                string
 	CurrentStation, CurrentMeta                      string
 	CurrentWindow, CurrentWindowMode                 string
+	CurrentDateLabel, CurrentDateISO                 string
+	CurrentDays                                      int
+	CurrentRangeLabel                                string
+	FullDetailsURL                                   string
+	WindStationsURL                                  string
+	CurrentPrevURL, CurrentTodayURL, CurrentNextURL  string
+	CurrentIsToday                                   bool
 	CurrentOutlook                                   []string
 	CurrentEvents                                    []htmlCurrentEvent
+	CurrentPlanningHints                             []currentPlanningHint
+	PlanningStart, PlanningEnd                       string
+	PlanningMaxEbb, PlanningMaxFlood, PlanningBuffer string
 	CurrentChart                                     template.HTML
 	BottomLine                                       []string
 	FullText                                         string
@@ -693,7 +820,20 @@ type htmlReportData struct {
 
 func writeHTMLReport(w http.ResponseWriter, report *SailingReport, loc *time.Location) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := sailingHTMLTemplate.Execute(w, makeHTMLReportData(report, loc)); err != nil {
+	data := makeHTMLReportData(report, loc)
+	if strings.TrimSpace(report.RequestQuery.Get("details")) == "1" {
+		if err := sailingDetailsHTMLTemplate.Execute(w, data); err != nil {
+			http.Error(w, err.Error(), 500)
+		}
+		return
+	}
+	if strings.TrimSpace(report.RequestQuery.Get("stations")) == "1" {
+		if err := sailingStationsHTMLTemplate.Execute(w, data); err != nil {
+			http.Error(w, err.Error(), 500)
+		}
+		return
+	}
+	if err := sailingHTMLTemplate.Execute(w, data); err != nil {
 		http.Error(w, err.Error(), 500)
 	}
 }
@@ -701,6 +841,17 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 	d := htmlReportData{Station: report.Station, Title: report.Station}
 	d.DebugWind = report.DebugWindSelection
 	d.WindError = strings.TrimSpace(report.WindError)
+	detailsQuery := cloneQuery(report.RequestQuery)
+	detailsQuery.Set("format", "html")
+	detailsQuery.Set("details", "1")
+	detailsQuery.Del("stations")
+	d.FullDetailsURL = "/report?" + detailsQuery.Encode()
+
+	stationsQuery := cloneQuery(report.RequestQuery)
+	stationsQuery.Set("format", "html")
+	stationsQuery.Set("stations", "1")
+	stationsQuery.Del("details")
+	d.WindStationsURL = "/report?" + stationsQuery.Encode()
 	if !report.ReportTime.IsZero() {
 		d.ReportTime = report.ReportTime.In(loc).Format("Mon Jan 2, 2006 · 3:04 PM MST")
 	}
@@ -871,6 +1022,8 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 				strings.ToUpper(candidate.StationID),
 			)
 			linkQuery.Set("format", "html")
+			linkQuery.Del("stations")
+			linkQuery.Del("details")
 			if report.DebugWindSelection {
 				linkQuery.Set("debug_wind", "1")
 			} else {
@@ -905,6 +1058,8 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 		if hasUserLocation {
 			nearestQuery := cloneQuery(report.RequestQuery)
 			nearestQuery.Del("station")
+			nearestQuery.Del("stations")
+			nearestQuery.Del("details")
 			nearestQuery.Set("format", "html")
 			if report.DebugWindSelection {
 				nearestQuery.Set("debug_wind", "1")
@@ -969,6 +1124,50 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 	}
 
 	if report.Current != nil && report.Current.Error == "" {
+		currentDay := report.Current.Start.In(loc)
+		if currentDay.IsZero() {
+			currentDay = report.ReportTime.In(loc)
+		}
+		today := time.Now().In(loc)
+		d.CurrentDays = parseCurrentDays(report.RequestQuery)
+
+		rangeEnd := currentDay.AddDate(0, 0, d.CurrentDays-1)
+		if d.CurrentDays == 1 {
+			d.CurrentDateLabel = currentDay.Format("Mon Jan 2, 2006")
+			d.CurrentRangeLabel = d.CurrentDateLabel
+		} else {
+			d.CurrentDateLabel = currentDay.Format("Mon Jan 2")
+			d.CurrentRangeLabel = fmt.Sprintf(
+				"%s – %s",
+				currentDay.Format("Mon Jan 2"),
+				rangeEnd.Format("Mon Jan 2, 2006"),
+			)
+		}
+		d.CurrentDateISO = currentDay.Format("2006-01-02")
+		d.CurrentIsToday =
+			currentDay.Year() == today.Year() &&
+				currentDay.YearDay() == today.YearDay()
+
+		dateURL := func(day time.Time, todayMode bool) string {
+			q := cloneQuery(report.RequestQuery)
+			q.Set("format", "html")
+			if todayMode {
+				q.Del("current_date")
+			} else {
+				q.Set("current_date", day.Format("2006-01-02"))
+			}
+			if d.CurrentDays == 1 {
+				q.Del("current_days")
+			} else {
+				q.Set("current_days", fmt.Sprintf("%d", d.CurrentDays))
+			}
+			return "/report?" + q.Encode()
+		}
+
+		d.CurrentPrevURL = dateURL(currentDay.AddDate(0, 0, -d.CurrentDays), false)
+		d.CurrentNextURL = dateURL(currentDay.AddDate(0, 0, d.CurrentDays), false)
+		d.CurrentTodayURL = dateURL(today, true)
+
 		if report.Current.CurrentStation != nil {
 			s := report.Current.CurrentStation
 			d.CurrentStation = s.Name
@@ -1003,7 +1202,44 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 			}
 			d.CurrentEvents = append(d.CurrentEvents, x)
 		}
-		d.CurrentChart = buildCurrentChartSVG(report.Current, report.ReportTime, loc)
+		planningStartMinutes, planningStart := parsePlanningTime(
+			report.RequestQuery, "planning_start", "12:00",
+		)
+		planningEndMinutes, planningEnd := parsePlanningTime(
+			report.RequestQuery, "planning_end", "17:00",
+		)
+		if planningEndMinutes <= planningStartMinutes {
+			planningStartMinutes, planningStart = 12*60, "12:00"
+			planningEndMinutes, planningEnd = 17*60, "17:00"
+		}
+		planningMaxEbb := parsePlanningMaxEbb(report.RequestQuery)
+		planningMaxFlood := parsePlanningMaxFlood(report.RequestQuery)
+		planningBuffer := parsePlanningBuffer(report.RequestQuery)
+		d.PlanningStart = planningStart
+		d.PlanningEnd = planningEnd
+		d.PlanningMaxEbb = fmt.Sprintf("%.1f", planningMaxEbb)
+		d.PlanningMaxFlood = fmt.Sprintf("%.1f", planningMaxFlood)
+		d.PlanningBuffer = fmt.Sprintf("%d", planningBuffer)
+
+		d.CurrentPlanningHints = buildCurrentPlanningHints(
+			report.Current,
+			currentDay,
+			d.CurrentDays,
+			loc,
+			planningMaxEbb,
+			planningMaxFlood,
+			planningStartMinutes,
+			planningEndMinutes,
+			planningBuffer,
+		)
+		d.CurrentChart = buildCurrentChartSVG(
+			report.Current,
+			report.ReportTime,
+			loc,
+			d.CurrentDays,
+			planningStartMinutes,
+			planningEndMinutes,
+		)
 	}
 	if d.WindError != "" {
 		d.BottomLine = append(
@@ -1032,13 +1268,260 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 	return d
 }
 
+func dayStartForCurrentChart(report *CurrentReport, loc *time.Location) time.Time {
+	t := report.Start.In(loc)
+	if t.IsZero() && len(report.Series) > 0 {
+		t = report.Series[0].Time.In(loc)
+	}
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, loc)
+}
+
+func buildCurrentPlanningHints(
+	report *CurrentReport,
+	startDay time.Time,
+	days int,
+	loc *time.Location,
+	maxEbbKT float64,
+	maxFloodKT float64,
+	planningStartMinutes int,
+	planningEndMinutes int,
+	planningBufferMinutes int,
+) []currentPlanningHint {
+	if report == nil || report.CurrentStation == nil || days < 1 {
+		return nil
+	}
+	if maxEbbKT <= 0 {
+		maxEbbKT = 1.5
+	}
+
+	// Fetch the entire displayed range once, then partition by each sample's
+	// actual local calendar date. This keeps the planning classifier aligned
+	// with the graph/slider even across timezone and DST boundaries.
+	rangeStart := time.Date(
+		startDay.In(loc).Year(),
+		startDay.In(loc).Month(),
+		startDay.In(loc).Day(),
+		0, 0, 0, 0,
+		loc,
+	)
+	rangeEnd := rangeStart.AddDate(0, 0, days-1)
+
+	dense, _, err := fetchCurrentPredictionsRange(
+		report.CurrentStation.ID,
+		report.CurrentStation.CurrBin,
+		rangeStart.Format("20060102"),
+		rangeEnd.Format("20060102"),
+	)
+	if err != nil {
+		return nil
+	}
+	samples, err := currentSamplesFromPredictions(dense, loc)
+	if err != nil || len(samples) < 3 {
+		return nil
+	}
+
+	byDay := make(map[string][]CurrentSample, days)
+	for _, sample := range samples {
+		local := sample.Time.In(loc)
+		key := local.Format("2006-01-02")
+		byDay[key] = append(byDay[key], CurrentSample{
+			Time:       local,
+			VelocityKT: sample.VelocityKT,
+		})
+	}
+
+	var hints []currentPlanningHint
+
+	for offset := 0; offset < days; offset++ {
+		day := rangeStart.AddDate(0, 0, offset)
+		key := day.Format("2006-01-02")
+		daySamples := byDay[key]
+
+		if len(daySamples) < 3 {
+			hints = append(hints, currentPlanningHint{
+				Date:   day.Format("Mon Jan 2"),
+				Status: "Unavailable",
+				Class:  "caution",
+				Detail: "Not enough prediction samples for this local calendar day.",
+			})
+			continue
+		}
+
+		// Detect local ebb maxima strictly within this local calendar day.
+		var ebbs []CurrentSample
+		for i := 1; i < len(daySamples)-1; i++ {
+			prev := daySamples[i-1]
+			cur := daySamples[i]
+			next := daySamples[i+1]
+
+			if cur.VelocityKT < 0 &&
+				cur.VelocityKT <= prev.VelocityKT &&
+				cur.VelocityKT <= next.VelocityKT {
+				ebbs = append(ebbs, cur)
+			}
+		}
+
+		sort.Slice(ebbs, func(i, j int) bool {
+			return math.Abs(ebbs[i].VelocityKT) >
+				math.Abs(ebbs[j].VelocityKT)
+		})
+
+		if len(ebbs) == 0 {
+			hints = append(hints, currentPlanningHint{
+				Date:   day.Format("Mon Jan 2"),
+				Status: "Preferred",
+				Class:  "preferred",
+				Detail: "No ebb maximum found during this local calendar day.",
+			})
+			continue
+		}
+
+		windowStart := time.Date(
+			day.Year(), day.Month(), day.Day(),
+			planningStartMinutes/60, planningStartMinutes%60, 0, 0,
+			loc,
+		)
+		windowEnd := time.Date(
+			day.Year(), day.Month(), day.Day(),
+			planningEndMinutes/60, planningEndMinutes%60, 0, 0,
+			loc,
+		)
+		bufferStart := windowStart.Add(-time.Duration(planningBufferMinutes) * time.Minute)
+		bufferEnd := windowEnd.Add(time.Duration(planningBufferMinutes) * time.Minute)
+
+		windowLabel := fmt.Sprintf(
+			"%s–%s",
+			windowStart.Format("3:04 PM"),
+			windowEnd.Format("3:04 PM"),
+		)
+
+		windowMaxEbb := 0.0
+		windowMaxEbbTime := time.Time{}
+		windowMaxFlood := 0.0
+		windowMaxFloodTime := time.Time{}
+		bufferMaxEbb := 0.0
+		bufferMaxEbbTime := time.Time{}
+		bufferMaxFlood := 0.0
+		bufferMaxFloodTime := time.Time{}
+
+		for _, sample := range daySamples {
+			local := sample.Time.In(loc)
+			if local.Year() != day.Year() || local.YearDay() != day.YearDay() {
+				continue
+			}
+			speed := math.Round(math.Abs(sample.VelocityKT)*10) / 10
+			inWindow := !local.Before(windowStart) && !local.After(windowEnd)
+			inBuffer := planningBufferMinutes > 0 &&
+				!local.Before(bufferStart) && !local.After(bufferEnd) && !inWindow
+
+			if sample.VelocityKT < 0 {
+				if inWindow && speed > windowMaxEbb {
+					windowMaxEbb, windowMaxEbbTime = speed, local
+				} else if inBuffer && speed > bufferMaxEbb {
+					bufferMaxEbb, bufferMaxEbbTime = speed, local
+				}
+			} else if sample.VelocityKT > 0 {
+				if inWindow && speed > windowMaxFlood {
+					windowMaxFlood, windowMaxFloodTime = speed, local
+				} else if inBuffer && speed > bufferMaxFlood {
+					bufferMaxFlood, bufferMaxFloodTime = speed, local
+				}
+			}
+		}
+
+		h := currentPlanningHint{Date: day.Format("Mon Jan 2")}
+		var redReasons, cautionReasons []string
+		if windowMaxEbb >= maxEbbKT {
+			redReasons = append(redReasons, fmt.Sprintf("ebb %.1f kt at %s", windowMaxEbb, windowMaxEbbTime.Format("3:04 PM")))
+		}
+		if windowMaxFlood >= maxFloodKT {
+			redReasons = append(redReasons, fmt.Sprintf("flood %.1f kt at %s", windowMaxFlood, windowMaxFloodTime.Format("3:04 PM")))
+		}
+		if bufferMaxEbb >= maxEbbKT {
+			cautionReasons = append(cautionReasons, fmt.Sprintf("ebb %.1f kt at %s", bufferMaxEbb, bufferMaxEbbTime.Format("3:04 PM")))
+		}
+		if bufferMaxFlood >= maxFloodKT {
+			cautionReasons = append(cautionReasons, fmt.Sprintf("flood %.1f kt at %s", bufferMaxFlood, bufferMaxFloodTime.Format("3:04 PM")))
+		}
+
+		switch {
+		case len(redReasons) > 0:
+			h.Status, h.Class = "Red flag", "redflag"
+			h.Detail = fmt.Sprintf("%s during %s.", strings.Join(redReasons, "; "), windowLabel)
+			if len(cautionReasons) > 0 {
+				h.Detail += fmt.Sprintf(" Also near the window: %s.", strings.Join(cautionReasons, "; "))
+			}
+		case len(cautionReasons) > 0:
+			h.Status, h.Class = "Caution", "caution"
+			h.Detail = fmt.Sprintf("%s within the %d-minute buffer around %s.",
+				strings.Join(cautionReasons, "; "), planningBufferMinutes, windowLabel)
+		default:
+			h.Status, h.Class = "Preferred", "preferred"
+			h.Detail = fmt.Sprintf("During %s, ebb stays below %.1f kt and flood stays below %.1f kt.",
+				windowLabel, maxEbbKT, maxFloodKT)
+		}
+
+		hints = append(hints, h)
+	}
+
+	return hints
+}
+
 func buildCurrentChartSVG(
 	report *CurrentReport,
 	reportTime time.Time,
 	loc *time.Location,
+	days int,
+	planningStartMinutes int,
+	planningEndMinutes int,
 ) template.HTML {
 	if report == nil || len(report.Series) < 2 {
 		return ""
+	}
+	if days != 3 && days != 7 {
+		days = 1
+	}
+
+	series := append([]CurrentSample(nil), report.Series...)
+	if days > 1 && report.CurrentStation != nil {
+		for offset := 1; offset < days; offset++ {
+			day := report.Start.In(loc).AddDate(0, 0, offset)
+			dateString := day.Format("20060102")
+			if densePredictions, _, err := fetchCurrentDensePredictions(
+				report.CurrentStation.ID,
+				report.CurrentStation.CurrBin,
+				dateString,
+			); err == nil {
+				if samples, parseErr := currentSamplesFromPredictions(
+					densePredictions,
+					loc,
+				); parseErr == nil {
+					series = append(series, samples...)
+				}
+			}
+		}
+	}
+	if len(series) < 2 {
+		return ""
+	}
+
+	// Max flood, max ebb, and slack events are useful landmarks even in
+	// multi-day planning views. Fetch the NOAA max/slack series across the
+	// whole displayed range so every day can carry compact time labels.
+	chartEvents := append([]CurrentEvent(nil), report.Events...)
+	if days > 1 && report.CurrentStation != nil {
+		beginDate := dayStartForCurrentChart(report, loc).Format("20060102")
+		endDate := dayStartForCurrentChart(report, loc).AddDate(0, 0, days-1).Format("20060102")
+		if predictions, _, err := fetchCurrentPredictionsRange(
+			report.CurrentStation.ID,
+			report.CurrentStation.CurrBin,
+			beginDate,
+			endDate,
+		); err == nil {
+			if timed, parseErr := parseCurrentPredictions(predictions, loc); parseErr == nil {
+				chartEvents = currentEventsFromTimed(timed)
+			}
+		}
 	}
 
 	const (
@@ -1053,17 +1536,11 @@ func buildCurrentChartSVG(
 	plotW := width - left - right
 	plotH := height - top - bottom
 
-	dayStart := time.Date(
-		report.Series[0].Time.In(loc).Year(),
-		report.Series[0].Time.In(loc).Month(),
-		report.Series[0].Time.In(loc).Day(),
-		0, 0, 0, 0,
-		loc,
-	)
-	dayEnd := dayStart.Add(24 * time.Hour)
+	dayStart := dayStartForCurrentChart(report, loc)
+	dayEnd := dayStart.AddDate(0, 0, days)
 
 	maxAbs := 0.0
-	for _, sample := range report.Series {
+	for _, sample := range series {
 		if v := math.Abs(sample.VelocityKT); v > maxAbs {
 			maxAbs = v
 		}
@@ -1089,7 +1566,7 @@ func buildCurrentChartSVG(
 	zeroY := yFor(0)
 
 	var path strings.Builder
-	for i, sample := range report.Series {
+	for i, sample := range series {
 		x := xFor(sample.Time.In(loc))
 		y := yFor(sample.VelocityKT)
 		if i == 0 {
@@ -1099,28 +1576,63 @@ func buildCurrentChartSVG(
 		}
 	}
 
-	firstX := xFor(report.Series[0].Time.In(loc))
-	lastX := xFor(report.Series[len(report.Series)-1].Time.In(loc))
+	firstX := xFor(series[0].Time.In(loc))
+	lastX := xFor(series[len(series)-1].Time.In(loc))
 	areaPath := fmt.Sprintf(
 		"M %.2f %.2f L %.2f %.2f %s L %.2f %.2f Z",
 		firstX, zeroY,
-		firstX, yFor(report.Series[0].VelocityKT),
-		strings.TrimPrefix(path.String(), fmt.Sprintf("M %.2f %.2f", firstX, yFor(report.Series[0].VelocityKT))),
+		firstX, yFor(series[0].VelocityKT),
+		strings.TrimPrefix(path.String(), fmt.Sprintf("M %.2f %.2f", firstX, yFor(series[0].VelocityKT))),
 		lastX, zeroY,
 	)
 
 	var svg strings.Builder
-	fmt.Fprintf(&svg, `<svg class="current-chart-svg" viewBox="0 0 %.0f %.0f" role="img" aria-label="Predicted tidal current speed and direction through the day">`, width, height)
+	fmt.Fprintf(&svg, `<svg class="current-chart-svg" viewBox="0 0 %.0f %.0f" role="img" aria-label="Predicted tidal current speed and direction across the selected date range">`, width, height)
 	fmt.Fprintf(&svg, `<defs><clipPath id="floodClip"><rect x="%.2f" y="%.2f" width="%.2f" height="%.2f"/></clipPath><clipPath id="ebbClip"><rect x="%.2f" y="%.2f" width="%.2f" height="%.2f"/></clipPath></defs>`,
 		left, top, plotW, zeroY-top,
 		left, zeroY, plotW, top+plotH-zeroY,
 	)
 
-	// Sailing window highlight.
-	if !report.Start.IsZero() && !report.End.IsZero() {
-		x1 := xFor(report.Start.In(loc))
-		x2 := xFor(report.End.In(loc))
-		fmt.Fprintf(&svg, `<rect class="sail-window" x="%.2f" y="%.2f" width="%.2f" height="%.2f"/>`,
+	// Make night visually distinct, then cut light daylight windows into it.
+	// This is intentionally stronger than the old white/light-blue treatment.
+	fmt.Fprintf(&svg, `<rect class="night-window" x="%.2f" y="%.2f" width="%.2f" height="%.2f"/>`,
+		left, top, plotW, plotH)
+
+	// Shade daylight separately for every displayed day.
+	if report.WindReference != nil {
+		for offset := 0; offset < days; offset++ {
+			day := dayStart.AddDate(0, 0, offset)
+			rise, set, err := daylightWindow(
+				day,
+				report.WindReference.Lat,
+				report.WindReference.Lon,
+				loc,
+			)
+			if err == nil {
+				x1 := xFor(rise)
+				x2 := xFor(set)
+				fmt.Fprintf(&svg, `<rect class="sail-window" x="%.2f" y="%.2f" width="%.2f" height="%.2f"/>`,
+					x1, top, x2-x1, plotH)
+			}
+		}
+	}
+
+	// Highlight the preferred planning period, noon through 5 PM local time.
+	// This is layered over the daylight/night background so the planning
+	// window can be scanned without using the event browser.
+	for offset := 0; offset < days; offset++ {
+		day := dayStart.AddDate(0, 0, offset)
+		preferredStart := time.Date(
+			day.Year(), day.Month(), day.Day(),
+			planningStartMinutes/60, planningStartMinutes%60, 0, 0, loc,
+		)
+		preferredEnd := time.Date(
+			day.Year(), day.Month(), day.Day(),
+			planningEndMinutes/60, planningEndMinutes%60, 0, 0, loc,
+		)
+		x1 := xFor(preferredStart)
+		x2 := xFor(preferredEnd)
+		fmt.Fprintf(&svg, `<rect class="preferred-window" x="%.2f" y="%.2f" width="%.2f" height="%.2f"/>`,
 			x1, top, x2-x1, plotH)
 	}
 
@@ -1139,22 +1651,40 @@ func buildCurrentChartSVG(
 		}
 	}
 
-	// Vertical time grid and labels every 3 hours.
-	for hour := 0; hour <= 24; hour += 3 {
-		t := dayStart.Add(time.Duration(hour) * time.Hour)
-		x := xFor(t)
-		fmt.Fprintf(&svg, `<line class="v-grid-line" x1="%.2f" y1="%.2f" x2="%.2f" y2="%.2f"/>`,
-			x, top, x, top+plotH)
-		if hour < 24 {
-			label := t.Format("3 PM")
-			if hour == 0 {
-				label = "12 AM"
+	// Time/day grid. One-day view keeps 3-hour labels; multi-day views
+	// emphasize day boundaries and use noon as a light orientation marker.
+	if days == 1 {
+		for hour := 0; hour <= 24; hour += 3 {
+			t := dayStart.Add(time.Duration(hour) * time.Hour)
+			x := xFor(t)
+			fmt.Fprintf(&svg, `<line class="v-grid-line" x1="%.2f" y1="%.2f" x2="%.2f" y2="%.2f"/>`,
+				x, top, x, top+plotH)
+			if hour < 24 {
+				label := t.Format("3 PM")
+				if hour == 0 {
+					label = "12 AM"
+				}
+				if hour == 12 {
+					label = "Noon"
+				}
+				fmt.Fprintf(&svg, `<text class="axis-label x-label" x="%.2f" y="%.2f">%s</text>`,
+					x, height-13, label)
 			}
-			if hour == 12 {
-				label = "Noon"
+		}
+	} else {
+		for offset := 0; offset <= days; offset++ {
+			t := dayStart.AddDate(0, 0, offset)
+			x := xFor(t)
+			fmt.Fprintf(&svg, `<line class="day-grid-line" x1="%.2f" y1="%.2f" x2="%.2f" y2="%.2f"/>`,
+				x, top, x, top+plotH)
+			if offset < days {
+				mid := t.Add(12 * time.Hour)
+				midX := xFor(mid)
+				fmt.Fprintf(&svg, `<line class="v-grid-line" x1="%.2f" y1="%.2f" x2="%.2f" y2="%.2f"/>`,
+					midX, top, midX, top+plotH)
+				fmt.Fprintf(&svg, `<text class="axis-label x-label" x="%.2f" y="%.2f">%s</text>`,
+					xFor(t.Add(6*time.Hour)), height-13, t.Format("Mon Jan 2"))
 			}
-			fmt.Fprintf(&svg, `<text class="axis-label x-label" x="%.2f" y="%.2f">%s</text>`,
-				x, height-13, label)
 		}
 	}
 
@@ -1163,23 +1693,56 @@ func buildCurrentChartSVG(
 	fmt.Fprintf(&svg, `<path class="ebb-area" d="%s" clip-path="url(#ebbClip)"/>`, areaPath)
 	fmt.Fprintf(&svg, `<path class="current-line" d="%s"/>`, path.String())
 
-	// Mark maxima/slacks.
-	for _, event := range report.Events {
-		x := xFor(event.Time.In(loc))
+	// Mark max flood, max ebb, and slack throughout the displayed range.
+	// Multi-day labels are deliberately compact: the curve/zero line tells
+	// the event type while the text supplies the planning-critical time.
+	slackIndex := 0
+	for _, event := range chartEvents {
+		eventTime := event.Time.In(loc)
+		if eventTime.Before(dayStart) || !eventTime.Before(dayEnd) {
+			continue
+		}
+		x := xFor(eventTime)
 		y := zeroY
+		labelY := zeroY - 8
 		if event.Type == "flood" {
 			y = yFor(event.SpeedKT)
+			labelY = y - 8
 		} else if event.Type == "ebb" {
 			y = yFor(-event.SpeedKT)
+			labelY = y + 15
+		} else {
+			// Alternate slack labels above/below zero to reduce collisions.
+			if slackIndex%2 == 1 {
+				labelY = zeroY + 15
+			}
+			slackIndex++
 		}
-		fmt.Fprintf(&svg, `<circle class="event-point %s" cx="%.2f" cy="%.2f" r="4"/>`,
-			event.Type, x, y)
+		eventLabel := "Slack water"
+		if event.Type == "flood" {
+			eventLabel = fmt.Sprintf("Max flood · %.1f kt", event.SpeedKT)
+		} else if event.Type == "ebb" {
+			eventLabel = fmt.Sprintf("Max ebb · %.1f kt", event.SpeedKT)
+		}
+		fmt.Fprintf(&svg, `<circle class="event-point %s" cx="%.2f" cy="%.2f" r="3.5" data-event-time="%s" data-event-label="%s" data-event-date="%s" data-event-hour="%.4f" data-event-type="%s" data-event-speed="%.3f"/>`,
+			event.Type, x, y,
+			template.HTMLEscapeString(eventTime.Format("Mon Jan 2 · 3:04 PM")),
+			template.HTMLEscapeString(eventLabel),
+			eventTime.Format("2006-01-02"),
+			float64(eventTime.Hour())+float64(eventTime.Minute())/60.0,
+			event.Type,
+			event.SpeedKT)
+		if days == 1 {
+			timeLabel := strings.ToLower(eventTime.Format("3:04PM"))
+			timeLabel = strings.TrimSuffix(timeLabel, "m")
+			fmt.Fprintf(&svg, `<text class="event-time %s" x="%.2f" y="%.2f">%s</text>`,
+				event.Type, x, labelY, timeLabel)
+		}
 	}
 
-	// "Now" marker only when the report time falls on the plotted date.
+	// "Now" marker appears when report time falls inside the plotted range.
 	nowLocal := reportTime.In(loc)
-	if nowLocal.Year() == dayStart.Year() &&
-		nowLocal.YearDay() == dayStart.YearDay() {
+	if !nowLocal.Before(dayStart) && nowLocal.Before(dayEnd) {
 		x := xFor(nowLocal)
 		fmt.Fprintf(&svg, `<line class="now-line" x1="%.2f" y1="%.2f" x2="%.2f" y2="%.2f"/>`,
 			x, top, x, top+plotH)
@@ -1315,6 +1878,59 @@ h3{margin:1.2rem 0 .35rem;color:var(--navy)}
 </body>
 </html>`))
 
+var sailingStationsHTMLTemplate = template.Must(template.New("stations").Parse(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Nearby Wind Stations — Mauri’s Wind & Current Conditions</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+<style>
+:root{--navy:#082b45;--blue:#126b91;--ink:#153242;--muted:#607886;--paper:#f5fafc;--card:#fff;--line:#d8e7ed;--good:#16805f}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.45}
+main{max-width:1050px;margin:0 auto;padding:24px 16px 48px}.back{display:inline-block;margin-bottom:16px;text-decoration:none;color:var(--blue);font-weight:850}
+h1{margin:0 0 4px;color:var(--navy);font-size:clamp(1.6rem,4vw,2.3rem)}.intro{color:var(--muted);margin:0 0 18px}
+.card{background:#fff;border:1px solid var(--line);border-radius:16px;padding:18px;margin-bottom:16px}.map{height:430px;border-radius:13px;overflow:hidden}
+table{width:100%;border-collapse:collapse;font-size:.9rem}th,td{text-align:left;padding:10px 8px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}.num{text-align:right;white-space:nowrap}.scroll{overflow-x:auto}
+a.station{color:var(--blue);font-weight:800;text-decoration:none}.badge{display:inline-block;border-radius:999px;padding:2px 7px;font-size:.68rem;font-weight:900;margin-right:4px}.auto{background:#e6eef8;color:#24538a}.selected{background:#e4f3ed;color:#146146}
+.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}.button{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:8px 12px;color:var(--blue);font-weight:850;background:#fff}
+@media(max-width:650px){.map{height:360px}th,td{padding:9px 6px}}
+</style></head><body><main>
+<a class="back" href="javascript:history.back()">← Back to conditions</a>
+<h1>Nearby Wind Stations</h1>
+<p class="intro">These are the candidate observation stations for the selected location. Distances are measured from that selected point. Use the map or table to choose the station you think best represents the water you care about.</p>
+<div class="card"><div id="station-map" class="map" aria-label="Nearby wind station candidates"></div></div>
+<div class="card">
+{{if .UseNearestURL}}<div class="actions"><a class="button" href="{{.UseNearestURL}}">Use nearest usable station</a></div>{{end}}
+<div class="scroll"><table><thead><tr><th>#</th><th>Station</th><th>Name</th><th>State</th><th class="num">From Selected Location</th>{{if .DebugWind}}<th>Status</th><th>Reason</th>{{end}}</tr></thead><tbody>
+{{range .WindCandidates}}<tr><td>{{.Rank}}</td><td><a class="station" href="{{.URL}}">{{.Station}}</a></td><td><a class="station" href="{{.URL}}">{{.Name}}</a></td><td>{{if .IsAuto}}<span class="badge auto">AUTO</span>{{end}}{{if .IsSelected}}<span class="badge selected">SELECTED</span>{{end}}</td><td class="num">{{.Distance}}</td>{{if $.DebugWind}}<td>{{.Status}}</td><td>{{.Reason}}</td>{{end}}</tr>{{else}}<tr><td colspan="5">No nearby station candidates are available.</td></tr>{{end}}
+</tbody></table></div></div>
+</main>
+<script>
+(function(){
+  var el=document.getElementById("station-map");
+  if(!el||typeof L==="undefined") return;
+  var map=L.map(el,{scrollWheelZoom:true}).setView([{{printf "%.6f" .MapCenterLat}},{{printf "%.6f" .MapCenterLon}}],9);
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:18,attribution:"&copy; OpenStreetMap contributors"}).addTo(map);
+  var pts=[];
+  function add(lat,lon,label,fill,radius,url){
+    var m=L.circleMarker([lat,lon],{radius:radius,color:"#fff",weight:2,fillColor:fill,fillOpacity:1}).addTo(map);
+    if(url){
+      m.bindTooltip(label+"<br><strong>Click to use this station</strong>",{direction:"top",opacity:.96});
+      m.on("click",function(e){if(e&&e.originalEvent)L.DomEvent.stopPropagation(e.originalEvent);window.location.assign(url);});
+    }else{m.bindPopup(label);}
+    pts.push([lat,lon]);
+  }
+  {{if .MapHasRequest}}add({{printf "%.6f" .MapRequestLat}},{{printf "%.6f" .MapRequestLon}},"Selected location","#126b91",9,"");{{end}}
+  {{range .WindCandidates}}add({{printf "%.6f" .Lat}},{{printf "%.6f" .Lon}},{{printf "%q" .Station}}+" — "+{{printf "%q" .Name}}+"<br>"+{{printf "%q" .Distance}}+" from selected location",{{if .IsSelected}}"#16805f"{{else if .IsAuto}}"#24538a"{{else}}"#718794"{{end}},{{if .IsSelected}}9{{else if .IsAuto}}8{{else}}7{{end}},{{.JSURL}});{{end}}
+  if(pts.length>1)map.fitBounds(pts,{padding:[35,35],maxZoom:10});
+})();
+</script></body></html>`))
+
+var sailingDetailsHTMLTemplate = template.Must(template.New("details").Parse(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Full report details — Mauri’s Wind & Current Conditions</title>
+<style>:root{--navy:#082b45;--blue:#126b91;--ink:#153242;--muted:#607886;--paper:#f5fafc;--card:#fff;--line:#d8e7ed}*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:1000px;margin:0 auto;padding:24px 16px 48px}a{color:var(--blue)}.back{display:inline-block;margin-bottom:18px;text-decoration:none;font-weight:800}.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px}h1{margin:0 0 6px;color:var(--navy);font-size:clamp(1.5rem,4vw,2.2rem)}.meta{color:var(--muted);margin-bottom:18px}pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;font:14px/1.55 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}</style>
+</head><body><main><a class="back" href="javascript:history.back()">← Back to conditions</a><div class="card"><h1>Full report details</h1><div class="meta">{{.Title}}{{if .ReportTime}} · {{.ReportTime}}{{end}}</div><pre>{{.FullText}}</pre></div></main></body></html>`))
+
 var sailingHTMLTemplate = template.Must(template.New("sailing").Parse(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="description" content="Wind observations and predicted currents for supported waters, presented for people planning time on the water.">
 <meta property="og:title" content="Mauri’s Wind & Current Conditions">
@@ -1332,12 +1948,12 @@ var sailingHTMLTemplate = template.Must(template.New("sailing").Parse(`<!doctype
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <style>:root{--navy:#082b45;--blue:#126b91;--sea:#0b8793;--ink:#153242;--muted:#607886;--paper:#f5fafc;--card:#fff;--line:#d8e7ed;--flood:#087f8c;--ebb:#365f91;--slack:#756d64;--shadow:0 12px 34px rgba(8,43,69,.10)}*{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#dff3f8,#f7fbfc 32rem);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Avenir Next",Avenir,Helvetica,Arial,sans-serif;line-height:1.45}.shell{max-width:880px;margin:auto;padding:28px 18px 64px}.hero{color:#fff;padding:34px 30px 30px;border-radius:24px;min-height:360px;display:flex;flex-direction:column;justify-content:flex-end;background:
 linear-gradient(180deg,rgba(4,24,38,.06) 12%,rgba(4,24,38,.24) 48%,rgba(4,24,38,.86) 100%),
-url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text-shadow:0 2px 12px rgba(0,0,0,.45)}.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-weight:800;font-size:.76rem;opacity:.8}.photo-tag{margin-top:14px;font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;opacity:.72}h1{font-size:clamp(1.8rem,6vw,3.2rem);line-height:1.05;margin:.4rem 0 .6rem;letter-spacing:-.035em}.sub{opacity:.82}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}.full{grid-column:1/-1}h2{font-size:.82rem;letter-spacing:.13em;text-transform:uppercase;color:var(--blue);margin:0 0 16px}.bottom{font-size:1.13rem}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.metric{background:var(--paper);border-radius:15px;padding:14px}.label{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700}.value{font-size:1.55rem;font-weight:800;color:var(--navy)}.meta{color:var(--muted);font-size:.88rem;margin-top:12px}.station{font-weight:800;font-size:1.1rem;color:var(--navy)}.wind-distance-warning{margin-top:10px;padding:10px 12px;border:1px solid #e7c978;border-radius:12px;background:#fff8df;color:#654d08;font-size:.9rem}.wind-distance-warning strong{color:#4e3a00}.wind-summary{white-space:pre-line;margin-top:14px;padding:13px 14px;background:#eef7fa;border-left:4px solid var(--sea);border-radius:10px;color:var(--ink);font-size:.92rem}.event{display:grid;grid-template-columns:88px 12px 1fr;gap:12px;align-items:center;min-height:58px}.time{font-weight:800;color:var(--navy)}.dot{width:12px;height:12px;border-radius:50%;background:var(--slack);box-shadow:0 0 0 5px #edf3f5}.flood .dot{background:var(--flood)}.ebb .dot{background:var(--ebb)}.eventbody{border-left:2px solid var(--line);padding:8px 0 8px 18px}.eventlabel{font-weight:800}.eventdata{color:var(--muted);font-size:.9rem}.badge{display:inline-block;border-radius:999px;padding:5px 10px;background:#e9f6fb;color:var(--blue);font-size:.75rem;font-weight:800;margin-top:12px}.footer{text-align:center;color:var(--muted);font-size:.78rem;margin-top:22px}.full-report{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:.88rem;line-height:1.55;background:#071f31;color:#e7f4f8;border-radius:14px;padding:18px;overflow-x:auto}.details-note{color:var(--muted);font-size:.88rem;margin:-4px 0 14px}.current-chart-wrap{margin-top:16px}.current-chart-svg{display:block;width:100%;height:auto;background:#f8fbfc;border:1px solid var(--line);border-radius:16px}.grid-line{stroke:#d9e4e8;stroke-width:1}.v-grid-line{stroke:#e6eef1;stroke-width:1}.zero-line{stroke:#17384a;stroke-width:2}.axis-label{fill:#657d89;font-size:11px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.y-label{text-anchor:end}.x-label{text-anchor:middle}.axis-title{fill:#657d89;font-size:11px;text-anchor:middle}.sail-window{fill:#dcebf0;opacity:.55}.flood-area{fill:#6d8fd0;opacity:.86}.ebb-area{fill:#0b9d83;opacity:.90}.current-line{fill:none;stroke:#214b62;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}.event-point{stroke:#fff;stroke-width:1.5}.event-point.flood{fill:#5478bd}.event-point.ebb{fill:#078a75}.event-point.slack{fill:#756d64}.now-line{stroke:#c63a2b;stroke-width:2.5}.now-label{fill:#c63a2b;font-size:11px;font-weight:800}.chart-explainer{color:var(--ink);font-size:.94rem;line-height:1.45;margin:2px 0 12px}.chart-note{color:var(--muted);font-size:.82rem;margin-top:9px}.candidate-table{width:100%;border-collapse:collapse;font-size:.86rem}.candidate-table th,.candidate-table td{padding:10px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}.candidate-table th{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}.candidate-table td.num,.candidate-table th.num{text-align:right;white-space:nowrap}.candidate-good td.status{font-weight:800}.candidate-bad{opacity:.82}.candidate-selected{background:rgba(20,120,100,.08)}.candidate-selected td:first-child{font-weight:800}.candidate-note{color:var(--muted);font-size:.82rem;margin:0 0 12px}.candidate-scroll{overflow-x:auto}.candidate-link{color:var(--blue);text-decoration:none;font-weight:800}.candidate-link:hover{text-decoration:underline}.candidate-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:0 0 12px}.nearest-link{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:7px 12px;color:var(--blue);font-weight:800;text-decoration:none;background:#fff}.nearest-link:hover{background:var(--paper)}.map-card{overflow:hidden}.map-intro{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px}.map-help{color:var(--muted);font-size:.9rem;max-width:600px}.map-wrap{border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#dfecef}.location-map{height:390px;width:100%}.map-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px}.map-coordinate{font-variant-numeric:tabular-nums;color:var(--muted);font-size:.9rem}.map-go{display:inline-block;border:0;border-radius:999px;padding:10px 16px;background:var(--blue);color:#fff;font-weight:850;text-decoration:none;cursor:pointer}.map-go[aria-disabled="true"]{opacity:.45;pointer-events:none}.map-search-area{border:0;cursor:pointer}.map-search-area[hidden]{display:none}.map-reset{border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:800;cursor:pointer}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#db7b20}.map-dot.current{background:#7d55a6}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}.error-card{border-left:5px solid #b64735;background:#fff7f4}.error-card h2{color:#8f3025}.error-message{font-weight:650;line-height:1.5}.error-help{color:var(--muted);font-size:.9rem}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}</style></head><body><main class="shell">
+url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text-shadow:0 2px 12px rgba(0,0,0,.45)}.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-weight:800;font-size:.76rem;opacity:.8}.photo-tag{margin-top:14px;font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;opacity:.72}h1{font-size:clamp(1.8rem,6vw,3.2rem);line-height:1.05;margin:.4rem 0 .6rem;letter-spacing:-.035em}.sub{opacity:.82}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}.full{grid-column:1/-1}h2{font-size:.82rem;letter-spacing:.13em;text-transform:uppercase;color:var(--blue);margin:0 0 16px}.bottom{font-size:1.13rem}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.metric{background:var(--paper);border-radius:15px;padding:14px}.label{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700}.value{font-size:1.55rem;font-weight:800;color:var(--navy)}.meta{color:var(--muted);font-size:.88rem;margin-top:12px}.station{font-weight:800;font-size:1.1rem;color:var(--navy)}.wind-distance-warning{margin-top:10px;padding:10px 12px;border:1px solid #e7c978;border-radius:12px;background:#fff8df;color:#654d08;font-size:.9rem}.wind-distance-warning strong{color:#4e3a00}.wind-summary{white-space:pre-line;margin-top:14px;padding:13px 14px;background:#eef7fa;border-left:4px solid var(--sea);border-radius:10px;color:var(--ink);font-size:.92rem}.event{display:grid;grid-template-columns:88px 12px 1fr;gap:12px;align-items:center;min-height:58px}.time{font-weight:800;color:var(--navy)}.dot{width:12px;height:12px;border-radius:50%;background:var(--slack);box-shadow:0 0 0 5px #edf3f5}.flood .dot{background:var(--flood)}.ebb .dot{background:var(--ebb)}.eventbody{border-left:2px solid var(--line);padding:8px 0 8px 18px}.eventlabel{font-weight:800}.eventdata{color:var(--muted);font-size:.9rem}.badge{display:inline-block;border-radius:999px;padding:5px 10px;background:#e9f6fb;color:var(--blue);font-size:.75rem;font-weight:800;margin-top:12px}.footer{text-align:center;color:var(--muted);font-size:.78rem;margin-top:22px}.full-report{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:.88rem;line-height:1.55;background:#071f31;color:#e7f4f8;border-radius:14px;padding:18px;overflow-x:auto}.card-action-row{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}#current-summary-card,.wind-card{min-width:0}.timeline-scope-note{margin:.15rem 0 1rem;color:var(--muted);font-size:.88rem}.details-link-card{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap}.details-link-card h2{margin-bottom:.2rem}.details-link{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;white-space:nowrap}.details-note{color:var(--muted);font-size:.88rem;margin:-4px 0 14px}.current-chart-header{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap}.current-chart-header h2{margin-bottom:.15rem}.current-date-label{color:var(--muted);font-weight:750;font-size:.9rem}.current-range-toolbar{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin:8px 0 10px;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:var(--paper)}.current-range-toolbar .current-date-nav{display:inline-flex;align-items:center;min-height:44px;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:8px 12px;background:#fff;color:var(--blue);font-size:.86rem;font-weight:850}.current-range-toolbar .current-date-nav.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-control-label{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:.75rem;font-weight:850}.current-control-label .current-date-picker{min-height:44px;font-size:1rem}@media(max-width:640px){.current-range-toolbar{align-items:stretch}.current-control-label{flex:1 1 140px}.current-range-toolbar .current-date-nav{justify-content:center;flex:1 1 135px}}.current-date-controls{display:flex;gap:7px;flex-wrap:wrap;align-items:center}.current-date-picker{border:1px solid var(--line);border-radius:999px;padding:6px 10px;background:#fff;color:var(--navy);font:inherit;font-size:.82rem;font-weight:750;min-height:34px}.current-date-picker:focus{outline:2px solid var(--blue);outline-offset:2px}.current-refreshing{opacity:.55;transition:opacity .15s ease}.current-date-controls a{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:7px 11px;background:#fff;color:var(--blue);font-size:.82rem;font-weight:850}.current-date-controls a:hover{background:var(--paper)}.current-date-controls a.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-planning{margin:16px 0 12px;padding:14px 16px;border:1px solid var(--line);border-radius:16px;background:#fff}.current-planning-head{display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:10px}.current-planning-head strong{color:var(--navy);font-size:1rem}.current-planning-head span{color:var(--muted);font-size:.82rem}.planning-preferences{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin:8px 0 12px}.planning-preferences label{display:flex;gap:5px;align-items:center;color:var(--muted);font-size:.78rem;font-weight:850}.planning-preferences input{min-height:40px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--navy);font:inherit;font-size:1rem;padding:6px 8px}.planning-preferences input[type="number"]{width:76px}.planning-preferences b{color:var(--muted);font-size:.82rem}@media(max-width:640px){.planning-preferences label{flex:1 1 130px;justify-content:space-between}.planning-preferences input[type="time"]{min-width:110px}}.planning-help{margin:2px 0 12px;padding:10px 12px;border-radius:10px;background:#f7f9fa;color:var(--ink);font-size:.82rem;line-height:1.45}.planning-help strong{color:var(--navy)}.current-planning-days{display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:8px}.planning-day{border:1px solid var(--line);border-radius:12px;padding:10px;min-width:0}.planning-day.preferred{background:#eef8f3}.planning-day.caution{background:#fff8df;border-color:#e7c978}.planning-day.redflag{background:#fff0ed;border-color:#dfa297}.planning-date{font-size:.78rem;font-weight:850;color:var(--navy)}.planning-status{font-size:.92rem;font-weight:900;margin-top:2px}.preferred .planning-status{color:#176246}.caution .planning-status{color:#775900}.redflag .planning-status{color:#9a3328}.planning-detail{font-size:.78rem;line-height:1.35;color:var(--ink);margin-top:5px}.planning-disclaimer{color:var(--muted);font-size:.75rem;margin-top:9px}@media(max-width:640px){.current-planning-days{grid-template-columns:1fr 1fr}.planning-detail{font-size:.8rem}}.current-event-browser{margin:12px 0 4px;padding:14px 16px;background:var(--paper);border:1px solid var(--line);border-radius:16px}.current-event-readout{text-align:center;min-height:64px}.current-event-time{font-size:clamp(1.15rem,3vw,1.55rem);font-weight:900;color:var(--navy);font-variant-numeric:tabular-nums}.current-event-label{font-size:1rem;font-weight:750;color:var(--muted);margin-top:2px}.current-event-controls{display:grid;grid-template-columns:auto minmax(120px,1fr) auto;gap:10px;align-items:center;margin-top:10px}.current-event-slider{width:100%;min-height:44px;accent-color:var(--blue)}.current-event-button{min-height:44px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--blue);font-weight:850;padding:8px 12px;cursor:pointer}.event-point.is-selected{stroke:#c63a2b;stroke-width:3;r:6}.event-cursor-line{stroke:#c63a2b;stroke-width:2;stroke-dasharray:5 4;pointer-events:none}@media(max-width:640px){.current-event-controls{grid-template-columns:1fr 1fr}.current-event-slider{grid-column:1/-1;grid-row:1}.current-event-button{font-size:.82rem}}.current-chart-wrap .event-point,.current-chart-wrap .event-point:hover{cursor:default!important;pointer-events:none}.current-chart-wrap{margin-top:16px}.current-chart-svg{display:block;width:100%;height:auto;background:#f8fbfc;border:1px solid var(--line);border-radius:16px}.grid-line{stroke:#d9e4e8;stroke-width:1}.v-grid-line{stroke:#e6eef1;stroke-width:1}.day-grid-line{stroke:#b7cbd4;stroke-width:1.4}.zero-line{stroke:#17384a;stroke-width:2}.axis-label{fill:#657d89;font-size:11px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.y-label{text-anchor:end}.x-label{text-anchor:middle}.axis-title{fill:#657d89;font-size:11px;text-anchor:middle}.night-window{fill:#aebdc4;opacity:.78}.sail-window{fill:#f8fbfc;opacity:.96}.preferred-window{fill:#f0d46d;opacity:.34}.flood-area{fill:#6d8fd0;opacity:.86}.ebb-area{fill:#0b9d83;opacity:.90}.current-line{fill:none;stroke:#214b62;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}.event-point{stroke:#fff;stroke-width:1.5}.event-point.flood{fill:#5478bd}.event-point.ebb{fill:#078a75}.event-point.slack{fill:#756d64}.event-time{fill:#17384a;font-size:9px;font-weight:800;text-anchor:middle;paint-order:stroke;stroke:#fff;stroke-width:2.5px;stroke-linejoin:round}.event-time.flood{fill:#294f91}.event-time.ebb{fill:#066c5d}.event-time.slack{fill:#514b46}.now-line{stroke:#c63a2b;stroke-width:2.5}.now-label{fill:#c63a2b;font-size:11px;font-weight:800}.chart-explainer{color:var(--ink);font-size:.94rem;line-height:1.45;margin:2px 0 12px}.chart-note{color:var(--muted);font-size:.82rem;margin-top:9px}.candidate-table{width:100%;border-collapse:collapse;font-size:.86rem}.candidate-table th,.candidate-table td{padding:10px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}.candidate-table th{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}.candidate-table td.num,.candidate-table th.num{text-align:right;white-space:nowrap}.candidate-good td.status{font-weight:800}.candidate-bad{opacity:.82}.candidate-selected{background:rgba(20,120,100,.08)}.candidate-selected td:first-child{font-weight:800}.candidate-note{color:var(--muted);font-size:.82rem;margin:0 0 12px}.candidate-scroll{overflow-x:auto}.candidate-link{color:var(--blue);text-decoration:none;font-weight:800}.candidate-link:hover{text-decoration:underline}.candidate-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:0 0 12px}.nearest-link{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:7px 12px;color:var(--blue);font-weight:800;text-decoration:none;background:#fff}.nearest-link:hover{background:var(--paper)}.map-card{overflow:hidden}.map-intro{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px}.map-help{color:var(--muted);font-size:.9rem;max-width:600px}.map-wrap{border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#dfecef}.location-map{height:390px;width:100%}.map-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px}.map-coordinate{font-variant-numeric:tabular-nums;color:var(--muted);font-size:.9rem}.map-go{display:inline-block;border:0;border-radius:999px;padding:10px 16px;background:var(--blue);color:#fff;font-weight:850;text-decoration:none;cursor:pointer}.map-go[aria-disabled="true"]{opacity:.45;pointer-events:none}.map-search-area{border:0;cursor:pointer}.map-search-area[hidden]{display:none}.map-reset{border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:800;cursor:pointer}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#db7b20}.map-dot.current{background:#7d55a6}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}.error-card{border-left:5px solid #b64735;background:#fff7f4}.error-card h2{color:#8f3025}.error-message{font-weight:650;line-height:1.5}.error-help{color:var(--muted);font-size:.9rem}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}</style></head><body><main class="shell">
 <section class="hero"><div class="eyebrow">Mauri’s Wind & Current Conditions</div><h1>{{.Title}}</h1><div class="sub">{{.ReportTime}} · {{.Station}}</div>{{if .Historical}}<span class="badge">Historical · {{.RequestedTime}}</span>{{end}}<div class="photo-tag">Bay sailing</div></section><div class="grid">
-<section class="card full bottom"><h2>Bottom line</h2>{{range .BottomLine}}<p>{{.}}</p>{{else}}<p>Summary unavailable.</p>{{end}}</section>
+<section id="bottom-line-card" class="card full bottom"><h2>Bottom line</h2>{{range .BottomLine}}<p>{{.}}</p>{{else}}<p>Summary unavailable.</p>{{end}}</section>
 <section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map to choose a location, or pan to another area and use Search this area for wind stations. Candidate stations and distances always refer to the selected location.</div></div></div><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div class="map-controls"><span id="map-coordinate" class="map-coordinate">{{if .MapHasRequest}}Selected: {{printf "%.5f" .MapRequestLat}}, {{printf "%.5f" .MapRequestLon}}{{else}}Click the map to choose a location.{{end}}</span><a id="map-go" class="map-go" href="#" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}">Show Conditions</a><button id="map-search-area" class="map-go map-search-area" type="button" hidden>Search this area for wind stations</button>{{if .MapHasRequest}}<button id="map-reset" class="map-reset" type="button">Clear chosen point</button>{{end}}</div><div class="map-legend">{{if .MapHasRequest}}<span class="map-key"><span class="map-dot request"></span>Selected location</span>{{end}}{{if .WindCandidates}}<span class="map-key"><span class="map-dot wind"></span>Nearby wind stations</span>{{else if .MapHasWind}}<span class="map-key"><span class="map-dot wind"></span>Wind station {{.MapWindStation}}</span>{{end}}{{if .MapHasCurrent}}<span class="map-key"><span class="map-dot current"></span>Current station {{.MapCurrentStation}}</span>{{end}}</div></section>
 {{if .WindError}}<section class="card full error-card"><h2>Wind station selection unavailable</h2><p class="error-message">{{.WindError}}</p><p class="error-help">The page is still available so you can inspect the request and nearby station diagnostics. Try nearby coordinates or an explicit NDBC station ID.</p></section>{{end}}
-<section class="card"><h2>Wind</h2>
+<section class="card wind-card"><h2>Wind</h2>
 <div class="metrics">
 <div class="metric"><div class="label">Direction</div><div class="value">{{if .WindDirection}}{{.WindDirection}}{{else}}—{{end}}</div></div>
 <div class="metric"><div class="label">Wind</div><div class="value">{{if .WindSpeed}}{{.WindSpeed}}{{else}}—{{end}}</div></div>
@@ -1347,13 +1963,13 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 {{if .WindSelection}}<div class="meta"><strong>Wind station:</strong> {{.WindSelection}}</div>{{end}}
 {{if .WindDistanceWarning}}<div class="wind-distance-warning"><strong>Distance warning:</strong> {{.WindDistanceWarning}}</div>{{end}}
 {{if .WindSummary}}<div class="wind-summary">{{.WindSummary}}</div>{{end}}
+{{if .WindCandidates}}<div class="card-action-row"><a class="details-link" href="{{.WindStationsURL}}">Browse nearby wind stations →</a></div>{{end}}
 </section>
-{{if .WindCandidates}}<section class="card full"><h2>Nearby Wind Stations</h2><p class="candidate-note">{{if .DebugWind}}Nearby stations are probed concurrently and sorted by distance. Click any station to reload the outlook using that station.{{else}}Nearby candidate stations are shown here and on the map. Click a station name or station marker to use that observation source. Stations are ordered by distance from the selected location.{{end}}</p>{{if .UseNearestURL}}<div class="candidate-actions"><a class="nearest-link" href="{{.UseNearestURL}}">Use nearest usable station</a></div>{{end}}<div class="candidate-scroll"><table class="candidate-table"><thead><tr><th>#</th><th>Station</th><th>Name</th><th>State</th><th class="num">From Selected Location</th>{{if .DebugWind}}<th>Met</th><th>Status</th><th>Reason</th>{{end}}</tr></thead><tbody>{{range .WindCandidates}}<tr class="{{.Class}}"><td>{{.Rank}}</td><td><a class="candidate-link" href="{{.URL}}">{{.Station}}</a></td><td><a class="candidate-link" href="{{.URL}}">{{.Name}}</a></td><td><div class="candidate-state">{{if .IsAuto}}<span class="candidate-badge badge-auto">AUTO</span>{{end}}{{if .IsSelected}}<span class="candidate-badge badge-selected">SELECTED</span>{{end}}</div></td><td class="num">{{.Distance}}</td>{{if $.DebugWind}}<td>{{.Met}}</td><td class="status">{{.Status}}</td><td>{{.Reason}}</td>{{end}}</tr>{{end}}</tbody></table></div></section>{{end}}
 
-<section class="card"><h2>Current</h2>{{if .CurrentStation}}<div class="station">{{.CurrentStation}}</div><div class="meta">{{.CurrentMeta}}</div>{{if .CurrentWindowMode}}<p><strong>{{.CurrentWindowMode}}</strong><br>{{.CurrentWindow}}</p>{{else if .CurrentWindow}}<p><strong>Conditions window</strong><br>{{.CurrentWindow}}</p>{{end}}{{range .CurrentOutlook}}<p>{{.}}</p>{{end}}{{else}}<p>Current prediction unavailable.</p>{{end}}</section>
-{{if .CurrentChart}}<section class="card full"><h2>Tidal Current Through the Day</h2><div class="chart-explainer"><strong>This is current, not tide height.</strong> Above zero = flood; below zero = ebb; crossings = slack water.</div><div class="current-chart-wrap">{{.CurrentChart}}</div><div class="chart-note">NOAA 6-minute harmonic current predictions. Shaded band marks the conditions window; red line marks report time.</div></section>{{end}}
-<section class="card full"><h2>Current timeline</h2>{{range .CurrentEvents}}<div class="event {{.Class}}"><div class="time">{{.Time}}</div><div class="dot"></div><div class="eventbody"><div class="eventlabel">{{.Label}}</div>{{if .Speed}}<div class="eventdata">{{.Speed}} · {{.Direction}}</div>{{end}}</div></div>{{else}}<p>No current events in the conditions window.</p>{{end}}</section>
-<section class="card full"><h2>Full report details</h2><p class="details-note">Complete CLI/text report. This section includes every detail available from the text endpoint.</p><pre class="full-report">{{.FullText}}</pre></section></div>
+<section id="current-summary-card" class="card"><h2>Current{{if .CurrentDateLabel}} — {{.CurrentDateLabel}}{{end}}</h2>{{if .CurrentStation}}<div class="station">{{.CurrentStation}}</div><div class="meta">{{.CurrentMeta}}</div>{{if .CurrentWindowMode}}<p><strong>{{.CurrentWindowMode}}</strong><br>{{.CurrentWindow}}</p>{{else if .CurrentWindow}}<p><strong>Conditions window</strong><br>{{.CurrentWindow}}</p>{{end}}{{range .CurrentOutlook}}<p>{{.}}</p>{{end}}{{else}}<p>Current prediction unavailable.</p>{{end}}</section>
+{{if .CurrentChart}}<section id="current-chart-card" class="card full"><div class="current-chart-header"><div><h2>Tidal Current</h2>{{if .CurrentRangeLabel}}<div class="current-date-label">{{.CurrentRangeLabel}}</div>{{end}}</div></div><div class="current-range-toolbar" aria-label="Current graph date controls"><a class="current-date-nav" href="{{.CurrentPrevURL}}" aria-label="Previous date range">← Previous range</a><label class="current-control-label"><span>Start date</span><input id="current-date-picker" class="current-date-picker" type="date" value="{{.CurrentDateISO}}" aria-label="Choose starting date"></label><label class="current-control-label"><span>Range</span><select id="current-days-picker" class="current-date-picker" aria-label="Number of days"><option value="1" {{if eq .CurrentDays 1}}selected{{end}}>1 day</option><option value="3" {{if eq .CurrentDays 3}}selected{{end}}>3 days</option><option value="7" {{if eq .CurrentDays 7}}selected{{end}}>7 days</option></select></label><a class="current-date-nav {{if .CurrentIsToday}}is-current{{end}}" href="{{.CurrentTodayURL}}">Today</a><a class="current-date-nav" href="{{.CurrentNextURL}}" aria-label="Next date range">Next range →</a></div><div class="chart-explainer"><strong>This is current, not tide height.</strong> Above zero = flood; below zero = ebb; crossings = slack water.</div><div class="current-chart-wrap">{{.CurrentChart}}</div><div class="chart-note">NOAA 6-minute harmonic current predictions. Darker bands are night; light areas are daylight; warm bands mark the configured preferred planning period. {{if eq .CurrentDays 1}}Max flood, max ebb, and slack events are labeled with their times.{{else}}Small dots mark max flood, max ebb, and slack. Use the event navigator below for large, readable times.{{end}} {{if .CurrentIsToday}}Red line marks report time when it falls inside the displayed range.{{end}}{{if gt .CurrentDays 1}} Day boundaries are emphasized for multi-day planning.{{end}}</div>{{if gt .CurrentDays 1}}<div class="current-event-browser" data-current-event-browser><div class="current-event-readout" aria-live="polite"><div class="current-event-time">Select an event</div><div class="current-event-label">Use the slider or Previous / Next event</div></div><div class="current-event-controls"><button type="button" class="current-event-button" data-event-prev>← Previous event</button><input class="current-event-slider" data-event-slider type="range" min="0" max="0" value="0" step="1" aria-label="Current event"><button type="button" class="current-event-button" data-event-next>Next event →</button></div></div>{{end}}{{if .CurrentPlanningHints}}<div class="current-planning"><div class="current-planning-head"><strong>Preferred-period planning hint{{if eq .CurrentDays 1}} — today / selected day{{end}}</strong><span>Red flag when ebb or flood reaches its configured limit during the preferred window; caution when it does so within the buffer.</span></div><div class="planning-preferences"><label><span>Start</span><input id="planning-start" type="time" value="{{.PlanningStart}}" aria-label="Preferred period start"></label><label><span>End</span><input id="planning-end" type="time" value="{{.PlanningEnd}}" aria-label="Preferred period end"></label><label><span>Max ebb</span><input id="planning-max-ebb" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningMaxEbb}}" aria-label="Maximum preferred ebb in knots"><b>kt</b></label><label><span>Max flood</span><input id="planning-max-flood" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningMaxFlood}}" aria-label="Maximum preferred flood in knots"><b>kt</b></label><label><span>Buffer</span><input id="planning-buffer" type="number" min="0" max="360" step="15" value="{{.PlanningBuffer}}" aria-label="Preferred-period buffer in minutes"><b>min</b></label></div><div class="planning-help"><strong>How these settings work:</strong> Max ebb is the strongest ebb you want during your preferred period; strong ebb can become rough when wind opposes the current. Max flood is the strongest flood you want during that period; a large flood can make sailing against the current difficult. Buffer checks the same limits before and after the preferred period, catching strong current close enough to affect the start or end of your outing. <strong>Red flag</strong> means an ebb or flood limit is reached during the preferred period. <strong>Caution</strong> means a limit is reached only within the buffer. <strong>Preferred</strong> means both stay below their limits.</div><div class="current-planning-days">{{range .CurrentPlanningHints}}<div class="planning-day {{.Class}}"><div class="planning-date">{{.Date}}</div><div class="planning-status">{{if eq .Class "preferred"}}✓{{else if eq .Class "redflag"}}⚠{{else}}△{{end}} {{.Status}}</div><div class="planning-detail">{{.Detail}}</div></div>{{end}}</div><div class="planning-disclaimer">Current-based planning hint only; wind, swell, weather, traffic, and local effects still matter.</div></div>{{end}}</section>{{end}}
+<section id="current-timeline-card" class="card full"><h2>Current timeline{{if .CurrentDateLabel}} — {{.CurrentDateLabel}}{{end}}</h2>{{if gt .CurrentDays 1}}<p class="timeline-scope-note">Events below are for the selected start date only. The graph above shows the full {{.CurrentDays}}-day range.</p>{{end}}{{range .CurrentEvents}}<div class="event {{.Class}}"><div class="time">{{.Time}}</div><div class="dot"></div><div class="eventbody"><div class="eventlabel">{{.Label}}</div>{{if .Speed}}<div class="eventdata">{{.Speed}} · {{.Direction}}</div>{{end}}</div></div>{{else}}<p>No current events in the conditions window.</p>{{end}}</section>
+<section id="full-report-card" class="card full details-link-card"><div><h2>Need the details?</h2><p class="details-note">Open the complete text-style report, including diagnostic and supporting information.</p></div><a class="details-link" href="{{.FullDetailsURL}}">View full report details →</a></section></div>
 <div class="footer"><strong>Mauri’s Wind & Current Conditions</strong><br>NOAA/NDBC observations + NOAA CO-OPS current predictions · Conditions-planning aid, not a navigation system</div></main><script>
 (function(){
   var el = document.getElementById("sailing-location-map");
@@ -1574,6 +2190,199 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
   }
 
   updateGo();
+})();
+
+(function(){
+  var replaceIDs = [
+    "bottom-line-card",
+    "current-summary-card",
+    "current-chart-card",
+    "current-timeline-card",
+    "full-report-card"
+  ];
+  var requestSerial = 0;
+
+  function setRefreshing(on) {
+    replaceIDs.forEach(function(id) {
+      var el = document.getElementById(id);
+      if (el) el.classList.toggle("current-refreshing", on);
+    });
+  }
+
+  function currentURLForDate(dateValue) {
+    var target = new URL(window.location.href);
+    target.pathname = "/report";
+    target.searchParams.set("format", "html");
+    if (dateValue) {
+      target.searchParams.set("current_date", dateValue);
+    } else {
+      target.searchParams.delete("current_date");
+    }
+    return target;
+  }
+
+  function currentURLForPlanning() {
+    var target = new URL(window.location.href);
+    target.pathname = "/report";
+    target.searchParams.set("format", "html");
+
+    var start = document.getElementById("planning-start");
+    var end = document.getElementById("planning-end");
+    var maxEbb = document.getElementById("planning-max-ebb");
+    var maxFlood = document.getElementById("planning-max-flood");
+    var buffer = document.getElementById("planning-buffer");
+
+    var startValue = start ? start.value : "12:00";
+    var endValue = end ? end.value : "17:00";
+    var maxValue = maxEbb ? Number(maxEbb.value) : 1.5;
+    var maxFloodValue = maxFlood ? Number(maxFlood.value) : 1.5;
+    var bufferValue = buffer ? Number(buffer.value) : 60;
+
+    if (!/^\d{2}:\d{2}$/.test(startValue)) startValue = "12:00";
+    if (!/^\d{2}:\d{2}$/.test(endValue)) endValue = "17:00";
+    if (!Number.isFinite(maxValue) || maxValue <= 0) maxValue = 1.5;
+    if (!Number.isFinite(maxFloodValue) || maxFloodValue <= 0) maxFloodValue = 1.5;
+    if (!Number.isFinite(bufferValue) || bufferValue < 0) bufferValue = 60;
+    bufferValue = Math.max(0, Math.min(360, Math.round(bufferValue)));
+
+    if (startValue === "12:00") target.searchParams.delete("planning_start");
+    else target.searchParams.set("planning_start", startValue);
+
+    if (endValue === "17:00") target.searchParams.delete("planning_end");
+    else target.searchParams.set("planning_end", endValue);
+
+    if (Math.abs(maxValue - 1.5) < 0.001) target.searchParams.delete("max_ebb");
+    else target.searchParams.set("max_ebb", maxValue.toFixed(1));
+
+    if (Math.abs(maxFloodValue - 1.5) < 0.001) target.searchParams.delete("max_flood");
+    else target.searchParams.set("max_flood", maxFloodValue.toFixed(1));
+
+    if (bufferValue === 60) target.searchParams.delete("planning_buffer");
+    else target.searchParams.set("planning_buffer", String(bufferValue));
+
+    return target;
+  }
+
+  function currentURLForDays(daysValue) {
+    var target = new URL(window.location.href);
+    target.pathname = "/report";
+    target.searchParams.set("format", "html");
+    if (daysValue === "3" || daysValue === "7") {
+      target.searchParams.set("current_days", daysValue);
+    } else {
+      target.searchParams.delete("current_days");
+    }
+    return target;
+  }
+
+  async function loadCurrentURL(target, pushHistory) {
+    var serial = ++requestSerial;
+    setRefreshing(true);
+    try {
+      var response = await fetch(target.pathname + target.search, {
+        headers: {"X-Requested-With": "current-date-controls"}
+      });
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      var html = await response.text();
+      if (serial !== requestSerial) return;
+      var doc = new DOMParser().parseFromString(html, "text/html");
+      replaceIDs.forEach(function(id) {
+        var oldEl = document.getElementById(id);
+        var newEl = doc.getElementById(id);
+        if (oldEl && newEl) oldEl.replaceWith(newEl);
+      });
+      initCurrentEventBrowser();
+      if (pushHistory) history.pushState({}, "", target.pathname + target.search);
+    } catch (err) {
+      // Preserve the reliable server-rendered fallback if partial refresh fails.
+      window.location.assign(target.pathname + target.search);
+    } finally {
+      if (serial === requestSerial) setRefreshing(false);
+    }
+  }
+
+  document.addEventListener("click", function(e) {
+    var link = e.target.closest("a.current-date-nav");
+    if (!link) return;
+    e.preventDefault();
+    loadCurrentURL(new URL(link.href, window.location.href), true);
+  });
+
+  document.addEventListener("change", function(e) {
+    if (e.target.id !== "current-date-picker") return;
+    var value = e.target.value;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return;
+    e.target.blur();
+    loadCurrentURL(currentURLForDate(value), true);
+  });
+
+  document.addEventListener("change", function(e) {
+    if (e.target.id !== "current-days-picker") return;
+    loadCurrentURL(currentURLForDays(e.target.value), true);
+  });
+
+  document.addEventListener("change", function(e) {
+    if (
+      e.target.id !== "planning-start" &&
+      e.target.id !== "planning-end" &&
+      e.target.id !== "planning-max-ebb" &&
+      e.target.id !== "planning-max-flood" &&
+      e.target.id !== "planning-buffer"
+    ) return;
+    loadCurrentURL(currentURLForPlanning(), true);
+  });
+
+  function initCurrentEventBrowser() {
+    var browser = document.querySelector("[data-current-event-browser]");
+    var svg = document.querySelector("#current-chart-card .current-chart-svg");
+    if (!browser || !svg || browser.dataset.ready === "1") return;
+    var events = Array.prototype.slice.call(svg.querySelectorAll("circle.event-point[data-event-time]"));
+    if (!events.length) return;
+    browser.dataset.ready = "1";
+    var slider = browser.querySelector("[data-event-slider]");
+    var timeEl = browser.querySelector(".current-event-time");
+    var labelEl = browser.querySelector(".current-event-label");
+    var prev = browser.querySelector("[data-event-prev]");
+    var next = browser.querySelector("[data-event-next]");
+    slider.max = String(events.length - 1);
+    var cursor = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    cursor.setAttribute("class", "event-cursor-line");
+    cursor.setAttribute("y1", "18");
+    cursor.setAttribute("y2", "288");
+    svg.appendChild(cursor);
+    function select(index) {
+      index = Math.max(0, Math.min(events.length - 1, index));
+      slider.value = String(index);
+      events.forEach(function(el){ el.classList.remove("is-selected"); });
+      var event = events[index];
+      event.classList.add("is-selected");
+      var x = event.getAttribute("cx");
+      cursor.setAttribute("x1", x);
+      cursor.setAttribute("x2", x);
+      timeEl.textContent = event.dataset.eventTime || "Current event";
+      labelEl.textContent = event.dataset.eventLabel || "";
+      prev.disabled = index === 0;
+      next.disabled = index === events.length - 1;
+    }
+slider.addEventListener("input", function(){ select(Number(slider.value)); });
+    prev.addEventListener("click", function(){ select(Number(slider.value) - 1); });
+    next.addEventListener("click", function(){ select(Number(slider.value) + 1); });
+    events.forEach(function(event, index){
+      event.style.cursor = "pointer";
+      event.addEventListener("click", function(){ select(index); });
+    });
+    select(0);
+  }
+
+  document.addEventListener("click", function(e) {
+    if (e.target.closest("[data-current-event-browser]")) initCurrentEventBrowser();
+  });
+
+  initCurrentEventBrowser();
+
+  window.addEventListener("popstate", function() {
+    loadCurrentURL(new URL(window.location.href), false);
+  });
 })();
 </script>
 </body></html>`))
@@ -1876,6 +2685,27 @@ func writeBottomLineText(
 
 	if report.Current == nil || report.Current.Error != "" {
 		fmt.Fprintln(w, "Current prediction is unavailable.")
+		return
+	}
+
+	currentDay := report.Current.Start
+	reportDay := report.ReportTime.In(currentDay.Location())
+	if !currentDay.IsZero() &&
+		(currentDay.Year() != reportDay.Year() ||
+			currentDay.YearDay() != reportDay.YearDay()) {
+		fmt.Fprintf(
+			w,
+			"Current prediction is shown for %s; see the current section for that day’s cycle.\n",
+			currentDay.Format("Mon Jan 2"),
+		)
+		for i := len(report.Current.Outlook) - 1; i >= 0; i-- {
+			line := report.Current.Outlook[i]
+			if strings.HasPrefix(line, "Peak predicted current") ||
+				strings.HasPrefix(line, "No maximum-current") {
+				fmt.Fprintln(w, line)
+				break
+			}
+		}
 		return
 	}
 
