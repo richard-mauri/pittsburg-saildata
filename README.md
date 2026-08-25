@@ -145,6 +145,26 @@ Use local knowledge when choosing among candidates. The automatic
 station is a recommendation for convenience, not a claim that it
 perfectly represents conditions at the selected point.
 
+### Panning and searching a new area
+
+Panning changes only the **map viewport**. It does not silently change
+the selected location, candidate stations, or the **From Selected
+Location** distances.
+
+After you pan, the map displays **Search this area for wind stations**.
+Clicking it uses the center of the visible map as the new selected
+location, reloads the report, and recomputes nearby candidate stations
+and their distances.
+
+The map therefore has four distinct actions:
+
+-   **Pan** to explore without changing the report.
+-   **Search this area for wind stations** to search around the visible
+    map center.
+-   **Click a map location** to choose a precise point.
+-   **Click a wind-station marker** to use that specific observation
+    source while preserving the selected location.
+
 ### Distance warning
 
 If the selected wind station is **10 nautical miles or more** from the
