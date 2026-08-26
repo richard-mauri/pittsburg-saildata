@@ -625,27 +625,6 @@ func runServer(
 			`"'`,
 		))
 
-		// search_lat/search_lon optionally define the area to search without
-		// changing the selected sailing location.
-		searchLat := selectedLat
-		searchLon := selectedLon
-		if rawLat := strings.TrimSpace(q.Get("search_lat")); rawLat != "" {
-			var v float64
-			if _, err := fmt.Sscanf(rawLat, "%f", &v); err != nil {
-				http.Error(w, "invalid search_lat", http.StatusBadRequest)
-				return
-			}
-			searchLat = v
-		}
-		if rawLon := strings.TrimSpace(q.Get("search_lon")); rawLon != "" {
-			var v float64
-			if _, err := fmt.Sscanf(rawLon, "%f", &v); err != nil {
-				http.Error(w, "invalid search_lon", http.StatusBadRequest)
-				return
-			}
-			searchLon = v
-		}
-
 		stations, err := getActiveNDBCStations()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
@@ -659,7 +638,7 @@ func runServer(
 		}
 		candidates := make([]nearby, 0, len(stations))
 		for _, station := range stations {
-			searchDistance := distanceNM(searchLat, searchLon, station.Lat, station.Lon)
+			searchDistance := distanceNM(selectedLat, selectedLon, station.Lat, station.Lon)
 			if searchDistance > windStationMaxDistanceNM {
 				continue
 			}
@@ -705,8 +684,6 @@ func runServer(
 			linkQ.Set("lat", fmt.Sprintf("%.5f", selectedLat))
 			linkQ.Set("lon", fmt.Sprintf("%.5f", selectedLon))
 			linkQ.Set("station", strings.ToUpper(c.Station.ID))
-			linkQ.Del("search_lat")
-			linkQ.Del("search_lon")
 			linkQ.Del("selected_station")
 			linkQ.Del("current_station")
 			linkQ.Del("bin")
@@ -2267,7 +2244,7 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 .map-station-list{margin-top:12px}.map-station-list-title{font-weight:850;color:var(--navy);margin:0 0 8px}.map-station-table-wrap{overflow-x:auto}.map-station-table{width:100%;border-collapse:collapse;font-size:.86rem}.map-station-table th,.map-station-table td{padding:8px 10px;border-top:1px solid var(--line);text-align:left;vertical-align:top}.map-station-table th{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}.map-station-table a{color:var(--blue);font-weight:800;text-decoration:none}.map-station-table a:hover{text-decoration:underline}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#2f855a}.map-dot.current{background:#7d55a6}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}.error-card{border-left:5px solid #b64735;background:#fff7f4}.error-card h2{color:#8f3025}.error-message{font-weight:650;line-height:1.5}.error-help{color:var(--muted);font-size:.9rem}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}</style></head><body><main class="shell">
 <section class="hero"><div class="eyebrow">Mauri's Wind & Current Conditions</div><h1>{{.Title}}</h1><div class="sub">{{.ReportTime}} · {{.Station}}</div>{{if .Historical}}<span class="badge">Historical · {{.RequestedTime}}</span>{{end}}<div class="photo-tag">Bay sailing</div></section><div class="grid">
 <section id="bottom-line-card" class="card full bottom"><h2>Bottom line</h2>{{range .BottomLine}}<p>{{.}}</p>{{else}}<p>Summary unavailable.</p>{{end}}</section>
-<section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map to choose a location. Use Find stations near this point for the selected ★ location. Search this area for wind stations always searches the current map center; panning never changes either action. Click a nearby wind station to pin its details and preview the associated currents station, then use the selection link in the map panel to commit the wind-station choice. Candidate stations and distances always refer to the selected location.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-controls"><span id="map-coordinate" class="map-coordinate">{{if .MapHasRequest}}Selected: {{printf "%.5f" .MapRequestLat}}, {{printf "%.5f" .MapRequestLon}}{{else}}Click the map to choose a location.{{end}}</span><a id="map-go" class="map-go" href="#" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}">Show Conditions</a><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" hidden>Find stations near this point</span><span id="map-search-area" class="map-go map-search-area" role="button" tabindex="0" hidden>Search this area for wind stations</span><span id="map-search-status" class="map-search-status" aria-live="polite"></span>{{if .MapHasRequest}}<button id="map-reset" class="map-reset" type="button">Clear selected location point</button>{{end}}</div><div class="map-layer-note">Layer control: <strong>Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service. Chart layer is for planning/reference and does not replace official navigation products.</div><div class="map-legend">{{if .MapHasRequest}}<span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span>{{end}}{{if .MapHasWind}}<span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station {{.MapWindStation}}</span>{{end}}{{if .WindCandidates}}<span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span>{{end}}{{if .MapHasCurrent}}<span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Currents station {{.MapCurrentStation}}</span>{{end}}</div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
+<section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map to choose a sailing location, then use Find stations near this point. Panning only changes the view; to search somewhere else, click the map to move the selected ★ location first. Click a nearby wind station to pin its details and preview the associated currents station, then use the selection link in the map panel to commit the wind-station choice. Candidate stations and distances always refer to the selected location.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-controls"><span id="map-coordinate" class="map-coordinate">{{if .MapHasRequest}}Selected: {{printf "%.5f" .MapRequestLat}}, {{printf "%.5f" .MapRequestLon}}{{else}}Click the map to choose a location.{{end}}</span><a id="map-go" class="map-go" href="#" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}">Show Conditions</a><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" hidden>Find stations near this point</span><span id="map-search-status" class="map-search-status" aria-live="polite"></span>{{if .MapHasRequest}}<button id="map-reset" class="map-reset" type="button">Clear selected location point</button>{{end}}</div><div class="map-layer-note">Layer control: <strong>Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service. Chart layer is for planning/reference and does not replace official navigation products.</div><div class="map-legend">{{if .MapHasRequest}}<span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span>{{end}}{{if .MapHasWind}}<span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station {{.MapWindStation}}</span>{{end}}{{if .WindCandidates}}<span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span>{{end}}{{if .MapHasCurrent}}<span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Currents station {{.MapCurrentStation}}</span>{{end}}</div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
 {{if .WindError}}<section class="card full error-card"><h2>Wind station selection unavailable</h2><p class="error-message">{{.WindError}}</p><p class="error-help">The page is still available so you can inspect the request and nearby station diagnostics. Try nearby coordinates or an explicit NDBC station ID.</p></section>{{end}}
 <section class="card wind-card"><h2>Wind</h2>
 <div class="metrics">
@@ -2292,8 +2269,10 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
   if (!el || typeof L === "undefined") return;
 
   var pageURL = new URL(window.location.href);
-  var centerLat = Number(pageURL.searchParams.get("map_center_lat"));
-  var centerLon = Number(pageURL.searchParams.get("map_center_lon"));
+  var centerLatText = pageURL.searchParams.get("map_center_lat");
+  var centerLonText = pageURL.searchParams.get("map_center_lon");
+  var centerLat = centerLatText === null ? NaN : Number(centerLatText);
+  var centerLon = centerLonText === null ? NaN : Number(centerLonText);
   if (!Number.isFinite(centerLat) || centerLat < -90 || centerLat > 90) centerLat = {{printf "%.6f" .MapCenterLat}};
   if (!Number.isFinite(centerLon) || centerLon < -180 || centerLon > 180) centerLon = {{printf "%.6f" .MapCenterLon}};
   var initialZoom = Number(pageURL.searchParams.get("map_zoom"));
@@ -2367,7 +2346,7 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
         e.preventDefault();
         e.stopPropagation();
         if (selectedMarker) {
-          map.setView(selectedMarker.getLatLng(), Math.max(map.getZoom(), 12));
+          map.setView(selectedMarker.getLatLng(), map.getZoom());
         }
       });
 
@@ -2375,7 +2354,7 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
         e.preventDefault();
         e.stopPropagation();
         if (selectedWindMarker) {
-          map.setView(selectedWindMarker.getLatLng(), Math.max(map.getZoom(), 12));
+          map.setView(selectedWindMarker.getLatLng(), map.getZoom());
         }
       });
 
@@ -2383,7 +2362,7 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
         e.preventDefault();
         e.stopPropagation();
         if (currentStationMarker) {
-          map.setView(currentStationMarker.getLatLng(), Math.max(map.getZoom(), 12));
+          map.setView(currentStationMarker.getLatLng(), map.getZoom());
         }
       });
 
@@ -2448,7 +2427,8 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
       busy: false,
       mode: "",
       message: ""
-    }
+    },
+    currentsOverlayVisible: true
   };
 
   var sourcePoints = [];
@@ -2520,18 +2500,37 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 
 
   function currentsOverlayEnabled() {
+    return !!mapState.currentsOverlayVisible;
+  }
+
+  function syncCurrentsOverlayControl() {
     var checkbox = document.getElementById("map-show-currents");
-    return !!(checkbox && checkbox.checked);
+    if (!checkbox) return;
+    checkbox.checked = !!mapState.currentsOverlayVisible;
   }
 
   function previewCurrentsForWind(station, currentStation, currentName, currentDistance, currentLat, currentLon) {
-    if (!currentStationMarker || !currentStation) return;
+    if (!currentStation) return;
     if (!Number.isFinite(Number(currentLat)) || !Number.isFinite(Number(currentLon))) return;
 
-    currentStationMarker.setLatLng([Number(currentLat), Number(currentLon)]);
     var label =
       "Currents station " + currentStation +
       " — preview for wind station " + station;
+    if (!currentStationMarker) {
+      currentStationMarker = symbolMarker(
+        Number(currentLat),
+        Number(currentLon),
+        "◆",
+        "current",
+        label,
+        {interactive:false, zIndexOffset:-500}
+      );
+      if (!mapState.currentsOverlayVisible && map.hasLayer(currentStationMarker)) {
+        map.removeLayer(currentStationMarker);
+      }
+    } else {
+      currentStationMarker.setLatLng([Number(currentLat), Number(currentLon)]);
+    }
     if (currentName) label += " — " + currentName;
     if (currentDistance) label += " (" + currentDistance + " from wind station)";
     if (currentStationMarker.getTooltip()) {
@@ -2756,16 +2755,15 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
       L.DomEvent.disableScrollPropagation(container);
 
       var checkbox = container.querySelector("#map-show-currents");
-      if (!currentStationMarker) {
-        checkbox.checked = false;
-        checkbox.disabled = true;
-      }
+      checkbox.checked = !!mapState.currentsOverlayVisible;
       checkbox.addEventListener("change", function() {
-        if (!currentStationMarker) return;
-        if (checkbox.checked) {
-          if (!map.hasLayer(currentStationMarker)) currentStationMarker.addTo(map);
-        } else {
-          if (map.hasLayer(currentStationMarker)) map.removeLayer(currentStationMarker);
+        mapState.currentsOverlayVisible = checkbox.checked;
+        if (currentStationMarker) {
+          if (mapState.currentsOverlayVisible) {
+            if (!map.hasLayer(currentStationMarker)) currentStationMarker.addTo(map);
+          } else {
+            if (map.hasLayer(currentStationMarker)) map.removeLayer(currentStationMarker);
+          }
         }
         updateRecenterControls();
       });
@@ -2783,7 +2781,6 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
   var coord = document.getElementById("map-coordinate");
   var go = document.getElementById("map-go");
   var findPoint = document.getElementById("map-find-point");
-  var searchArea = document.getElementById("map-search-area");
   var reset = document.getElementById("map-reset");
 
   var searchStatus = document.getElementById("map-search-status");
@@ -2793,15 +2790,6 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
       findPoint.hidden = !mapState.selectedLocation;
       findPoint.textContent = "Find stations near this point";
       findPoint.setAttribute(
-        "aria-disabled",
-        mapState.stationSearch.busy ? "true" : "false"
-      );
-    }
-
-    if (searchArea) {
-      searchArea.hidden = false;
-      searchArea.textContent = "Search this area for wind stations";
-      searchArea.setAttribute(
         "aria-disabled",
         mapState.stationSearch.busy ? "true" : "false"
       );
@@ -2902,7 +2890,7 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
   }
 
 
-  function findStationsWithoutReload(searchLat, searchLon, searchMode) {
+  function findStationsWithoutReload() {
     if (mapState.stationSearch.busy) return;
 
     if (!mapState.selectedLocation) {
@@ -2916,10 +2904,8 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 
     setStationSearchState(
       true,
-      searchMode,
-      searchMode === "point"
-        ? "Finding stations near the selected location…"
-        : "Searching this map area for wind stations…"
+      "point",
+      "Finding stations near the selected location…"
     );
 
     var requestURL =
@@ -2927,8 +2913,6 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
         encodeURIComponent(Number(mapState.selectedLocation.lat).toFixed(5)) +
       "&lon=" +
         encodeURIComponent(Number(mapState.selectedLocation.lon).toFixed(5)) +
-      "&search_lat=" + encodeURIComponent(Number(searchLat).toFixed(5)) +
-      "&search_lon=" + encodeURIComponent(Number(searchLon).toFixed(5)) +
       "&selected_station=" +
         encodeURIComponent(normalizeWindStationID(mapState.selectedWindStationID));
 
@@ -3079,16 +3063,7 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 
   wireSearchControl(findPoint, function() {
     if (!mapState.selectedLocation) return;
-    findStationsWithoutReload(
-      mapState.selectedLocation.lat,
-      mapState.selectedLocation.lon,
-      "point"
-    );
-  });
-
-  wireSearchControl(searchArea, function() {
-    var center = map.getCenter();
-    findStationsWithoutReload(center.lat, center.lng, "area");
+    findStationsWithoutReload();
   });
 
   map.on("click", function(e) {
