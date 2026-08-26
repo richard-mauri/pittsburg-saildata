@@ -598,6 +598,144 @@ func runServer(
 		}
 	})
 
+	mux.HandleFunc("/wind-stations", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		q := r.URL.Query()
+
+		// lat/lon remain the selected sailing location used for reported
+		// distances and station links.
+		selectedLat, selectedLon, hasSelected, err := parseOptionalLatLon(q)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if !hasSelected {
+			http.Error(w, "lat and lon are required", http.StatusBadRequest)
+			return
+		}
+
+		// selected_station is the committed wind source. Find Stations must
+		// never return it as a candidate marker.
+		selectedStation := strings.ToUpper(strings.Trim(
+			strings.TrimSpace(q.Get("selected_station")),
+			`"'`,
+		))
+
+		// search_lat/search_lon optionally define the area to search without
+		// changing the selected sailing location.
+		searchLat := selectedLat
+		searchLon := selectedLon
+		if rawLat := strings.TrimSpace(q.Get("search_lat")); rawLat != "" {
+			var v float64
+			if _, err := fmt.Sscanf(rawLat, "%f", &v); err != nil {
+				http.Error(w, "invalid search_lat", http.StatusBadRequest)
+				return
+			}
+			searchLat = v
+		}
+		if rawLon := strings.TrimSpace(q.Get("search_lon")); rawLon != "" {
+			var v float64
+			if _, err := fmt.Sscanf(rawLon, "%f", &v); err != nil {
+				http.Error(w, "invalid search_lon", http.StatusBadRequest)
+				return
+			}
+			searchLon = v
+		}
+
+		stations, err := getActiveNDBCStations()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+
+		type nearby struct {
+			Station          NDBCStation
+			SearchDistance   float64
+			SelectedDistance float64
+		}
+		candidates := make([]nearby, 0, len(stations))
+		for _, station := range stations {
+			searchDistance := distanceNM(searchLat, searchLon, station.Lat, station.Lon)
+			if searchDistance > windStationMaxDistanceNM {
+				continue
+			}
+			candidates = append(candidates, nearby{
+				Station:          station,
+				SearchDistance:   searchDistance,
+				SelectedDistance: distanceNM(selectedLat, selectedLon, station.Lat, station.Lon),
+			})
+		}
+
+		sort.Slice(candidates, func(i, j int) bool {
+			return candidates[i].SearchDistance < candidates[j].SearchDistance
+		})
+		if len(candidates) > windStationMaxCandidates {
+			candidates = candidates[:windStationMaxCandidates]
+		}
+
+		type stationMapCandidate struct {
+			Station         string  `json:"station"`
+			Name            string  `json:"name"`
+			Distance        string  `json:"distance"`
+			Lat             float64 `json:"lat"`
+			Lon             float64 `json:"lon"`
+			URL             string  `json:"url"`
+			CurrentStation  string  `json:"current_station,omitempty"`
+			CurrentName     string  `json:"current_name,omitempty"`
+			CurrentDistance string  `json:"current_distance,omitempty"`
+			CurrentLat      float64 `json:"current_lat,omitempty"`
+			CurrentLon      float64 `json:"current_lon,omitempty"`
+		}
+		items := make([]stationMapCandidate, 0, len(candidates))
+		for _, c := range candidates {
+			candidateID := strings.ToUpper(strings.Trim(
+				strings.TrimSpace(c.Station.ID),
+				`"'`,
+			))
+			if selectedStation != "" && candidateID == selectedStation {
+				continue
+			}
+
+			linkQ := cloneQuery(q)
+			linkQ.Set("format", "html")
+			linkQ.Set("lat", fmt.Sprintf("%.5f", selectedLat))
+			linkQ.Set("lon", fmt.Sprintf("%.5f", selectedLon))
+			linkQ.Set("station", strings.ToUpper(c.Station.ID))
+			linkQ.Del("search_lat")
+			linkQ.Del("search_lon")
+			linkQ.Del("selected_station")
+			linkQ.Del("current_station")
+			linkQ.Del("bin")
+			item := stationMapCandidate{
+				Station:  strings.ToUpper(c.Station.ID),
+				Name:     c.Station.Name,
+				Distance: fmt.Sprintf("%.1f nmi", c.SelectedDistance),
+				Lat:      c.Station.Lat,
+				Lon:      c.Station.Lon,
+				URL:      "/report?" + linkQ.Encode(),
+			}
+			if currentPreview, err := previewCurrentStationForPoint(c.Station.Lat, c.Station.Lon); err == nil && currentPreview != nil {
+				item.CurrentStation = currentPreview.ID
+				item.CurrentName = currentPreview.Name
+				item.CurrentDistance = fmt.Sprintf("%.1f nmi", currentPreview.DistanceNM)
+				item.CurrentLat = currentPreview.Lat
+				item.CurrentLon = currentPreview.Lon
+			}
+			items = append(items, item)
+		}
+
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{
+			"candidates": items,
+		}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+
 	mux.HandleFunc("/report", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -758,21 +896,52 @@ func runServer(
 	}
 }
 
+func previewCurrentStationForPoint(lat, lon float64) (*CurrentStation, error) {
+	stations, err := getCurrentPredictionStations()
+	if err != nil {
+		return nil, err
+	}
+	if len(stations) == 0 {
+		return nil, fmt.Errorf("NOAA metadata returned no current prediction stations")
+	}
+
+	var best *CurrentStation
+	for i := range stations {
+		c := stations[i]
+		c.DistanceNM = distanceNM(lat, lon, c.Lat, c.Lon)
+		c.SelectionScore = currentStationSelectionScore(c)
+
+		if best == nil ||
+			c.SelectionScore < best.SelectionScore ||
+			(c.SelectionScore == best.SelectionScore && c.DistanceNM < best.DistanceNM) {
+			copy := c
+			best = &copy
+		}
+	}
+	return best, nil
+}
+
 type htmlWindCandidate struct {
-	Rank       int
-	Station    string
-	Name       string
-	Distance   string
-	Lat        float64
-	Lon        float64
-	Met        string
-	Status     string
-	Reason     string
-	Class      string
-	URL        string
-	JSURL      template.JS
-	IsAuto     bool
-	IsSelected bool
+	Rank            int
+	Station         string
+	Name            string
+	Distance        string
+	Lat             float64
+	Lon             float64
+	Met             string
+	Status          string
+	Reason          string
+	Class           string
+	URL             string
+	JSURL           template.JS
+	IsAuto          bool
+	IsSelected      bool
+	CurrentStation  string
+	CurrentName     string
+	CurrentDistance string
+	CurrentLat      float64
+	CurrentLon      float64
+	HasCurrent      bool
 }
 
 type htmlCurrentEvent struct{ Time, Label, Speed, Direction, Class string }
@@ -1030,25 +1199,31 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 				linkQuery.Del("debug_wind")
 			}
 
-			d.WindCandidates = append(
-				d.WindCandidates,
-				htmlWindCandidate{
-					Rank:       i + 1,
-					Station:    strings.ToUpper(candidate.StationID),
-					Name:       candidate.StationName,
-					Distance:   fmt.Sprintf("%.1f nmi", candidate.DistanceNM),
-					Lat:        candidate.Lat,
-					Lon:        candidate.Lon,
-					Met:        candidate.Met,
-					Status:     strings.ToUpper(candidate.WindStatus),
-					Reason:     reason,
-					Class:      className,
-					URL:        "/report?" + linkQuery.Encode(),
-					JSURL:      template.JS(fmt.Sprintf("%q", "/report?"+linkQuery.Encode())),
-					IsAuto:     isAuto,
-					IsSelected: isSelected,
-				},
-			)
+			item := htmlWindCandidate{
+				Rank:       i + 1,
+				Station:    strings.ToUpper(candidate.StationID),
+				Name:       candidate.StationName,
+				Distance:   fmt.Sprintf("%.1f nmi", candidate.DistanceNM),
+				Lat:        candidate.Lat,
+				Lon:        candidate.Lon,
+				Met:        candidate.Met,
+				Status:     strings.ToUpper(candidate.WindStatus),
+				Reason:     reason,
+				Class:      className,
+				URL:        "/report?" + linkQuery.Encode(),
+				JSURL:      template.JS(fmt.Sprintf("%q", "/report?"+linkQuery.Encode())),
+				IsAuto:     isAuto,
+				IsSelected: isSelected,
+			}
+			if currentPreview, err := previewCurrentStationForPoint(candidate.Lat, candidate.Lon); err == nil && currentPreview != nil {
+				item.HasCurrent = true
+				item.CurrentStation = currentPreview.ID
+				item.CurrentName = currentPreview.Name
+				item.CurrentDistance = fmt.Sprintf("%.1f nmi", currentPreview.DistanceNM)
+				item.CurrentLat = currentPreview.Lat
+				item.CurrentLon = currentPreview.Lon
+			}
+			d.WindCandidates = append(d.WindCandidates, item)
 		}
 	}
 
@@ -1908,8 +2083,26 @@ a.station{color:var(--blue);font-weight:800;text-decoration:none}.badge{display:
 (function(){
   var el=document.getElementById("station-map");
   if(!el||typeof L==="undefined") return;
-  var map=L.map(el,{scrollWheelZoom:true}).setView([{{printf "%.6f" .MapCenterLat}},{{printf "%.6f" .MapCenterLon}}],9);
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:18,attribution:"&copy; OpenStreetMap contributors"}).addTo(map);
+  var initialZoom=Number(new URL(window.location.href).searchParams.get("map_zoom"));
+  if(!Number.isFinite(initialZoom)||initialZoom<3||initialZoom>18)initialZoom=10;
+  var map=L.map(el,{scrollWheelZoom:true}).setView([{{printf "%.6f" .MapCenterLat}},{{printf "%.6f" .MapCenterLon}}],initialZoom);
+  var streetLayer=L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:18,attribution:"&copy; OpenStreetMap contributors"});
+  var nauticalLayer=L.tileLayer.wms("https://gis.charttools.noaa.gov/arcgis/rest/services/MCS/NOAAChartDisplay/MapServer/exts/MaritimeChartService/WMSServer",{
+    layers:"0,1,2,3,4,5,6,7,8,9,10,11,12",
+    format:"image/png",
+    transparent:false,
+    version:"1.3.0",
+    attribution:"NOAA Office of Coast Survey"
+  });
+  var mapLayerParam=new URL(window.location.href).searchParams.get("map_layer");
+  (mapLayerParam==="nautical"?nauticalLayer:streetLayer).addTo(map);
+  L.control.layers({"Map":streetLayer,"Nautical Chart":nauticalLayer},null,{collapsed:true,position:"topright"}).addTo(map);
+  map.on("baselayerchange",function(e){
+    var target=new URL(window.location.href);
+    if(e.layer===nauticalLayer)target.searchParams.set("map_layer","nautical");
+    else target.searchParams.delete("map_layer");
+    window.history.replaceState({},"",target.pathname+"?"+target.searchParams.toString()+target.hash);
+  });
   var pts=[];
   function add(lat,lon,label,fill,radius,url){
     var m=L.circleMarker([lat,lon],{radius:radius,color:"#fff",weight:2,fillColor:fill,fillOpacity:1}).addTo(map);
@@ -1921,7 +2114,7 @@ a.station{color:var(--blue);font-weight:800;text-decoration:none}.badge{display:
   }
   {{if .MapHasRequest}}add({{printf "%.6f" .MapRequestLat}},{{printf "%.6f" .MapRequestLon}},"Selected location","#126b91",9,"");{{end}}
   {{range .WindCandidates}}add({{printf "%.6f" .Lat}},{{printf "%.6f" .Lon}},{{printf "%q" .Station}}+" — "+{{printf "%q" .Name}}+"<br>"+{{printf "%q" .Distance}}+" from selected location",{{if .IsSelected}}"#16805f"{{else if .IsAuto}}"#24538a"{{else}}"#718794"{{end}},{{if .IsSelected}}9{{else if .IsAuto}}8{{else}}7{{end}},{{.JSURL}});{{end}}
-  if(pts.length>1)map.fitBounds(pts,{padding:[35,35],maxZoom:10});
+  {{if .MapHasRequest}}map.setView([{{printf "%.6f" .MapRequestLat}},{{printf "%.6f" .MapRequestLon}}],initialZoom);{{else if .WindCandidates}}if(pts.length>1)map.fitBounds(pts,{padding:[35,35],maxZoom:10});{{end}}
 })();
 </script></body></html>`))
 
@@ -1948,10 +2141,133 @@ var sailingHTMLTemplate = template.Must(template.New("sailing").Parse(`<!doctype
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <style>:root{--navy:#082b45;--blue:#126b91;--sea:#0b8793;--ink:#153242;--muted:#607886;--paper:#f5fafc;--card:#fff;--line:#d8e7ed;--flood:#087f8c;--ebb:#365f91;--slack:#756d64;--shadow:0 12px 34px rgba(8,43,69,.10)}*{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#dff3f8,#f7fbfc 32rem);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Avenir Next",Avenir,Helvetica,Arial,sans-serif;line-height:1.45}.shell{max-width:880px;margin:auto;padding:28px 18px 64px}.hero{color:#fff;padding:34px 30px 30px;border-radius:24px;min-height:360px;display:flex;flex-direction:column;justify-content:flex-end;background:
 linear-gradient(180deg,rgba(4,24,38,.06) 12%,rgba(4,24,38,.24) 48%,rgba(4,24,38,.86) 100%),
-url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text-shadow:0 2px 12px rgba(0,0,0,.45)}.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-weight:800;font-size:.76rem;opacity:.8}.photo-tag{margin-top:14px;font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;opacity:.72}h1{font-size:clamp(1.8rem,6vw,3.2rem);line-height:1.05;margin:.4rem 0 .6rem;letter-spacing:-.035em}.sub{opacity:.82}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}.full{grid-column:1/-1}h2{font-size:.82rem;letter-spacing:.13em;text-transform:uppercase;color:var(--blue);margin:0 0 16px}.bottom{font-size:1.13rem}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.metric{background:var(--paper);border-radius:15px;padding:14px}.label{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700}.value{font-size:1.55rem;font-weight:800;color:var(--navy)}.meta{color:var(--muted);font-size:.88rem;margin-top:12px}.station{font-weight:800;font-size:1.1rem;color:var(--navy)}.wind-distance-warning{margin-top:10px;padding:10px 12px;border:1px solid #e7c978;border-radius:12px;background:#fff8df;color:#654d08;font-size:.9rem}.wind-distance-warning strong{color:#4e3a00}.wind-summary{white-space:pre-line;margin-top:14px;padding:13px 14px;background:#eef7fa;border-left:4px solid var(--sea);border-radius:10px;color:var(--ink);font-size:.92rem}.event{display:grid;grid-template-columns:88px 12px 1fr;gap:12px;align-items:center;min-height:58px}.time{font-weight:800;color:var(--navy)}.dot{width:12px;height:12px;border-radius:50%;background:var(--slack);box-shadow:0 0 0 5px #edf3f5}.flood .dot{background:var(--flood)}.ebb .dot{background:var(--ebb)}.eventbody{border-left:2px solid var(--line);padding:8px 0 8px 18px}.eventlabel{font-weight:800}.eventdata{color:var(--muted);font-size:.9rem}.badge{display:inline-block;border-radius:999px;padding:5px 10px;background:#e9f6fb;color:var(--blue);font-size:.75rem;font-weight:800;margin-top:12px}.footer{text-align:center;color:var(--muted);font-size:.78rem;margin-top:22px}.full-report{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:.88rem;line-height:1.55;background:#071f31;color:#e7f4f8;border-radius:14px;padding:18px;overflow-x:auto}.card-action-row{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}#current-summary-card,.wind-card{min-width:0}.timeline-scope-note{margin:.15rem 0 1rem;color:var(--muted);font-size:.88rem}.details-link-card{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap}.details-link-card h2{margin-bottom:.2rem}.details-link{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;white-space:nowrap}.details-note{color:var(--muted);font-size:.88rem;margin:-4px 0 14px}.current-chart-header{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap}.current-chart-header h2{margin-bottom:.15rem}.current-date-label{color:var(--muted);font-weight:750;font-size:.9rem}.current-range-toolbar{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin:8px 0 10px;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:var(--paper)}.current-range-toolbar .current-date-nav{display:inline-flex;align-items:center;min-height:44px;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:8px 12px;background:#fff;color:var(--blue);font-size:.86rem;font-weight:850}.current-range-toolbar .current-date-nav.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-control-label{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:.75rem;font-weight:850}.current-control-label .current-date-picker{min-height:44px;font-size:1rem}@media(max-width:640px){.current-range-toolbar{align-items:stretch}.current-control-label{flex:1 1 140px}.current-range-toolbar .current-date-nav{justify-content:center;flex:1 1 135px}}.current-date-controls{display:flex;gap:7px;flex-wrap:wrap;align-items:center}.current-date-picker{border:1px solid var(--line);border-radius:999px;padding:6px 10px;background:#fff;color:var(--navy);font:inherit;font-size:.82rem;font-weight:750;min-height:34px}.current-date-picker:focus{outline:2px solid var(--blue);outline-offset:2px}.current-refreshing{opacity:.55;transition:opacity .15s ease}.current-date-controls a{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:7px 11px;background:#fff;color:var(--blue);font-size:.82rem;font-weight:850}.current-date-controls a:hover{background:var(--paper)}.current-date-controls a.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-planning{margin:16px 0 12px;padding:14px 16px;border:1px solid var(--line);border-radius:16px;background:#fff}.current-planning-head{display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:10px}.current-planning-head strong{color:var(--navy);font-size:1rem}.current-planning-head span{color:var(--muted);font-size:.82rem}.planning-preferences{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin:8px 0 12px}.planning-preferences label{display:flex;gap:5px;align-items:center;color:var(--muted);font-size:.78rem;font-weight:850}.planning-preferences input{min-height:40px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--navy);font:inherit;font-size:1rem;padding:6px 8px}.planning-preferences input[type="number"]{width:76px}.planning-preferences b{color:var(--muted);font-size:.82rem}@media(max-width:640px){.planning-preferences label{flex:1 1 130px;justify-content:space-between}.planning-preferences input[type="time"]{min-width:110px}}.planning-help{margin:2px 0 12px;padding:10px 12px;border-radius:10px;background:#f7f9fa;color:var(--ink);font-size:.82rem;line-height:1.45}.planning-help strong{color:var(--navy)}.current-planning-days{display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:8px}.planning-day{border:1px solid var(--line);border-radius:12px;padding:10px;min-width:0}.planning-day.preferred{background:#eef8f3}.planning-day.caution{background:#fff8df;border-color:#e7c978}.planning-day.redflag{background:#fff0ed;border-color:#dfa297}.planning-date{font-size:.78rem;font-weight:850;color:var(--navy)}.planning-status{font-size:.92rem;font-weight:900;margin-top:2px}.preferred .planning-status{color:#176246}.caution .planning-status{color:#775900}.redflag .planning-status{color:#9a3328}.planning-detail{font-size:.78rem;line-height:1.35;color:var(--ink);margin-top:5px}.planning-disclaimer{color:var(--muted);font-size:.75rem;margin-top:9px}@media(max-width:640px){.current-planning-days{grid-template-columns:1fr 1fr}.planning-detail{font-size:.8rem}}.current-event-browser{margin:12px 0 4px;padding:14px 16px;background:var(--paper);border:1px solid var(--line);border-radius:16px}.current-event-readout{text-align:center;min-height:64px}.current-event-time{font-size:clamp(1.15rem,3vw,1.55rem);font-weight:900;color:var(--navy);font-variant-numeric:tabular-nums}.current-event-label{font-size:1rem;font-weight:750;color:var(--muted);margin-top:2px}.current-event-controls{display:grid;grid-template-columns:auto minmax(120px,1fr) auto;gap:10px;align-items:center;margin-top:10px}.current-event-slider{width:100%;min-height:44px;accent-color:var(--blue)}.current-event-button{min-height:44px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--blue);font-weight:850;padding:8px 12px;cursor:pointer}.event-point.is-selected{stroke:#c63a2b;stroke-width:3;r:6}.event-cursor-line{stroke:#c63a2b;stroke-width:2;stroke-dasharray:5 4;pointer-events:none}@media(max-width:640px){.current-event-controls{grid-template-columns:1fr 1fr}.current-event-slider{grid-column:1/-1;grid-row:1}.current-event-button{font-size:.82rem}}.current-chart-wrap .event-point,.current-chart-wrap .event-point:hover{cursor:default!important;pointer-events:none}.current-chart-wrap{margin-top:16px}.current-chart-svg{display:block;width:100%;height:auto;background:#f8fbfc;border:1px solid var(--line);border-radius:16px}.grid-line{stroke:#d9e4e8;stroke-width:1}.v-grid-line{stroke:#e6eef1;stroke-width:1}.day-grid-line{stroke:#b7cbd4;stroke-width:1.4}.zero-line{stroke:#17384a;stroke-width:2}.axis-label{fill:#657d89;font-size:11px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.y-label{text-anchor:end}.x-label{text-anchor:middle}.axis-title{fill:#657d89;font-size:11px;text-anchor:middle}.night-window{fill:#aebdc4;opacity:.78}.sail-window{fill:#f8fbfc;opacity:.96}.preferred-window{fill:#f0d46d;opacity:.34}.flood-area{fill:#6d8fd0;opacity:.86}.ebb-area{fill:#0b9d83;opacity:.90}.current-line{fill:none;stroke:#214b62;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}.event-point{stroke:#fff;stroke-width:1.5}.event-point.flood{fill:#5478bd}.event-point.ebb{fill:#078a75}.event-point.slack{fill:#756d64}.event-time{fill:#17384a;font-size:9px;font-weight:800;text-anchor:middle;paint-order:stroke;stroke:#fff;stroke-width:2.5px;stroke-linejoin:round}.event-time.flood{fill:#294f91}.event-time.ebb{fill:#066c5d}.event-time.slack{fill:#514b46}.now-line{stroke:#c63a2b;stroke-width:2.5}.now-label{fill:#c63a2b;font-size:11px;font-weight:800}.chart-explainer{color:var(--ink);font-size:.94rem;line-height:1.45;margin:2px 0 12px}.chart-note{color:var(--muted);font-size:.82rem;margin-top:9px}.candidate-table{width:100%;border-collapse:collapse;font-size:.86rem}.candidate-table th,.candidate-table td{padding:10px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}.candidate-table th{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}.candidate-table td.num,.candidate-table th.num{text-align:right;white-space:nowrap}.candidate-good td.status{font-weight:800}.candidate-bad{opacity:.82}.candidate-selected{background:rgba(20,120,100,.08)}.candidate-selected td:first-child{font-weight:800}.candidate-note{color:var(--muted);font-size:.82rem;margin:0 0 12px}.candidate-scroll{overflow-x:auto}.candidate-link{color:var(--blue);text-decoration:none;font-weight:800}.candidate-link:hover{text-decoration:underline}.candidate-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:0 0 12px}.nearest-link{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:7px 12px;color:var(--blue);font-weight:800;text-decoration:none;background:#fff}.nearest-link:hover{background:var(--paper)}.map-card{overflow:hidden}.map-intro{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px}.map-help{color:var(--muted);font-size:.9rem;max-width:600px}.map-wrap{border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#dfecef}.location-map{height:390px;width:100%}.map-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px}.map-coordinate{font-variant-numeric:tabular-nums;color:var(--muted);font-size:.9rem}.map-go{display:inline-block;border:0;border-radius:999px;padding:10px 16px;background:var(--blue);color:#fff;font-weight:850;text-decoration:none;cursor:pointer}.map-go[aria-disabled="true"]{opacity:.45;pointer-events:none}.map-search-area{border:0;cursor:pointer}.map-search-area[hidden]{display:none}.map-reset{border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:800;cursor:pointer}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#db7b20}.map-dot.current{background:#7d55a6}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}.error-card{border-left:5px solid #b64735;background:#fff7f4}.error-card h2{color:#8f3025}.error-message{font-weight:650;line-height:1.5}.error-help{color:var(--muted);font-size:.9rem}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}</style></head><body><main class="shell">
+url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text-shadow:0 2px 12px rgba(0,0,0,.45)}.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-weight:800;font-size:.76rem;opacity:.8}.photo-tag{margin-top:14px;font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;opacity:.72}h1{font-size:clamp(1.8rem,6vw,3.2rem);line-height:1.05;margin:.4rem 0 .6rem;letter-spacing:-.035em}.sub{opacity:.82}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}.full{grid-column:1/-1}h2{font-size:.82rem;letter-spacing:.13em;text-transform:uppercase;color:var(--blue);margin:0 0 16px}.bottom{font-size:1.13rem}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.metric{background:var(--paper);border-radius:15px;padding:14px}.label{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700}.value{font-size:1.55rem;font-weight:800;color:var(--navy)}.meta{color:var(--muted);font-size:.88rem;margin-top:12px}.station{font-weight:800;font-size:1.1rem;color:var(--navy)}.wind-distance-warning{margin-top:10px;padding:10px 12px;border:1px solid #e7c978;border-radius:12px;background:#fff8df;color:#654d08;font-size:.9rem}.wind-distance-warning strong{color:#4e3a00}.wind-summary{white-space:pre-line;margin-top:14px;padding:13px 14px;background:#eef7fa;border-left:4px solid var(--sea);border-radius:10px;color:var(--ink);font-size:.92rem}.event{display:grid;grid-template-columns:88px 12px 1fr;gap:12px;align-items:center;min-height:58px}.time{font-weight:800;color:var(--navy)}.dot{width:12px;height:12px;border-radius:50%;background:var(--slack);box-shadow:0 0 0 5px #edf3f5}.flood .dot{background:var(--flood)}.ebb .dot{background:var(--ebb)}.eventbody{border-left:2px solid var(--line);padding:8px 0 8px 18px}.eventlabel{font-weight:800}.eventdata{color:var(--muted);font-size:.9rem}.badge{display:inline-block;border-radius:999px;padding:5px 10px;background:#e9f6fb;color:var(--blue);font-size:.75rem;font-weight:800;margin-top:12px}.footer{text-align:center;color:var(--muted);font-size:.78rem;margin-top:22px}.full-report{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:.88rem;line-height:1.55;background:#071f31;color:#e7f4f8;border-radius:14px;padding:18px;overflow-x:auto}.card-action-row{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}#current-summary-card,.wind-card{min-width:0}.timeline-scope-note{margin:.15rem 0 1rem;color:var(--muted);font-size:.88rem}.details-link-card{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap}.details-link-card h2{margin-bottom:.2rem}.details-link{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;white-space:nowrap}.details-note{color:var(--muted);font-size:.88rem;margin:-4px 0 14px}.current-chart-header{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap}.current-chart-header h2{margin-bottom:.15rem}.current-date-label{color:var(--muted);font-weight:750;font-size:.9rem}.current-range-toolbar{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin:8px 0 10px;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:var(--paper)}.current-range-toolbar .current-date-nav{display:inline-flex;align-items:center;min-height:44px;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:8px 12px;background:#fff;color:var(--blue);font-size:.86rem;font-weight:850}.current-range-toolbar .current-date-nav.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-control-label{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:.75rem;font-weight:850}.current-control-label .current-date-picker{min-height:44px;font-size:1rem}@media(max-width:640px){.current-range-toolbar{align-items:stretch}.current-control-label{flex:1 1 140px}.current-range-toolbar .current-date-nav{justify-content:center;flex:1 1 135px}}.current-date-controls{display:flex;gap:7px;flex-wrap:wrap;align-items:center}.current-date-picker{border:1px solid var(--line);border-radius:999px;padding:6px 10px;background:#fff;color:var(--navy);font:inherit;font-size:.82rem;font-weight:750;min-height:34px}.current-date-picker:focus{outline:2px solid var(--blue);outline-offset:2px}.current-refreshing{opacity:.55;transition:opacity .15s ease}.current-date-controls a{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:7px 11px;background:#fff;color:var(--blue);font-size:.82rem;font-weight:850}.current-date-controls a:hover{background:var(--paper)}.current-date-controls a.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-planning{margin:16px 0 12px;padding:14px 16px;border:1px solid var(--line);border-radius:16px;background:#fff}.current-planning-head{display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:10px}.current-planning-head strong{color:var(--navy);font-size:1rem}.current-planning-head span{color:var(--muted);font-size:.82rem}.planning-preferences{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin:8px 0 12px}.planning-preferences label{display:flex;gap:5px;align-items:center;color:var(--muted);font-size:.78rem;font-weight:850}.planning-preferences input{min-height:40px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--navy);font:inherit;font-size:1rem;padding:6px 8px}.planning-preferences input[type="number"]{width:76px}.planning-preferences b{color:var(--muted);font-size:.82rem}@media(max-width:640px){.planning-preferences label{flex:1 1 130px;justify-content:space-between}.planning-preferences input[type="time"]{min-width:110px}}.planning-help{margin:2px 0 12px;padding:10px 12px;border-radius:10px;background:#f7f9fa;color:var(--ink);font-size:.82rem;line-height:1.45}.planning-help strong{color:var(--navy)}.current-planning-days{display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:8px}.planning-day{border:1px solid var(--line);border-radius:12px;padding:10px;min-width:0}.planning-day.preferred{background:#eef8f3}.planning-day.caution{background:#fff8df;border-color:#e7c978}.planning-day.redflag{background:#fff0ed;border-color:#dfa297}.planning-date{font-size:.78rem;font-weight:850;color:var(--navy)}.planning-status{font-size:.92rem;font-weight:900;margin-top:2px}.preferred .planning-status{color:#176246}.caution .planning-status{color:#775900}.redflag .planning-status{color:#9a3328}.planning-detail{font-size:.78rem;line-height:1.35;color:var(--ink);margin-top:5px}.planning-disclaimer{color:var(--muted);font-size:.75rem;margin-top:9px}@media(max-width:640px){.current-planning-days{grid-template-columns:1fr 1fr}.planning-detail{font-size:.8rem}}.current-event-browser{margin:12px 0 4px;padding:14px 16px;background:var(--paper);border:1px solid var(--line);border-radius:16px}.current-event-readout{text-align:center;min-height:64px}.current-event-time{font-size:clamp(1.15rem,3vw,1.55rem);font-weight:900;color:var(--navy);font-variant-numeric:tabular-nums}.current-event-label{font-size:1rem;font-weight:750;color:var(--muted);margin-top:2px}.current-event-controls{display:grid;grid-template-columns:auto minmax(120px,1fr) auto;gap:10px;align-items:center;margin-top:10px}.current-event-slider{width:100%;min-height:44px;accent-color:var(--blue)}.current-event-button{min-height:44px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--blue);font-weight:850;padding:8px 12px;cursor:pointer}.event-point.is-selected{stroke:#c63a2b;stroke-width:3;r:6}.event-cursor-line{stroke:#c63a2b;stroke-width:2;stroke-dasharray:5 4;pointer-events:none}@media(max-width:640px){.current-event-controls{grid-template-columns:1fr 1fr}.current-event-slider{grid-column:1/-1;grid-row:1}.current-event-button{font-size:.82rem}}.current-chart-wrap .event-point,.current-chart-wrap .event-point:hover{cursor:default!important;pointer-events:none}.current-chart-wrap{margin-top:16px}.current-chart-svg{display:block;width:100%;height:auto;background:#f8fbfc;border:1px solid var(--line);border-radius:16px}.grid-line{stroke:#d9e4e8;stroke-width:1}.v-grid-line{stroke:#e6eef1;stroke-width:1}.day-grid-line{stroke:#b7cbd4;stroke-width:1.4}.zero-line{stroke:#17384a;stroke-width:2}.axis-label{fill:#657d89;font-size:11px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.y-label{text-anchor:end}.x-label{text-anchor:middle}.axis-title{fill:#657d89;font-size:11px;text-anchor:middle}.night-window{fill:#aebdc4;opacity:.78}.sail-window{fill:#f8fbfc;opacity:.96}.preferred-window{fill:#f0d46d;opacity:.34}.flood-area{fill:#6d8fd0;opacity:.86}.ebb-area{fill:#0b9d83;opacity:.90}.current-line{fill:none;stroke:#214b62;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}.event-point{stroke:#fff;stroke-width:1.5}.event-point.flood{fill:#5478bd}.event-point.ebb{fill:#078a75}.event-point.slack{fill:#756d64}.event-time{fill:#17384a;font-size:9px;font-weight:800;text-anchor:middle;paint-order:stroke;stroke:#fff;stroke-width:2.5px;stroke-linejoin:round}.event-time.flood{fill:#294f91}.event-time.ebb{fill:#066c5d}.event-time.slack{fill:#514b46}.now-line{stroke:#c63a2b;stroke-width:2.5}.now-label{fill:#c63a2b;font-size:11px;font-weight:800}.chart-explainer{color:var(--ink);font-size:.94rem;line-height:1.45;margin:2px 0 12px}.chart-note{color:var(--muted);font-size:.82rem;margin-top:9px}.candidate-table{width:100%;border-collapse:collapse;font-size:.86rem}.candidate-table th,.candidate-table td{padding:10px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}.candidate-table th{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}.candidate-table td.num,.candidate-table th.num{text-align:right;white-space:nowrap}.candidate-good td.status{font-weight:800}.candidate-bad{opacity:.82}.candidate-selected{background:rgba(20,120,100,.08)}.candidate-selected td:first-child{font-weight:800}.candidate-note{color:var(--muted);font-size:.82rem;margin:0 0 12px}.candidate-scroll{overflow-x:auto}.candidate-link{color:var(--blue);text-decoration:none;font-weight:800}.candidate-link:hover{text-decoration:underline}.candidate-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:0 0 12px}.nearest-link{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:7px 12px;color:var(--blue);font-weight:800;text-decoration:none;background:#fff}.nearest-link:hover{background:var(--paper)}.map-card{overflow:hidden}.map-intro{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px}.map-help{color:var(--muted);font-size:.9rem;max-width:600px}.map-wrap{border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#dfecef}.location-map{height:390px;width:100%}.map-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px}.map-coordinate{font-variant-numeric:tabular-nums;color:var(--muted);font-size:.9rem}.map-go{display:inline-block;border:0;border-radius:999px;padding:10px 16px;background:var(--blue);color:#fff;font-weight:850;text-decoration:none;cursor:pointer}.map-go[aria-disabled="true"]{opacity:.45;pointer-events:none}.map-search-area{border:0;cursor:pointer}.map-search-area[aria-disabled="true"]{opacity:.55;pointer-events:none}.map-search-area[hidden]{display:none}.map-search-status{color:var(--muted);font-size:.82rem}.map-reset{border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:800;cursor:pointer}.map-layer-note{margin-top:8px;color:var(--muted);font-size:.8rem;line-height:1.4}.map-symbol{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;margin-right:4px;font-size:27px;font-weight:950;line-height:1;vertical-align:-6px;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff,0 2px 3px rgba(0,0,0,.35)}
+.map-symbol.request{color:#126b91}.map-symbol.wind{color:#2f855a}.map-symbol.current{color:#7d55a6}.map-symbol.wind-candidate{color:#4f6978}
+.map-leaflet-symbol{background:transparent;border:0}
+.location-map,
+.location-map.leaflet-container,
+.location-map.leaflet-container *{
+  cursor:default;
+}
+.location-map.leaflet-container.leaflet-dragging,
+.location-map.leaflet-container.leaflet-dragging *{cursor:default!important;}
+.location-map .map-wind-candidate,
+.location-map .map-wind-candidate *,
+.location-map a,
+.location-map button,
+.location-map [role="button"]{
+  cursor:pointer!important;
+}
+.location-map .map-leaflet-symbol:not(.map-wind-candidate),
+.location-map .map-leaflet-symbol:not(.map-wind-candidate) *{
+  cursor:default!important;
+}
+
+.map-leaflet-symbol{cursor:default!important}
+.map-leaflet-symbol.map-wind-candidate{cursor:pointer!important;pointer-events:auto!important;width:32px!important;height:32px!important}
+.map-leaflet-symbol .marker-symbol{
+  background:transparent;
+  border-radius:0;
+  box-shadow:none;
+}
+.map-leaflet-symbol .marker-symbol.request{
+  animation:selectedPulse 2.4s ease-in-out infinite;
+}
+@keyframes selectedPulse{
+  0%,100%{transform:scale(1);opacity:1}
+  50%{transform:scale(1.18);opacity:.72}
+}
+@media (prefers-reduced-motion: reduce){
+  .map-leaflet-symbol .marker-symbol.request{animation:none}
+}
+.map-recenter-control{
+  background:#fff;
+  border-radius:8px;
+  box-shadow:0 1px 6px rgba(0,0,0,.28);
+  overflow:hidden;
+}
+.map-recenter-control button{
+  display:block;
+  width:100%;
+  border:0;
+  border-bottom:1px solid #d8e1e6;
+  background:#fff;
+  color:#12394f;
+  padding:7px 9px;
+  font:inherit;
+  font-size:.78rem;
+  font-weight:850;
+  text-align:left;
+  cursor:pointer;
+}
+.map-recenter-control button:last-child{border-bottom:0}
+.map-overlay-control{background:rgba(255,255,255,.96);border:1px solid #9aa8ae;border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,.28);padding:7px 9px;color:#17394b;font-size:.82rem;font-weight:750}
+.map-overlay-control label{display:flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap}
+.map-overlay-control input{margin:0}
+
+@media(max-width:700px){.map-recenter-control button{font-size:.72rem;padding:6px 8px}}
+.map-recenter-control button:hover{background:#eef5f8}
+.map-recenter-control button[hidden]{display:none}
+
+.map-leaflet-symbol .marker-symbol{display:flex;align-items:center;justify-content:center;width:32px;height:32px;font-size:27px;font-weight:950;line-height:1;text-shadow:-2px -2px 0 #fff,0 -2px 0 #fff,2px -2px 0 #fff,-2px 0 0 #fff,2px 0 0 #fff,-2px 2px 0 #fff,0 2px 0 #fff,2px 2px 0 #fff,0 3px 4px rgba(0,0,0,.5)}
+.map-leaflet-symbol .marker-symbol.request{color:#126b91}.map-leaflet-symbol .marker-symbol.wind{color:#2f855a}.map-leaflet-symbol .marker-symbol.current{color:#7d55a6}.map-leaflet-symbol .marker-symbol.wind-candidate{color:#4f6978}
+
+.legend-triangle{
+  position:relative;
+  width:32px;
+  height:32px;
+  display:inline-block;
+}
+.marker-triangle{
+  position:relative;
+  width:26px;
+  height:24px;
+  display:inline-block;
+}
+.marker-triangle:before{top:0}
+.marker-triangle:after{top:5px}
+.legend-triangle:before{
+  top:4px;
+}
+.legend-triangle:after{
+  top:9px;
+}
+.legend-triangle:before,
+.marker-triangle:before{
+  content:"";
+  position:absolute;
+  left:50%;
+  transform:translateX(-50%);
+  width:0;
+  height:0;
+  border-left:13px solid transparent;
+  border-right:13px solid transparent;
+  border-bottom:24px solid #4f6978;
+}
+.legend-triangle:after,
+.marker-triangle:after{
+  content:"";
+  position:absolute;
+  left:50%;
+  transform:translateX(-50%);
+  width:0;
+  height:0;
+  border-left:9px solid transparent;
+  border-right:9px solid transparent;
+  border-bottom:17px solid #fff;
+}
+.map-wind-info{position:absolute;left:50%;bottom:12px;transform:translateX(-50%);z-index:760;width:min(520px,calc(100% - 28px));box-sizing:border-box;background:rgba(255,255,255,.97);border:1px solid #9fb1bc;border-radius:9px;box-shadow:0 2px 9px rgba(0,0,0,.28);padding:9px 12px;color:#17394b;font-size:.9rem;line-height:1.35;pointer-events:auto}
+.map-wind-info[hidden]{display:none}
+.map-wind-info strong{font-weight:900}
+.map-wind-info a{display:inline-block;margin-top:5px;color:#126b91;font-weight:900;text-decoration:underline;cursor:pointer}
+.map-wind-info-close{float:right;border:0;background:transparent;color:#607886;font:inherit;font-weight:900;cursor:pointer;padding:0 0 4px 10px}
+
+
+.location-map-wrap{position:relative}
+.map-station-list{margin-top:12px}.map-station-list-title{font-weight:850;color:var(--navy);margin:0 0 8px}.map-station-table-wrap{overflow-x:auto}.map-station-table{width:100%;border-collapse:collapse;font-size:.86rem}.map-station-table th,.map-station-table td{padding:8px 10px;border-top:1px solid var(--line);text-align:left;vertical-align:top}.map-station-table th{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}.map-station-table a{color:var(--blue);font-weight:800;text-decoration:none}.map-station-table a:hover{text-decoration:underline}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#2f855a}.map-dot.current{background:#7d55a6}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}.error-card{border-left:5px solid #b64735;background:#fff7f4}.error-card h2{color:#8f3025}.error-message{font-weight:650;line-height:1.5}.error-help{color:var(--muted);font-size:.9rem}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}</style></head><body><main class="shell">
 <section class="hero"><div class="eyebrow">Mauri’s Wind & Current Conditions</div><h1>{{.Title}}</h1><div class="sub">{{.ReportTime}} · {{.Station}}</div>{{if .Historical}}<span class="badge">Historical · {{.RequestedTime}}</span>{{end}}<div class="photo-tag">Bay sailing</div></section><div class="grid">
 <section id="bottom-line-card" class="card full bottom"><h2>Bottom line</h2>{{range .BottomLine}}<p>{{.}}</p>{{else}}<p>Summary unavailable.</p>{{end}}</section>
-<section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map to choose a location, or pan to another area and use Search this area for wind stations. Candidate stations and distances always refer to the selected location.</div></div></div><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div class="map-controls"><span id="map-coordinate" class="map-coordinate">{{if .MapHasRequest}}Selected: {{printf "%.5f" .MapRequestLat}}, {{printf "%.5f" .MapRequestLon}}{{else}}Click the map to choose a location.{{end}}</span><a id="map-go" class="map-go" href="#" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}">Show Conditions</a><button id="map-search-area" class="map-go map-search-area" type="button" hidden>Search this area for wind stations</button>{{if .MapHasRequest}}<button id="map-reset" class="map-reset" type="button">Clear chosen point</button>{{end}}</div><div class="map-legend">{{if .MapHasRequest}}<span class="map-key"><span class="map-dot request"></span>Selected location</span>{{end}}{{if .WindCandidates}}<span class="map-key"><span class="map-dot wind"></span>Nearby wind stations</span>{{else if .MapHasWind}}<span class="map-key"><span class="map-dot wind"></span>Wind station {{.MapWindStation}}</span>{{end}}{{if .MapHasCurrent}}<span class="map-key"><span class="map-dot current"></span>Current station {{.MapCurrentStation}}</span>{{end}}</div></section>
+<section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map to choose a location. Use Find stations near this point for the selected ★ location. Search this area for wind stations always searches the current map center; panning never changes either action. Click a nearby wind station to pin its details and preview the associated currents station, then use the selection link in the map panel to commit the wind-station choice. Candidate stations and distances always refer to the selected location.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-controls"><span id="map-coordinate" class="map-coordinate">{{if .MapHasRequest}}Selected: {{printf "%.5f" .MapRequestLat}}, {{printf "%.5f" .MapRequestLon}}{{else}}Click the map to choose a location.{{end}}</span><a id="map-go" class="map-go" href="#" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}">Show Conditions</a><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" hidden>Find stations near this point</span><span id="map-search-area" class="map-go map-search-area" role="button" tabindex="0" hidden>Search this area for wind stations</span><span id="map-search-status" class="map-search-status" aria-live="polite"></span>{{if .MapHasRequest}}<button id="map-reset" class="map-reset" type="button">Clear mapState.selectedLocation point</button>{{end}}</div><div class="map-layer-note">Layer control: <strong>Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service. Chart layer is for planning/reference and does not replace official navigation products.</div><div class="map-legend">{{if .MapHasRequest}}<span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span>{{end}}{{if .MapHasWind}}<span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station {{.MapWindStation}}</span>{{end}}{{if .WindCandidates}}<span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span>{{end}}{{if .MapHasCurrent}}<span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Currents station {{.MapCurrentStation}}</span>{{end}}</div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
 {{if .WindError}}<section class="card full error-card"><h2>Wind station selection unavailable</h2><p class="error-message">{{.WindError}}</p><p class="error-help">The page is still available so you can inspect the request and nearby station diagnostics. Try nearby coordinates or an explicit NDBC station ID.</p></section>{{end}}
 <section class="card wind-card"><h2>Wind</h2>
 <div class="metrics">
@@ -1975,17 +2291,197 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
   var el = document.getElementById("sailing-location-map");
   if (!el || typeof L === "undefined") return;
 
-  var centerLat = {{printf "%.6f" .MapCenterLat}};
-  var centerLon = {{printf "%.6f" .MapCenterLon}};
-  var map = L.map(el, {scrollWheelZoom:true}).setView([centerLat, centerLon], 9);
+  var pageURL = new URL(window.location.href);
+  var centerLat = Number(pageURL.searchParams.get("map_center_lat"));
+  var centerLon = Number(pageURL.searchParams.get("map_center_lon"));
+  if (!Number.isFinite(centerLat) || centerLat < -90 || centerLat > 90) centerLat = {{printf "%.6f" .MapCenterLat}};
+  if (!Number.isFinite(centerLon) || centerLon < -180 || centerLon > 180) centerLon = {{printf "%.6f" .MapCenterLon}};
+  var initialZoom = Number(pageURL.searchParams.get("map_zoom"));
+  if (!Number.isFinite(initialZoom) || initialZoom < 3 || initialZoom > 18) initialZoom = 10;
+  var map = L.map(el, {scrollWheelZoom:true}).setView([centerLat, centerLon], initialZoom);
 
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  var streetLayer = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 18,
     attribution: '&copy; OpenStreetMap contributors'
-  }).addTo(map);
+  });
+
+  var nauticalLayer = L.tileLayer.wms(
+    "https://gis.charttools.noaa.gov/arcgis/rest/services/MCS/NOAAChartDisplay/MapServer/exts/MaritimeChartService/WMSServer",
+    {
+      layers: "0,1,2,3,4,5,6,7,8,9,10,11,12",
+      format: "image/png",
+      transparent: false,
+      version: "1.3.0",
+      attribution: "NOAA Office of Coast Survey"
+    }
+  );
+
+  var mapLayerParam = new URL(window.location.href).searchParams.get("map_layer");
+  var activeBaseLayer = mapLayerParam === "nautical" ? nauticalLayer : streetLayer;
+  activeBaseLayer.addTo(map);
+
+  L.control.layers(
+    {
+      "Map": streetLayer,
+      "Nautical Chart": nauticalLayer
+    },
+    null,
+    {
+      collapsed: false,
+      position: "topright"
+    }
+  ).addTo(map);
+
+  var activeMapLayerName =
+    mapLayerParam === "nautical" ? "nautical" : "map";
+
+  map.on("baselayerchange", function(e) {
+    activeMapLayerName = e.layer === nauticalLayer ? "nautical" : "map";
+    updateGo();
+  });
+
+  var RecenterControl = L.Control.extend({
+    options: {position: "topleft"},
+    onAdd: function() {
+      var container = L.DomUtil.create("div", "map-recenter-control leaflet-bar");
+
+      var selectedButton = L.DomUtil.create("button", "", container);
+      selectedButton.type = "button";
+      selectedButton.innerHTML = "★ Selected location";
+      selectedButton.title = "Recenter on selected sailing location";
+
+      var windButton = L.DomUtil.create("button", "", container);
+      windButton.type = "button";
+      windButton.innerHTML = "▲ Selected wind station";
+      windButton.title = "Recenter on selected wind station";
+
+      var currentsButton = L.DomUtil.create("button", "", container);
+      currentsButton.type = "button";
+      currentsButton.innerHTML = "◆ Currents station";
+      currentsButton.title = "Recenter on tidal currents station";
+
+      L.DomEvent.disableClickPropagation(container);
+      L.DomEvent.disableScrollPropagation(container);
+
+      selectedButton.addEventListener("click", function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (selectedMarker) {
+          map.setView(selectedMarker.getLatLng(), Math.max(map.getZoom(), 12));
+        }
+      });
+
+      windButton.addEventListener("click", function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (selectedWindMarker) {
+          map.setView(selectedWindMarker.getLatLng(), Math.max(map.getZoom(), 12));
+        }
+      });
+
+      currentsButton.addEventListener("click", function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (currentStationMarker) {
+          map.setView(currentStationMarker.getLatLng(), Math.max(map.getZoom(), 12));
+        }
+      });
+
+      container._selectedButton = selectedButton;
+      container._windButton = windButton;
+      container._currentsButton = currentsButton;
+      return container;
+    }
+  });
+
+  var recenterControl = new RecenterControl();
+  map.addControl(recenterControl);
+
+  function updateRecenterControls() {
+    if (!recenterControl || !recenterControl.getContainer()) return;
+
+    var container = recenterControl.getContainer();
+    var bounds = map.getBounds();
+
+    if (container._selectedButton) {
+      container._selectedButton.hidden =
+        !selectedMarker || bounds.contains(selectedMarker.getLatLng());
+    }
+
+    if (container._windButton) {
+      container._windButton.hidden =
+        !selectedWindMarker || bounds.contains(selectedWindMarker.getLatLng());
+    }
+
+    if (container._currentsButton) {
+      container._currentsButton.hidden =
+        !currentStationMarker ||
+        !map.hasLayer(currentStationMarker) ||
+        bounds.contains(currentStationMarker.getLatLng());
+    }
+
+    var anyVisible =
+      (container._selectedButton && !container._selectedButton.hidden) ||
+      (container._windButton && !container._windButton.hidden) ||
+      (container._currentsButton && !container._currentsButton.hidden);
+
+    container.style.display = anyVisible ? "" : "none";
+  }
 
   var selectedMarker = null;
+  var selectedWindMarker = null;
+  var currentStationMarker = null;
+  var selectedCurrentLatLng = null;
+  var selectedCurrentLabel = "";
+  var previewingCurrentStation = false;
+  // Authoritative interactive-map state.
+  // Event handlers mutate this object, then render. Leaflet markers and DOM
+  // controls are views of this state, never independent sources of truth.
+  var mapState = {
+    selectedLocation: {{if .MapHasRequest}}{
+      lat: {{printf "%.6f" .MapRequestLat}},
+      lon: {{printf "%.6f" .MapRequestLon}}
+    }{{else}}null{{end}},
+    selectedWindStationID: normalizeWindStationID({{.MapWindStation}}),
+    windCandidates: [],
+    stationSearch: {
+      busy: false,
+      mode: "",
+      message: ""
+    }
+  };
+
   var sourcePoints = [];
+  var candidateLayer = L.layerGroup().addTo(map);
+
+  // Compatibility accessors kept local to this script while the rest of the
+  // map rendering code is migrated to mapState.
+  function chosenLocation() {
+    return mapState.selectedLocation;
+  }
+
+  function symbolMarker(lat, lon, symbol, kind, label, options) {
+    options = options || {};
+    var icon = L.divIcon({
+      className: "map-leaflet-symbol",
+      html: '<span class="marker-symbol ' + kind + '" aria-hidden="true">' + symbol + '</span>',
+      iconSize: [32, 32],
+      iconAnchor: [16, 16]
+    });
+    var marker = L.marker([lat, lon], {
+      icon: icon,
+      keyboard: false,
+      interactive: options.interactive !== false,
+      zIndexOffset: options.zIndexOffset || 0,
+      title: label || ""
+    }).addTo(map);
+    marker.on("add", function() {
+      var markerEl = marker.getElement();
+      if (markerEl) markerEl.style.cursor = "default";
+    });
+    if (label) marker.bindTooltip(label);
+    return marker;
+  }
 
   function circleMarker(lat, lon, color, label) {
     var marker = L.circleMarker([lat, lon], {
@@ -2000,7 +2496,66 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
     return marker;
   }
 
-  function windCandidateMarker(lat, lon, station, name, distance, url, isAuto, isSelected) {
+  function reportURLWithMapView(rawURL) {
+    var target = new URL(rawURL, window.location.href);
+    var center = map.getCenter();
+
+    if (mapState.selectedLocation) {
+      target.searchParams.set("lat", Number(mapState.selectedLocation.lat).toFixed(5));
+      target.searchParams.set("lon", Number(mapState.selectedLocation.lon).toFixed(5));
+    }
+
+    target.searchParams.set("map_center_lat", Number(center.lat).toFixed(5));
+    target.searchParams.set("map_center_lon", Number(center.lng).toFixed(5));
+    target.searchParams.set("map_zoom", String(map.getZoom()));
+
+    if (activeMapLayerName === "nautical") {
+      target.searchParams.set("map_layer", "nautical");
+    } else {
+      target.searchParams.delete("map_layer");
+    }
+
+    return target.pathname + "?" + target.searchParams.toString() + target.hash;
+  }
+
+
+  function currentsOverlayEnabled() {
+    var checkbox = document.getElementById("map-show-currents");
+    return !!(checkbox && checkbox.checked);
+  }
+
+  function previewCurrentsForWind(station, currentStation, currentName, currentDistance, currentLat, currentLon) {
+    if (!currentStationMarker || !currentStation) return;
+    if (!Number.isFinite(Number(currentLat)) || !Number.isFinite(Number(currentLon))) return;
+
+    currentStationMarker.setLatLng([Number(currentLat), Number(currentLon)]);
+    var label =
+      "Currents station " + currentStation +
+      " — preview for wind station " + station;
+    if (currentName) label += " — " + currentName;
+    if (currentDistance) label += " (" + currentDistance + " from wind station)";
+    if (currentStationMarker.getTooltip()) {
+      currentStationMarker.setTooltipContent(label);
+    }
+    previewingCurrentStation = true;
+
+    if (currentsOverlayEnabled() && !map.hasLayer(currentStationMarker)) {
+      currentStationMarker.addTo(map);
+    }
+    updateRecenterControls();
+  }
+
+  function restoreSelectedCurrentsStation() {
+    if (!currentStationMarker || !previewingCurrentStation) return;
+    if (selectedCurrentLatLng) currentStationMarker.setLatLng(selectedCurrentLatLng);
+    if (selectedCurrentLabel && currentStationMarker.getTooltip()) {
+      currentStationMarker.setTooltipContent(selectedCurrentLabel);
+    }
+    previewingCurrentStation = false;
+    updateRecenterControls();
+  }
+
+  function windCandidateMarker(lat, lon, station, name, distance, url, isAuto, isSelected, currentStation, currentName, currentDistance, currentLat, currentLon) {
     var fill = "#718794";
     var radius = 7;
     if (isAuto) {
@@ -2012,97 +2567,262 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
       radius = 9;
     }
 
-    var marker = L.circleMarker([lat, lon], {
-      radius: radius,
-      color: "#ffffff",
-      weight: 2,
-      fillColor: fill,
-      fillOpacity: 1
-    }).addTo(map);
+    var icon = L.divIcon({
+      className: "map-leaflet-symbol map-wind-candidate",
+      html: '<span class="marker-triangle" aria-hidden="true"></span>',
+      iconSize: [32, 32],
+      iconAnchor: [16, 16]
+    });
+    var marker = L.marker([lat, lon], {
+      icon:icon,
+      keyboard:false,
+      interactive:true,
+      bubblingMouseEvents:false,
+      zIndexOffset:500,
+      title:station + " " + name
+    }).addTo(candidateLayer);
+
 
     var state = "";
     if (isAuto) state += "<strong>AUTO</strong> ";
-    if (isSelected) state += "<strong>SELECTED</strong>";
+    // Selection is represented by the separate filled ▲ wind-source marker.
 
-    marker.bindTooltip(
-      "<strong>" + station + "</strong><br>" +
-      name + "<br>" +
-      distance + " from selected location" +
-      (state ? "<br>" + state : "") +
-      "<br><strong>Click to use this station</strong>",
-      {direction: "top", opacity: 0.96}
-    );
-
-    // A station marker is a station selector, not a new location click.
-    // Stop the event from bubbling to the map's location-selection handler,
-    // then navigate directly to the candidate's explicit station= URL.
     marker.on("click", function(e) {
-      if (e && e.originalEvent) {
-        L.DomEvent.stopPropagation(e.originalEvent);
-      }
-      window.location.assign(url);
+      if (e && e.originalEvent) L.DomEvent.stopPropagation(e.originalEvent);
+      showWindInfo(station, name, distance, url, currentStation, currentName, currentDistance);
+      previewCurrentsForWind(
+        station,
+        currentStation,
+        currentName,
+        currentDistance,
+        currentLat,
+        currentLon
+      );
     });
 
-    sourcePoints.push([lat, lon]);
     return marker;
   }
 
   {{if .MapHasRequest}}
-  selectedMarker = circleMarker(
+  selectedMarker = symbolMarker(
     {{printf "%.6f" .MapRequestLat}},
     {{printf "%.6f" .MapRequestLon}},
-    "#126b91",
-    "Selected location"
+    "★",
+    "request",
+    "Selected sailing location"
   );
   {{end}}
 
-  {{if .WindCandidates}}
-  {{range .WindCandidates}}
-  windCandidateMarker(
-    {{printf "%.6f" .Lat}},
-    {{printf "%.6f" .Lon}},
-    {{printf "%q" .Station}},
-    {{printf "%q" .Name}},
-    {{printf "%q" .Distance}},
-    {{.JSURL}},
-    {{if .IsAuto}}true{{else}}false{{end}},
-    {{if .IsSelected}}true{{else}}false{{end}}
-  );
-  {{end}}
-  {{else if .MapHasWind}}
-  circleMarker(
+  mapState.windCandidates = [
+    {{range .WindCandidates}}
+    {
+      station: {{.Station}},
+      name: {{.Name}},
+      distance: {{.Distance}},
+      lat: {{printf "%.6f" .Lat}},
+      lon: {{printf "%.6f" .Lon}},
+      url: {{.JSURL}},
+      isAuto: {{if .IsAuto}}true{{else}}false{{end}},
+      currentStation: {{.CurrentStation}},
+      currentName: {{.CurrentName}},
+      currentDistance: {{.CurrentDistance}},
+      currentLat: {{printf "%.6f" .CurrentLat}},
+      currentLon: {{printf "%.6f" .CurrentLon}}
+    },
+    {{end}}
+  ];
+
+  function normalizeWindStationID(value) {
+    var id = String(value || "").trim();
+
+    // Be defensive about station IDs that arrive with literal wrapping quotes.
+    // This was observed in the live marker trace: selectedID="PCOC1" while
+    // candidate IDs were PCOC1.
+    while (id.length >= 2) {
+      var first = id.charAt(0);
+      var last = id.charAt(id.length - 1);
+      if ((first === '"' && last === '"') ||
+          (first === "'" && last === "'")) {
+        id = id.slice(1, -1).trim();
+        continue;
+      }
+      break;
+    }
+
+    return id.toUpperCase();
+  }
+
+  function visibleWindCandidateCount() {
+    var selectedID = normalizeWindStationID(mapState.selectedWindStationID);
+    var seen = Object.create(null);
+    mapState.windCandidates.forEach(function(c) {
+      var id = normalizeWindStationID(c.station);
+      if (!id || id === selectedID || seen[id]) return;
+      seen[id] = true;
+    });
+    return Object.keys(seen).length;
+  }
+
+  function renderWindMarkers() {
+    // The candidate layer is a pure rendering of authoritative candidate state.
+    candidateLayer.clearLayers();
+
+    var selectedID = normalizeWindStationID(mapState.mapState.selectedWindStationID);
+    var seen = Object.create(null);
+
+    mapState.windCandidates.forEach(function(c) {
+      var stationID = normalizeWindStationID(c.station);
+      if (!stationID) return;
+
+      // Invariant 1: selected wind station is never also a candidate marker.
+      if (selectedID && stationID === selectedID) return;
+
+      // Invariant 2: one normalized station ID -> at most one candidate marker.
+      if (seen[stationID]) return;
+      seen[stationID] = true;
+
+      var lat = Number(c.lat);
+      var lon = Number(c.lon);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+
+      windCandidateMarker(
+        lat,
+        lon,
+        stationID,
+        String(c.name || stationID),
+        String(c.distance || ""),
+        String(c.url || ""),
+        !!c.isAuto,
+        false,
+        String(c.currentStation || ""),
+        String(c.currentName || ""),
+        String(c.currentDistance || ""),
+        Number(c.currentLat),
+        Number(c.currentLon)
+      );
+    });
+
+  }
+
+  renderWindMarkers();
+
+  {{if .MapHasWind}}
+  selectedWindMarker = symbolMarker(
     {{printf "%.6f" .MapWindLat}},
     {{printf "%.6f" .MapWindLon}},
-    "#db7b20",
-    "Wind station {{.MapWindStation}}"
+    "▲",
+    "wind",
+    "Selected wind station {{.MapWindStation}}",
+    {zIndexOffset:250}
   );
   {{end}}
 
   {{if .MapHasCurrent}}
-  circleMarker(
+  currentStationMarker = symbolMarker(
     {{printf "%.6f" .MapCurrentLat}},
     {{printf "%.6f" .MapCurrentLon}},
-    "#7d55a6",
-    "Current station {{.MapCurrentStation}}"
+    "◆",
+    "current",
+    "Currents station {{.MapCurrentStation}}",
+    {interactive:false, zIndexOffset:-500}
   );
+  selectedCurrentLatLng = currentStationMarker.getLatLng();
+  selectedCurrentLabel = "Currents station {{.MapCurrentStation}}";
   {{end}}
 
-  if (sourcePoints.length > 1) {
+  {{if .MapHasRequest}}
+  if (!pageURL.searchParams.has("map_center_lat") ||
+      !pageURL.searchParams.has("map_center_lon")) {
+    map.setView(
+      [{{printf "%.6f" .MapRequestLat}}, {{printf "%.6f" .MapRequestLon}}],
+      initialZoom
+    );
+  }
+  {{else}}
+  if (sourcePoints.length > 1 &&
+      !pageURL.searchParams.has("map_center_lat") &&
+      !pageURL.searchParams.has("map_center_lon")) {
     map.fitBounds(sourcePoints, {padding:[35,35], maxZoom:10});
   }
+  {{end}}
+
+  var CurrentsOverlayControl = L.Control.extend({
+    options: {position:"topright"},
+    onAdd: function() {
+      var container = L.DomUtil.create("div", "map-overlay-control leaflet-control");
+      container.innerHTML =
+        '<label><input type="checkbox" id="map-show-currents" checked> Currents station</label>';
+      L.DomEvent.disableClickPropagation(container);
+      L.DomEvent.disableScrollPropagation(container);
+
+      var checkbox = container.querySelector("#map-show-currents");
+      if (!currentStationMarker) {
+        checkbox.checked = false;
+        checkbox.disabled = true;
+      }
+      checkbox.addEventListener("change", function() {
+        if (!currentStationMarker) return;
+        if (checkbox.checked) {
+          if (!map.hasLayer(currentStationMarker)) currentStationMarker.addTo(map);
+        } else {
+          if (map.hasLayer(currentStationMarker)) map.removeLayer(currentStationMarker);
+        }
+        updateRecenterControls();
+      });
+      return container;
+    }
+  });
+  new CurrentsOverlayControl().addTo(map);
+
+  updateRecenterControls();
+
+  map.on("moveend zoomend", function() {
+    updateRecenterControls();
+  });
 
   var coord = document.getElementById("map-coordinate");
   var go = document.getElementById("map-go");
+  var findPoint = document.getElementById("map-find-point");
   var searchArea = document.getElementById("map-search-area");
   var reset = document.getElementById("map-reset");
-  var suppressMovePrompt = false;
-  var chosen = {{if .MapHasRequest}}{
-    lat: {{printf "%.6f" .MapRequestLat}},
-    lon: {{printf "%.6f" .MapRequestLon}}
-  }{{else}}null{{end}};
+
+  var searchStatus = document.getElementById("map-search-status");
+
+  function renderSearchControls() {
+    if (findPoint) {
+      findPoint.hidden = !mapState.selectedLocation;
+      findPoint.textContent = "Find stations near this point";
+      findPoint.setAttribute(
+        "aria-disabled",
+        mapState.stationSearch.busy ? "true" : "false"
+      );
+    }
+
+    if (searchArea) {
+      searchArea.hidden = false;
+      searchArea.textContent = "Search this area for wind stations";
+      searchArea.setAttribute(
+        "aria-disabled",
+        mapState.stationSearch.busy ? "true" : "false"
+      );
+    }
+
+    if (searchStatus) {
+      searchStatus.textContent = mapState.stationSearch.message || "";
+    }
+  }
+
+  function setStationSearchState(busy, mode, message) {
+    mapState.stationSearch.busy = !!busy;
+    mapState.stationSearch.mode = mode || "";
+    mapState.stationSearch.message = message || "";
+    renderSearchControls();
+  }
+
+  renderSearchControls();
 
   function updateGo() {
-    if (!chosen) {
+    if (!mapState.selectedLocation) {
       go.setAttribute("aria-disabled","true");
       go.setAttribute("href","#");
       return;
@@ -2110,9 +2830,18 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 
     var target = new URL(window.location.href);
     target.pathname = "/report";
-    target.searchParams.set("lat", chosen.lat.toFixed(5));
-    target.searchParams.set("lon", chosen.lon.toFixed(5));
+    target.searchParams.set("lat", mapState.selectedLocation.lat.toFixed(5));
+    target.searchParams.set("lon", mapState.selectedLocation.lon.toFixed(5));
     target.searchParams.set("format","html");
+    var liveCenter = map.getCenter();
+    target.searchParams.set("map_center_lat", liveCenter.lat.toFixed(5));
+    target.searchParams.set("map_center_lon", liveCenter.lng.toFixed(5));
+    target.searchParams.set("map_zoom", String(map.getZoom()));
+    if (activeMapLayerName === "nautical") {
+      target.searchParams.set("map_layer", "nautical");
+    } else {
+      target.searchParams.delete("map_layer");
+    }
 
     // A new sailing location should drive fresh automatic station selection.
     target.searchParams.delete("station");
@@ -2123,36 +2852,258 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
     go.setAttribute("aria-disabled","false");
   }
 
-  function locationURL(lat, lon) {
-    var target = new URL(window.location.href);
-    target.pathname = "/report";
-    target.searchParams.set("lat", lat.toFixed(5));
-    target.searchParams.set("lon", lon.toFixed(5));
-    target.searchParams.set("format", "html");
-    target.searchParams.delete("station");
-    target.searchParams.delete("current_station");
-    target.searchParams.delete("bin");
-    return target.pathname + "?" + target.searchParams.toString();
+
+  function escapeHTML(value) {
+    return String(value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   }
 
-  // Panning changes only the viewport. It does not silently change the
-  // selected location or candidate distances. Instead, offer an explicit
-  // search using the new map center.
-  map.on("movestart", function() {
-    if (!suppressMovePrompt && searchArea) {
-      searchArea.hidden = false;
+  var windInfo = document.getElementById("map-wind-info");
+  function showWindInfo(station, name, distance, url, currentStation, currentName, currentDistance) {
+    if (!windInfo) return;
+    var action = "";
+    if (url) {
+      action = '<br><a class="map-station-report-link" href="' +
+        escapeHTML(reportURLWithMapView(url)) +
+        '" data-base-href="' + escapeHTML(url) +
+        '">Use this wind station</a>';
     }
-  });
-
-  if (searchArea) {
-    searchArea.addEventListener("click", function() {
-      var center = map.getCenter();
-      window.location.assign(locationURL(center.lat, center.lng));
+    var currentLine = "";
+    if (currentStation) {
+      currentLine =
+        "<br><strong>◆ Currents preview:</strong> " +
+        escapeHTML(currentStation) +
+        (currentName ? " — " + escapeHTML(currentName) : "") +
+        (currentDistance ? " (" + escapeHTML(currentDistance) + " from wind station)" : "");
+    }
+    windInfo.innerHTML =
+      '<button type="button" class="map-wind-info-close" aria-label="Close station information">×</button>' +
+      "<strong>△ " + escapeHTML(station) + "</strong> — " + escapeHTML(name) +
+      (distance ? "<br>" + escapeHTML(distance) + " from selected location" : "") +
+      currentLine +
+      action;
+    windInfo.hidden = false;
+  }
+  function hideWindInfo() {
+    if (windInfo) windInfo.hidden = true;
+  }
+  if (windInfo) {
+    windInfo.addEventListener("click", function(e) {
+      if (e.target.closest && e.target.closest(".map-wind-info-close")) {
+        e.preventDefault();
+        hideWindInfo();
+        restoreSelectedCurrentsStation();
+      }
     });
   }
 
+
+  function findStationsWithoutReload(searchLat, searchLon, searchMode) {
+    if (mapState.stationSearch.busy) return;
+
+    if (!mapState.selectedLocation) {
+      setStationSearchState(
+        false,
+        "",
+        "Select a sailing location before searching for stations."
+      );
+      return;
+    }
+
+    setStationSearchState(
+      true,
+      searchMode,
+      searchMode === "point"
+        ? "Finding stations near the selected location…"
+        : "Searching this map area for wind stations…"
+    );
+
+    var requestURL =
+      "/wind-stations?lat=" +
+        encodeURIComponent(Number(mapState.selectedLocation.lat).toFixed(5)) +
+      "&lon=" +
+        encodeURIComponent(Number(mapState.selectedLocation.lon).toFixed(5)) +
+      "&search_lat=" + encodeURIComponent(Number(searchLat).toFixed(5)) +
+      "&search_lon=" + encodeURIComponent(Number(searchLon).toFixed(5)) +
+      "&selected_station=" +
+        encodeURIComponent(normalizeWindStationID(mapState.selectedWindStationID));
+
+    var settled = false;
+    var timeoutID = window.setTimeout(function() {
+      if (settled) return;
+      settled = true;
+      setStationSearchState(false, "", "Station search timed out. Try again.");
+    }, 8000);
+
+    fetch(requestURL, {
+      method: "GET",
+      headers: {"Accept": "application/json"},
+      cache: "no-store"
+    })
+      .then(function(response) {
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        return response.json();
+      })
+      .then(function(payload) {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeoutID);
+
+        var candidates =
+          payload && Array.isArray(payload.candidates)
+            ? payload.candidates
+            : [];
+
+        var selectedID =
+          normalizeWindStationID(mapState.selectedWindStationID);
+        var seen = Object.create(null);
+
+        mapState.windCandidates = candidates
+          .filter(function(c) {
+            var id = normalizeWindStationID(c.station);
+            if (!id || id === selectedID || seen[id]) return false;
+            seen[id] = true;
+            return true;
+          })
+          .map(function(c) {
+            return {
+              station: normalizeWindStationID(c.station),
+              name: String(c.name || c.station || ""),
+              distance: String(c.distance || ""),
+              lat: Number(c.lat),
+              lon: Number(c.lon),
+              url: String(c.url || ""),
+              isAuto: false,
+              currentStation: String(c.current_station || ""),
+              currentName: String(c.current_name || ""),
+              currentDistance: String(c.current_distance || ""),
+              currentLat: Number(c.current_lat),
+              currentLon: Number(c.current_lon)
+            };
+          });
+
+        renderWindMarkers();
+
+        var stationList = document.getElementById("map-station-list");
+        if (stationList) {
+          if (mapState.windCandidates.length) {
+            var rows = mapState.windCandidates.map(function(c) {
+              var station = escapeHTML(c.station);
+              var name = escapeHTML(c.name || c.station);
+              var distance = escapeHTML(c.distance);
+              var reportURL = escapeHTML(c.url || "#");
+              return "<tr>" +
+                '<td><a class="map-station-report-link" href="' + reportURL +
+                '" data-base-href="' + reportURL + '">' + station + "</a></td>" +
+                '<td><a class="map-station-report-link" href="' + reportURL +
+                '" data-base-href="' + reportURL + '">' + name + "</a></td>" +
+                "<td>" + distance + "</td>" +
+                "</tr>";
+            }).join("");
+
+            stationList.innerHTML =
+              '<div class="map-station-list-title">Nearby Wind Stations</div>' +
+              '<div class="map-station-table-wrap">' +
+              '<table class="map-station-table">' +
+              '<thead><tr><th>Station</th><th>Name</th><th>From selected location</th></tr></thead>' +
+              "<tbody>" + rows + "</tbody></table></div>";
+          } else {
+            stationList.innerHTML =
+              '<div class="map-station-list-title">Nearby Wind Stations</div>' +
+              '<div class="meta">No nearby stations found.</div>';
+          }
+        }
+
+        var count = mapState.windCandidates.length;
+        setStationSearchState(
+          false,
+          "",
+          count
+            ? count + " nearby station" + (count === 1 ? "" : "s") + " shown."
+            : "No nearby stations found."
+        );
+      })
+      .catch(function(err) {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeoutID);
+        console.error("Nearby station lookup failed", err);
+        setStationSearchState(
+          false,
+          "",
+          "Station lookup failed: " +
+            (err && err.message ? err.message : "unknown error")
+        );
+      });
+  }
+
+
+  document.addEventListener("click", function(e) {
+    var link = e.target.closest && e.target.closest("a.map-station-report-link");
+    if (!link) return;
+
+    var baseHref =
+      link.getAttribute("data-base-href") ||
+      link.getAttribute("href");
+
+    if (!baseHref) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    window.location.assign(reportURLWithMapView(baseHref));
+  });
+
+  function wireSearchControl(control, handler) {
+    if (!control) return;
+    L.DomEvent.disableClickPropagation(control);
+    L.DomEvent.disableScrollPropagation(control);
+
+    function activate(e) {
+      if (e) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+      if (control.getAttribute("aria-disabled") === "true") return;
+      handler();
+    }
+
+    control.addEventListener("click", activate);
+    control.addEventListener("keydown", function(e) {
+      if (e.key === "Enter" || e.key === " ") activate(e);
+    });
+  }
+
+  wireSearchControl(findPoint, function() {
+    if (!mapState.selectedLocation) return;
+    findStationsWithoutReload(
+      mapState.selectedLocation.lat,
+      mapState.selectedLocation.lon,
+      "point"
+    );
+  });
+
+  wireSearchControl(searchArea, function() {
+    var center = map.getCenter();
+    findStationsWithoutReload(center.lat, center.lng, "area");
+  });
+
   map.on("click", function(e) {
-    chosen = {lat:e.latlng.lat, lon:e.latlng.lng};
+    var originalTarget =
+      e && e.originalEvent && e.originalEvent.target
+        ? e.originalEvent.target
+        : null;
+
+    if (originalTarget && originalTarget.closest &&
+        originalTarget.closest(".map-wind-candidate")) {
+      // Selecting a wind source must never move the ★ sailing location.
+      return;
+    }
+
+    mapState.selectedLocation = {lat:e.latlng.lat, lon:e.latlng.lng};
 
     if (selectedMarker) {
       selectedMarker.setLatLng(e.latlng);
@@ -2167,25 +3118,28 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 
     coord.textContent =
       "Selected: " +
-      chosen.lat.toFixed(5) +
+      mapState.selectedLocation.lat.toFixed(5) +
       ", " +
-      chosen.lon.toFixed(5);
+      mapState.selectedLocation.lon.toFixed(5);
 
-    if (searchArea) {
-      searchArea.hidden = true;
-    }
+    renderSearchControls();
     updateGo();
+    updateRecenterControls();
+    renderWindMarkers();
   });
 
   if (reset) {
     reset.addEventListener("click", function() {
-      chosen = null;
+      mapState.selectedLocation = null;
       if (selectedMarker) {
         map.removeLayer(selectedMarker);
         selectedMarker = null;
       }
       coord.textContent = "Click the map to choose a location.";
+      renderSearchControls();
       updateGo();
+      updateRecenterControls();
+      renderWindMarkers();
     });
   }
 
