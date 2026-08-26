@@ -195,6 +195,17 @@ Useful references include PSBC1 for Pittsburg/Suisun Bay, PCOC1 for Port Chicago
 
 These are reference stations, not a hard-coded application whitelist. The service discovers active stations dynamically.
 
+
+## Maintainability note
+
+`main.go` is currently large and relatively monolithic. In addition to application startup and HTTP orchestration, it contains substantial embedded HTML, CSS, JavaScript, and Leaflet map behavior. That concentration makes UI state changes harder to reason about and increases the risk of regressions when otherwise small map changes touch several concerns at once.
+
+This is not currently a reason to refactor a working deployment. A future cleanup should be treated as a separate, deliberate project after the current behavior is stable.
+
+The safest first step would be to separate the browser-facing assets from `main.go`: move the embedded templates, CSS, and Leaflet JavaScript into dedicated template/static files while preserving behavior. After that, HTTP/report orchestration could be moved into a `report.go` or `handlers.go`, leaving `main.go` primarily responsible for startup, configuration, and route registration.
+
+The existing `wind.go` and `currents.go` split already provides a useful boundary for the data-source logic. Any future refactor should preserve those boundaries and prioritize behavior-preserving moves over simultaneous redesign.
+
 ## Development note
 
 The browser map is deliberately being kept simpler than earlier iterations. When adding future map features, prefer explicit state transitions and a single rendering path over event handlers that directly mutate unrelated Leaflet layers and DOM controls.
