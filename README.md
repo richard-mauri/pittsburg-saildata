@@ -14,11 +14,11 @@ Wind observations come from NOAA/NDBC. Current predictions come from NOAA CO-OPS
 
 The current map workflow is intentionally simple.
 
-Click the map to set the **★ Selected location**. Then use **Find stations near this point** to retrieve nearby wind stations. Panning and zooming only change the view; they do not change the search location. To search somewhere else, click the map again to move the selected location and run Find again.
+Click the map to set the **★ Selected location**. Then use **Find stations near selected location** to retrieve nearby wind stations. Panning and zooming only change the view; they do not change the search location. To search somewhere else, click the map again to move the selected location and run Find again.
 
-Map symbols are **★ Selected location**, **▲ Selected wind station**, **△ Nearby wind station**, and **◆ Currents station**.
+The map legend is intentionally not context-specific. It always defines **★ Selected location**, **▲ Selected wind station**, **△ Nearby wind station**, and **◆ Currents station**, even when one or more of those markers are not currently present on the map.
 
-Clicking a nearby wind-station candidate opens a fixed information panel. The candidate is not committed until **Use this wind station** is selected. When current metadata is available, the panel can preview the currents station associated with that candidate.
+Clicking a nearby wind-station candidate opens a fixed information panel. The candidate is not committed until **Use this wind station** is selected. When a suitable currents prediction station is available within the automatic-selection distance limit, the panel previews that station. If no suitable currents station exists within the limit, the panel explicitly reports that no nearby currents prediction station is available.
 
 The map includes recenter controls for the selected location, selected wind station, and currents station. These controls preserve the user's current zoom level.
 
@@ -32,7 +32,7 @@ The service dynamically retrieves NDBC station metadata instead of maintaining a
 
 ### Currents
 
-NOAA CO-OPS current predictions provide flood, ebb, slack, current direction, prediction bin/depth, timelines, and current charts. The service automatically chooses a suitable current-prediction station and supports manual station/bin overrides.
+NOAA CO-OPS current predictions provide flood, ebb, slack, current direction, prediction bin/depth, timelines, and current charts. The service automatically chooses a suitable current-prediction station and supports manual station/bin overrides. Automatic current-station selection is capped at **30 nautical miles** from the selected wind station; farther stations are treated as unavailable rather than presented as representative local current data. Explicit `current_station` overrides are not blocked by this automatic-selection limit.
 
 The HTML report also supports one-, three-, and seven-day current views and planning hints for a preferred sailing period.
 
@@ -155,9 +155,11 @@ The fixed wind-station information panel replaced clipped or unstable marker too
 
 The currents overlay is treated as user state rather than being inferred from whether a Leaflet marker happened to exist during initial page construction. The checkbox is no longer permanently disabled merely because a current marker was absent at initialization, and candidate-current preview can create the currents marker lazily when suitable current metadata is available.
 
+Automatic currents preview and committed-report selection now share a **30 nmi** usefulness limit. A candidate whose nearest suitable NOAA current prediction station is farther away does not get a misleading ◆ preview marker. The candidate information panel instead says that no nearby currents prediction station is available. When that wind station is committed, the Current card uses the distinct message **No nearby currents prediction station** rather than the generic **Current prediction unavailable**, which remains reserved for actual current prediction/data failures.
+
 Map initialization now distinguishes a missing `map_center_lat` or `map_center_lon` URL parameter from numeric zero. This matters because JavaScript's `Number(null)` evaluates to `0`; without the explicit missing-value check, an ordinary report URL could incorrectly initialize the Leaflet map near **0°, 0°** instead of near PSBC1 or the server-provided map center.
 
-The earlier **Search this area for wind stations** mode was removed. There is now one station-discovery action: choose a **★ Selected location**, then use **Find stations near this point**. This removes the ambiguous distinction between viewport-center searches and selected-location searches. The `/wind-stations` request now searches around the selected `lat` and `lon`; `search_lat` and `search_lon` are no longer part of this UI workflow.
+The earlier **Search this area for wind stations** mode was removed. There is now one station-discovery action: choose a **★ Selected location**, then use **Find stations near selected location**. This removes the ambiguous distinction between viewport-center searches and selected-location searches. The `/wind-stations` request now searches around the selected `lat` and `lon`; `search_lat` and `search_lon` are no longer part of this UI workflow.
 
 The recenter controls for **★ Selected location**, **▲ Selected wind station**, and **◆ Currents station** preserve the user's zoom level. They change map center only, rather than forcing a minimum zoom such as 12.
 
@@ -211,3 +213,25 @@ The existing `wind.go` and `currents.go` split already provides a useful boundar
 The browser map is deliberately being kept simpler than earlier iterations. When adding future map features, prefer explicit state transitions and a single rendering path over event handlers that directly mutate unrelated Leaflet layers and DOM controls.
 
 A useful invariant is that the selected sailing location is the search anchor, the selected wind station is represented only by the committed **▲** marker, and nearby candidates are a rendering of the current candidate set rather than persistent incremental map objects.
+
+## Latest UI behavior
+
+The **Find** control remains visible even before a selected location exists. It is disabled until the user clicks the map, with wording that makes the required action explicit. The reset control is also always present and becomes enabled once a selected location exists.
+
+The former **Show Conditions** control was removed because it could appear to act on the current viewport while actually reusing the previously selected location. The current workflow is intentionally explicit: set the **★ Selected location**, find nearby wind stations, inspect a candidate, and commit it with **Use this wind station**.
+
+Recenter controls preserve the current zoom level. Panning never changes the selected sailing location, and the selected location remains the sole search anchor.
+
+The map legend is a fixed vocabulary rather than a reflection of current state. It always shows all four symbol meanings so an absent marker does not also remove its explanation.
+
+## Planning thresholds and Bottom Line
+
+Current-planning thresholds are independently configurable for ebb and flood. The current defaults are:
+
+- preferred below **2.0 kt**
+- caution from **2.0 kt** up to **3.0 kt**
+- red flag at **3.0 kt** and above
+
+The browser UI exposes independent caution and red-flag thresholds for ebb and flood. The query parameters `caution_ebb` and `caution_flood` control caution thresholds; `max_ebb` and `max_flood` retain their existing names and represent the red-flag thresholds.
+
+The **Bottom Line** card summarizes the entire displayed one-, three-, or seven-day planning period using the worst status present: any red-flag day makes the period Red Flag; otherwise any caution day makes it Caution; otherwise it is Preferred. The card also reports the count of preferred, caution, and red-flag days and uses a corresponding background treatment for quick scanning.

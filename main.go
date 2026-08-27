@@ -16,11 +16,12 @@ import (
 )
 
 const (
-	defaultWindStation    = "PSBC1"
-	windDistanceWarningNM = 10.0
-	defaultStartHour      = -1
-	defaultEndHour        = -1
-	timeZoneName          = "America/Los_Angeles"
+	defaultWindStation              = "PSBC1"
+	windDistanceWarningNM           = 10.0
+	maxAutoCurrentStationDistanceNM = 30.0
+	defaultStartHour                = -1
+	defaultEndHour                  = -1
+	timeZoneName                    = "America/Los_Angeles"
 )
 
 type SailingReport struct {
@@ -126,7 +127,7 @@ func main() {
 				Error: currentErr.Error(),
 			}
 		} else {
-			report.Current = current
+			report.Current = enforceAutomaticCurrentDistance(current, *currentStation)
 		}
 	} else {
 		report = buildCurrentWindReport(stationID, observations, loc)
@@ -145,7 +146,7 @@ func main() {
 				Error: currentErr.Error(),
 			}
 		} else {
-			report.Current = current
+			report.Current = enforceAutomaticCurrentDistance(current, *currentStation)
 		}
 	}
 
@@ -245,11 +246,11 @@ func parsePlanningTime(q url.Values, key, fallback string) (int, string) {
 func parsePlanningMaxEbb(q url.Values) float64 {
 	value := strings.TrimSpace(q.Get("max_ebb"))
 	if value == "" {
-		return 1.5
+		return 3.0
 	}
 	var parsed float64
 	if _, err := fmt.Sscanf(value, "%f", &parsed); err != nil || parsed <= 0 || parsed > 10 {
-		return 1.5
+		return 3.0
 	}
 	// Keep UI/classification aligned with the one-decimal display.
 	return math.Round(parsed*10) / 10
@@ -258,11 +259,35 @@ func parsePlanningMaxEbb(q url.Values) float64 {
 func parsePlanningMaxFlood(q url.Values) float64 {
 	value := strings.TrimSpace(q.Get("max_flood"))
 	if value == "" {
-		return 1.5
+		return 3.0
 	}
 	var parsed float64
 	if _, err := fmt.Sscanf(value, "%f", &parsed); err != nil || parsed <= 0 || parsed > 10 {
-		return 1.5
+		return 3.0
+	}
+	return math.Round(parsed*10) / 10
+}
+
+func parsePlanningCautionEbb(q url.Values) float64 {
+	value := strings.TrimSpace(q.Get("caution_ebb"))
+	if value == "" {
+		return 2.0
+	}
+	var parsed float64
+	if _, err := fmt.Sscanf(value, "%f", &parsed); err != nil || parsed <= 0 || parsed > 10 {
+		return 2.0
+	}
+	return math.Round(parsed*10) / 10
+}
+
+func parsePlanningCautionFlood(q url.Values) float64 {
+	value := strings.TrimSpace(q.Get("caution_flood"))
+	if value == "" {
+		return 2.0
+	}
+	var parsed float64
+	if _, err := fmt.Sscanf(value, "%f", &parsed); err != nil || parsed <= 0 || parsed > 10 {
+		return 2.0
 	}
 	return math.Round(parsed*10) / 10
 }
@@ -668,6 +693,7 @@ func runServer(
 			CurrentDistance string  `json:"current_distance,omitempty"`
 			CurrentLat      float64 `json:"current_lat,omitempty"`
 			CurrentLon      float64 `json:"current_lon,omitempty"`
+			CurrentNote     string  `json:"current_note,omitempty"`
 		}
 		items := make([]stationMapCandidate, 0, len(candidates))
 		for _, c := range candidates {
@@ -695,7 +721,16 @@ func runServer(
 				Lon:      c.Station.Lon,
 				URL:      "/report?" + linkQ.Encode(),
 			}
-			if currentPreview, err := previewCurrentStationForPoint(c.Station.Lat, c.Station.Lon); err == nil && currentPreview != nil {
+			currentPreview, currentPreviewErr := previewCurrentStationForPoint(c.Station.Lat, c.Station.Lon)
+			switch {
+			case currentPreviewErr != nil:
+				item.CurrentNote = "Currents preview unavailable."
+			case currentPreview == nil:
+				item.CurrentNote = fmt.Sprintf(
+					"No nearby currents prediction station within %.0f nmi.",
+					maxAutoCurrentStationDistanceNM,
+				)
+			default:
 				item.CurrentStation = currentPreview.ID
 				item.CurrentName = currentPreview.Name
 				item.CurrentDistance = fmt.Sprintf("%.1f nmi", currentPreview.DistanceNM)
@@ -799,7 +834,7 @@ func runServer(
 					Error: currentErr.Error(),
 				}
 			} else {
-				report.Current = current
+				report.Current = enforceAutomaticCurrentDistance(current, currentStation)
 			}
 		} else {
 			report = buildCurrentWindReport(stationID, observations, loc)
@@ -828,7 +863,7 @@ func runServer(
 					Error: currentErr.Error(),
 				}
 			} else {
-				report.Current = current
+				report.Current = enforceAutomaticCurrentDistance(current, currentStation)
 			}
 		}
 
@@ -895,7 +930,33 @@ func previewCurrentStationForPoint(lat, lon float64) (*CurrentStation, error) {
 			best = &copy
 		}
 	}
+	if best != nil && best.DistanceNM > maxAutoCurrentStationDistanceNM {
+		return nil, nil
+	}
 	return best, nil
+}
+
+func enforceAutomaticCurrentDistance(
+	current *CurrentReport,
+	currentStationOverride string,
+) *CurrentReport {
+	if current == nil ||
+		current.CurrentStation == nil ||
+		strings.TrimSpace(currentStationOverride) != "" {
+		return current
+	}
+
+	if current.CurrentStation.DistanceNM <= maxAutoCurrentStationDistanceNM {
+		return current
+	}
+
+	return &CurrentReport{
+		Error: fmt.Sprintf(
+			"No nearby current prediction station available; nearest suitable station is %.1f nmi from the wind station (automatic limit %.0f nmi).",
+			current.CurrentStation.DistanceNM,
+			maxAutoCurrentStationDistanceNM,
+		),
+	}
 }
 
 type htmlWindCandidate struct {
@@ -918,6 +979,7 @@ type htmlWindCandidate struct {
 	CurrentDistance string
 	CurrentLat      float64
 	CurrentLon      float64
+	CurrentNote     string
 	HasCurrent      bool
 }
 
@@ -946,6 +1008,8 @@ type htmlReportData struct {
 	MapHasRequest, MapHasWind, MapHasCurrent         bool
 	MapWindStation, MapCurrentStation                string
 	CurrentStation, CurrentMeta                      string
+	CurrentAvailabilityStatus                        string
+	CurrentAvailabilityDetail                        string
 	CurrentWindow, CurrentWindowMode                 string
 	CurrentDateLabel, CurrentDateISO                 string
 	CurrentDays                                      int
@@ -957,7 +1021,11 @@ type htmlReportData struct {
 	CurrentOutlook                                   []string
 	CurrentEvents                                    []htmlCurrentEvent
 	CurrentPlanningHints                             []currentPlanningHint
+	PlanningPeriodStatus                             string
+	PlanningPeriodClass                              string
+	PlanningPeriodDetail                             string
 	PlanningStart, PlanningEnd                       string
+	PlanningCautionEbb, PlanningCautionFlood         string
 	PlanningMaxEbb, PlanningMaxFlood, PlanningBuffer string
 	CurrentChart                                     template.HTML
 	BottomLine                                       []string
@@ -1192,7 +1260,16 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 				IsAuto:     isAuto,
 				IsSelected: isSelected,
 			}
-			if currentPreview, err := previewCurrentStationForPoint(candidate.Lat, candidate.Lon); err == nil && currentPreview != nil {
+			currentPreview, currentPreviewErr := previewCurrentStationForPoint(candidate.Lat, candidate.Lon)
+			switch {
+			case currentPreviewErr != nil:
+				item.CurrentNote = "Currents preview unavailable."
+			case currentPreview == nil:
+				item.CurrentNote = fmt.Sprintf(
+					"No nearby currents prediction station within %.0f nmi.",
+					maxAutoCurrentStationDistanceNM,
+				)
+			default:
 				item.HasCurrent = true
 				item.CurrentStation = currentPreview.ID
 				item.CurrentName = currentPreview.Name
@@ -1254,6 +1331,36 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 		if !d.MapHasRequest {
 			d.MapCenterLat = stationMeta.Lat
 			d.MapCenterLon = stationMeta.Lon
+		}
+	}
+
+	if report.Current != nil && report.Current.Error != "" {
+		const noNearbyPrefix = "No nearby current prediction station available;"
+		if strings.HasPrefix(report.Current.Error, noNearbyPrefix) {
+			d.CurrentAvailabilityStatus = "no-nearby-station"
+			d.CurrentAvailabilityDetail = strings.TrimSpace(strings.TrimPrefix(report.Current.Error, noNearbyPrefix))
+		}
+	}
+
+	// Classify the automatic "no nearby currents station" case independently
+	// from BuildCurrentReport's generic error.  The candidate preview already
+	// uses this exact geographic test; repeat it here for the committed wind
+	// station so the Current card cannot collapse this state into an endpoint
+	// failure.
+	if d.CurrentAvailabilityStatus == "" &&
+		strings.TrimSpace(report.RequestQuery.Get("current_station")) == "" &&
+		report.WindSelection != nil &&
+		(report.WindSelection.StationLat != 0 || report.WindSelection.StationLon != 0) {
+		currentPreview, currentPreviewErr := previewCurrentStationForPoint(
+			report.WindSelection.StationLat,
+			report.WindSelection.StationLon,
+		)
+		if currentPreviewErr == nil && currentPreview == nil {
+			d.CurrentAvailabilityStatus = "no-nearby-station"
+			d.CurrentAvailabilityDetail = fmt.Sprintf(
+				"The nearest suitable station is beyond the %.0f nmi automatic-selection limit.",
+				maxAutoCurrentStationDistanceNM,
+			)
 		}
 	}
 
@@ -1364,11 +1471,15 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 			planningStartMinutes, planningStart = 12*60, "12:00"
 			planningEndMinutes, planningEnd = 17*60, "17:00"
 		}
+		planningCautionEbb := parsePlanningCautionEbb(report.RequestQuery)
+		planningCautionFlood := parsePlanningCautionFlood(report.RequestQuery)
 		planningMaxEbb := parsePlanningMaxEbb(report.RequestQuery)
 		planningMaxFlood := parsePlanningMaxFlood(report.RequestQuery)
 		planningBuffer := parsePlanningBuffer(report.RequestQuery)
 		d.PlanningStart = planningStart
 		d.PlanningEnd = planningEnd
+		d.PlanningCautionEbb = fmt.Sprintf("%.1f", planningCautionEbb)
+		d.PlanningCautionFlood = fmt.Sprintf("%.1f", planningCautionFlood)
 		d.PlanningMaxEbb = fmt.Sprintf("%.1f", planningMaxEbb)
 		d.PlanningMaxFlood = fmt.Sprintf("%.1f", planningMaxFlood)
 		d.PlanningBuffer = fmt.Sprintf("%d", planningBuffer)
@@ -1378,11 +1489,51 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 			currentDay,
 			d.CurrentDays,
 			loc,
+			planningCautionEbb,
+			planningCautionFlood,
 			planningMaxEbb,
 			planningMaxFlood,
 			planningStartMinutes,
 			planningEndMinutes,
 			planningBuffer,
+		)
+
+		preferredCount, cautionCount, redCount := 0, 0, 0
+		for _, hint := range d.CurrentPlanningHints {
+			switch hint.Class {
+			case "redflag":
+				redCount++
+			case "caution":
+				cautionCount++
+			default:
+				preferredCount++
+			}
+		}
+
+		switch {
+		case redCount > 0:
+			d.PlanningPeriodStatus = "Red flag"
+			d.PlanningPeriodClass = "redflag"
+		case cautionCount > 0:
+			d.PlanningPeriodStatus = "Caution"
+			d.PlanningPeriodClass = "caution"
+		default:
+			d.PlanningPeriodStatus = "Preferred"
+			d.PlanningPeriodClass = "preferred"
+		}
+
+		dayWord := "day"
+		if d.CurrentDays != 1 {
+			dayWord = "days"
+		}
+		d.PlanningPeriodDetail = fmt.Sprintf(
+			"%s for this %d-%s planning window: %d preferred, %d caution, %d red flag.",
+			d.PlanningPeriodStatus,
+			d.CurrentDays,
+			dayWord,
+			preferredCount,
+			cautionCount,
+			redCount,
 		)
 		d.CurrentChart = buildCurrentChartSVG(
 			report.Current,
@@ -1433,6 +1584,8 @@ func buildCurrentPlanningHints(
 	startDay time.Time,
 	days int,
 	loc *time.Location,
+	cautionEbbKT float64,
+	cautionFloodKT float64,
 	maxEbbKT float64,
 	maxFloodKT float64,
 	planningStartMinutes int,
@@ -1442,8 +1595,17 @@ func buildCurrentPlanningHints(
 	if report == nil || report.CurrentStation == nil || days < 1 {
 		return nil
 	}
-	if maxEbbKT <= 0 {
-		maxEbbKT = 1.5
+	if cautionEbbKT <= 0 {
+		cautionEbbKT = 2.0
+	}
+	if cautionFloodKT <= 0 {
+		cautionFloodKT = 2.0
+	}
+	if maxEbbKT <= cautionEbbKT {
+		maxEbbKT = 3.0
+	}
+	if maxFloodKT <= cautionFloodKT {
+		maxFloodKT = 3.0
 	}
 
 	// Fetch the entire displayed range once, then partition by each sample's
@@ -1582,18 +1744,22 @@ func buildCurrentPlanningHints(
 		}
 
 		h := currentPlanningHint{Date: day.Format("Mon Jan 2")}
-		var redReasons, cautionReasons []string
+		var redReasons, cautionReasons, bufferReasons []string
 		if windowMaxEbb >= maxEbbKT {
 			redReasons = append(redReasons, fmt.Sprintf("ebb %.1f kt at %s", windowMaxEbb, windowMaxEbbTime.Format("3:04 PM")))
+		} else if windowMaxEbb >= cautionEbbKT {
+			cautionReasons = append(cautionReasons, fmt.Sprintf("ebb %.1f kt at %s", windowMaxEbb, windowMaxEbbTime.Format("3:04 PM")))
 		}
 		if windowMaxFlood >= maxFloodKT {
 			redReasons = append(redReasons, fmt.Sprintf("flood %.1f kt at %s", windowMaxFlood, windowMaxFloodTime.Format("3:04 PM")))
+		} else if windowMaxFlood >= cautionFloodKT {
+			cautionReasons = append(cautionReasons, fmt.Sprintf("flood %.1f kt at %s", windowMaxFlood, windowMaxFloodTime.Format("3:04 PM")))
 		}
-		if bufferMaxEbb >= maxEbbKT {
-			cautionReasons = append(cautionReasons, fmt.Sprintf("ebb %.1f kt at %s", bufferMaxEbb, bufferMaxEbbTime.Format("3:04 PM")))
+		if bufferMaxEbb >= cautionEbbKT {
+			bufferReasons = append(bufferReasons, fmt.Sprintf("ebb %.1f kt at %s", bufferMaxEbb, bufferMaxEbbTime.Format("3:04 PM")))
 		}
-		if bufferMaxFlood >= maxFloodKT {
-			cautionReasons = append(cautionReasons, fmt.Sprintf("flood %.1f kt at %s", bufferMaxFlood, bufferMaxFloodTime.Format("3:04 PM")))
+		if bufferMaxFlood >= cautionFloodKT {
+			bufferReasons = append(bufferReasons, fmt.Sprintf("flood %.1f kt at %s", bufferMaxFlood, bufferMaxFloodTime.Format("3:04 PM")))
 		}
 
 		switch {
@@ -1601,16 +1767,25 @@ func buildCurrentPlanningHints(
 			h.Status, h.Class = "Red flag", "redflag"
 			h.Detail = fmt.Sprintf("%s during %s.", strings.Join(redReasons, "; "), windowLabel)
 			if len(cautionReasons) > 0 {
-				h.Detail += fmt.Sprintf(" Also near the window: %s.", strings.Join(cautionReasons, "; "))
+				h.Detail += fmt.Sprintf(" Also at caution level: %s.", strings.Join(cautionReasons, "; "))
+			}
+			if len(bufferReasons) > 0 {
+				h.Detail += fmt.Sprintf(" Near the window: %s.", strings.Join(bufferReasons, "; "))
 			}
 		case len(cautionReasons) > 0:
 			h.Status, h.Class = "Caution", "caution"
+			h.Detail = fmt.Sprintf("%s during %s.", strings.Join(cautionReasons, "; "), windowLabel)
+			if len(bufferReasons) > 0 {
+				h.Detail += fmt.Sprintf(" Also near the window: %s.", strings.Join(bufferReasons, "; "))
+			}
+		case len(bufferReasons) > 0:
+			h.Status, h.Class = "Caution", "caution"
 			h.Detail = fmt.Sprintf("%s within the %d-minute buffer around %s.",
-				strings.Join(cautionReasons, "; "), planningBufferMinutes, windowLabel)
+				strings.Join(bufferReasons, "; "), planningBufferMinutes, windowLabel)
 		default:
 			h.Status, h.Class = "Preferred", "preferred"
 			h.Detail = fmt.Sprintf("During %s, ebb stays below %.1f kt and flood stays below %.1f kt.",
-				windowLabel, maxEbbKT, maxFloodKT)
+				windowLabel, cautionEbbKT, cautionFloodKT)
 		}
 
 		hints = append(hints, h)
@@ -2048,7 +2223,7 @@ a.station{color:var(--blue);font-weight:800;text-decoration:none}.badge{display:
 </style></head><body><main>
 <a class="back" href="javascript:history.back()">← Back to conditions</a>
 <h1>Nearby Wind Stations</h1>
-<p class="intro">These are the candidate observation stations for the selected location. Distances are measured from that selected point. Use the map or table to choose the station you think best represents the water you care about.</p>
+<p class="intro">These are the candidate observation stations for the selected location. Distances are measured from that selected location. Use the map or table to choose the station you think best represents the water you care about.</p>
 <div class="card"><div id="station-map" class="map" aria-label="Nearby wind station candidates"></div></div>
 <div class="card">
 {{if .UseNearestURL}}<div class="actions"><a class="button" href="{{.UseNearestURL}}">Use nearest usable station</a></div>{{end}}
@@ -2241,10 +2416,10 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 
 
 .location-map-wrap{position:relative}
-.map-station-list{margin-top:12px}.map-station-list-title{font-weight:850;color:var(--navy);margin:0 0 8px}.map-station-table-wrap{overflow-x:auto}.map-station-table{width:100%;border-collapse:collapse;font-size:.86rem}.map-station-table th,.map-station-table td{padding:8px 10px;border-top:1px solid var(--line);text-align:left;vertical-align:top}.map-station-table th{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}.map-station-table a{color:var(--blue);font-weight:800;text-decoration:none}.map-station-table a:hover{text-decoration:underline}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#2f855a}.map-dot.current{background:#7d55a6}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}.error-card{border-left:5px solid #b64735;background:#fff7f4}.error-card h2{color:#8f3025}.error-message{font-weight:650;line-height:1.5}.error-help{color:var(--muted);font-size:.9rem}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}</style></head><body><main class="shell">
+.map-station-list{margin-top:12px}.map-station-list-title{font-weight:850;color:var(--navy);margin:0 0 8px}.map-station-table-wrap{overflow-x:auto}.map-station-table{width:100%;border-collapse:collapse;font-size:.86rem}.map-station-table th,.map-station-table td{padding:8px 10px;border-top:1px solid var(--line);text-align:left;vertical-align:top}.map-station-table th{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}.map-station-table a{color:var(--blue);font-weight:800;text-decoration:none}.map-station-table a:hover{text-decoration:underline}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#2f855a}.map-dot.current{background:#7d55a6}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}.error-card{border-left:5px solid #b64735;background:#fff7f4}.error-card h2{color:#8f3025}.error-message{font-weight:650;line-height:1.5}.error-help{color:var(--muted);font-size:.9rem}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}.bottom.planning-preferred{background:#eff8f1;border-color:#b8d8c0}.bottom.planning-caution{background:#fff8e6;border-color:#e6c66a}.bottom.planning-redflag{background:#fff0ef;border-color:#e0a39d}.bottom .planning-period-status{margin:0 0 10px;font-weight:900;font-size:1.05rem}.bottom .planning-period-status.preferred{color:#176246}.bottom .planning-period-status.caution{color:#8a5a00}.bottom .planning-period-status.redflag{color:#9b3027}</style></head><body><main class="shell">
 <section class="hero"><div class="eyebrow">Mauri's Wind & Current Conditions</div><h1>{{.Title}}</h1><div class="sub">{{.ReportTime}} · {{.Station}}</div>{{if .Historical}}<span class="badge">Historical · {{.RequestedTime}}</span>{{end}}<div class="photo-tag">Bay sailing</div></section><div class="grid">
-<section id="bottom-line-card" class="card full bottom"><h2>Bottom line</h2>{{range .BottomLine}}<p>{{.}}</p>{{else}}<p>Summary unavailable.</p>{{end}}</section>
-<section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map to choose a sailing location, then use Find stations near this point. Panning only changes the view; to search somewhere else, click the map to move the selected ★ location first. Click a nearby wind station to pin its details and preview the associated currents station, then use the selection link in the map panel to commit the wind-station choice. Candidate stations and distances always refer to the selected location.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-controls"><span id="map-coordinate" class="map-coordinate">{{if .MapHasRequest}}Selected: {{printf "%.5f" .MapRequestLat}}, {{printf "%.5f" .MapRequestLon}}{{else}}Click the map to choose a location.{{end}}</span><a id="map-go" class="map-go" href="#" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}">Show Conditions</a><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" hidden>Find stations near this point</span><span id="map-search-status" class="map-search-status" aria-live="polite"></span>{{if .MapHasRequest}}<button id="map-reset" class="map-reset" type="button">Clear selected location point</button>{{end}}</div><div class="map-layer-note">Layer control: <strong>Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service. Chart layer is for planning/reference and does not replace official navigation products.</div><div class="map-legend">{{if .MapHasRequest}}<span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span>{{end}}{{if .MapHasWind}}<span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station {{.MapWindStation}}</span>{{end}}{{if .WindCandidates}}<span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span>{{end}}{{if .MapHasCurrent}}<span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Currents station {{.MapCurrentStation}}</span>{{end}}</div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
+<section id="bottom-line-card" class="card full bottom{{if .PlanningPeriodClass}} planning-{{.PlanningPeriodClass}}{{end}}"><h2>Bottom line</h2>{{if .PlanningPeriodStatus}}<div class="planning-period-status {{.PlanningPeriodClass}}">{{.PlanningPeriodStatus}}</div><p><strong>{{.PlanningPeriodDetail}}</strong></p>{{end}}{{range .BottomLine}}<p>{{.}}</p>{{else}}<p>Summary unavailable.</p>{{end}}</section>
+<section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map to choose a sailing location, then use Find stations near selected location. Panning only changes the view; to search somewhere else, click the map to move the selected ★ location first. Click a nearby wind station to pin its details and preview the associated currents station, then use the selection link in the map panel to commit the wind-station choice. Candidate stations and distances always refer to the selected location.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-controls"><span id="map-coordinate" class="map-coordinate">{{if .MapHasRequest}}Selected: {{printf "%.5f" .MapRequestLat}}, {{printf "%.5f" .MapRequestLon}}{{else}}Click the map to choose a location.{{end}}</span><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Select a location to find stations</span><span id="map-search-status" class="map-search-status" aria-live="polite"></span><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}" {{if not .MapHasRequest}}disabled{{end}}>Clear selected location</button></div><div class="map-layer-note">Layer control: <strong>Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service. Chart layer is for planning/reference and does not replace official navigation products.</div><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Currents station</span></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
 {{if .WindError}}<section class="card full error-card"><h2>Wind station selection unavailable</h2><p class="error-message">{{.WindError}}</p><p class="error-help">The page is still available so you can inspect the request and nearby station diagnostics. Try nearby coordinates or an explicit NDBC station ID.</p></section>{{end}}
 <section class="card wind-card"><h2>Wind</h2>
 <div class="metrics">
@@ -2259,8 +2434,8 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 {{if .WindCandidates}}<div class="card-action-row"><a class="details-link" href="{{.WindStationsURL}}">Browse nearby wind stations →</a></div>{{end}}
 </section>
 
-<section id="current-summary-card" class="card"><h2>Current{{if .CurrentDateLabel}} — {{.CurrentDateLabel}}{{end}}</h2>{{if .CurrentStation}}<div class="station">{{.CurrentStation}}</div><div class="meta">{{.CurrentMeta}}</div>{{if .CurrentWindowMode}}<p><strong>{{.CurrentWindowMode}}</strong><br>{{.CurrentWindow}}</p>{{else if .CurrentWindow}}<p><strong>Conditions window</strong><br>{{.CurrentWindow}}</p>{{end}}{{range .CurrentOutlook}}<p>{{.}}</p>{{end}}{{else}}<p>Current prediction unavailable.</p>{{end}}</section>
-{{if .CurrentChart}}<section id="current-chart-card" class="card full"><div class="current-chart-header"><div><h2>Tidal Current</h2>{{if .CurrentRangeLabel}}<div class="current-date-label">{{.CurrentRangeLabel}}</div>{{end}}</div></div><div class="current-range-toolbar" aria-label="Current graph date controls"><a class="current-date-nav" href="{{.CurrentPrevURL}}" aria-label="Previous date range">← Previous range</a><label class="current-control-label"><span>Start date</span><input id="current-date-picker" class="current-date-picker" type="date" value="{{.CurrentDateISO}}" aria-label="Choose starting date"></label><label class="current-control-label"><span>Range</span><select id="current-days-picker" class="current-date-picker" aria-label="Number of days"><option value="1" {{if eq .CurrentDays 1}}selected{{end}}>1 day</option><option value="3" {{if eq .CurrentDays 3}}selected{{end}}>3 days</option><option value="7" {{if eq .CurrentDays 7}}selected{{end}}>7 days</option></select></label><a class="current-date-nav {{if .CurrentIsToday}}is-current{{end}}" href="{{.CurrentTodayURL}}">Today</a><a class="current-date-nav" href="{{.CurrentNextURL}}" aria-label="Next date range">Next range →</a></div><div class="chart-explainer"><strong>This is current, not tide height.</strong> Above zero = flood; below zero = ebb; crossings = slack water.</div><div class="current-chart-wrap">{{.CurrentChart}}</div><div class="chart-note">NOAA 6-minute harmonic current predictions. Darker bands are night; light areas are daylight; warm bands mark the configured preferred planning period. {{if eq .CurrentDays 1}}Max flood, max ebb, and slack events are labeled with their times.{{else}}Small dots mark max flood, max ebb, and slack. Use the event navigator below for large, readable times.{{end}} {{if .CurrentIsToday}}Red line marks report time when it falls inside the displayed range.{{end}}{{if gt .CurrentDays 1}} Day boundaries are emphasized for multi-day planning.{{end}}</div>{{if gt .CurrentDays 1}}<div class="current-event-browser" data-current-event-browser><div class="current-event-readout" aria-live="polite"><div class="current-event-time">Select an event</div><div class="current-event-label">Use the slider or Previous / Next event</div></div><div class="current-event-controls"><button type="button" class="current-event-button" data-event-prev>← Previous event</button><input class="current-event-slider" data-event-slider type="range" min="0" max="0" value="0" step="1" aria-label="Current event"><button type="button" class="current-event-button" data-event-next>Next event →</button></div></div>{{end}}{{if .CurrentPlanningHints}}<div class="current-planning"><div class="current-planning-head"><strong>Preferred-period planning hint{{if eq .CurrentDays 1}} — today / selected day{{end}}</strong><span>Red flag when ebb or flood reaches its configured limit during the preferred window; caution when it does so within the buffer.</span></div><div class="planning-preferences"><label><span>Start</span><input id="planning-start" type="time" value="{{.PlanningStart}}" aria-label="Preferred period start"></label><label><span>End</span><input id="planning-end" type="time" value="{{.PlanningEnd}}" aria-label="Preferred period end"></label><label><span>Max ebb</span><input id="planning-max-ebb" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningMaxEbb}}" aria-label="Maximum preferred ebb in knots"><b>kt</b></label><label><span>Max flood</span><input id="planning-max-flood" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningMaxFlood}}" aria-label="Maximum preferred flood in knots"><b>kt</b></label><label><span>Buffer</span><input id="planning-buffer" type="number" min="0" max="360" step="15" value="{{.PlanningBuffer}}" aria-label="Preferred-period buffer in minutes"><b>min</b></label></div><div class="planning-help"><strong>How these settings work:</strong> Max ebb is the strongest ebb you want during your preferred period; strong ebb can become rough when wind opposes the current. Max flood is the strongest flood you want during that period; a large flood can make sailing against the current difficult. Buffer checks the same limits before and after the preferred period, catching strong current close enough to affect the start or end of your outing. <strong>Red flag</strong> means an ebb or flood limit is reached during the preferred period. <strong>Caution</strong> means a limit is reached only within the buffer. <strong>Preferred</strong> means both stay below their limits.</div><div class="current-planning-days">{{range .CurrentPlanningHints}}<div class="planning-day {{.Class}}"><div class="planning-date">{{.Date}}</div><div class="planning-status">{{if eq .Class "preferred"}}✓{{else if eq .Class "redflag"}}⚠{{else}}△{{end}} {{.Status}}</div><div class="planning-detail">{{.Detail}}</div></div>{{end}}</div><div class="planning-disclaimer">Current-based planning hint only; wind, swell, weather, traffic, and local effects still matter.</div></div>{{end}}</section>{{end}}
+<section id="current-summary-card" class="card"><h2>Current{{if .CurrentDateLabel}} — {{.CurrentDateLabel}}{{end}}</h2>{{if .CurrentStation}}<div class="station">{{.CurrentStation}}</div><div class="meta">{{.CurrentMeta}}</div>{{if .CurrentWindowMode}}<p><strong>{{.CurrentWindowMode}}</strong><br>{{.CurrentWindow}}</p>{{else if .CurrentWindow}}<p><strong>Conditions window</strong><br>{{.CurrentWindow}}</p>{{end}}{{range .CurrentOutlook}}<p>{{.}}</p>{{end}}{{else}}<p>{{if eq .CurrentAvailabilityStatus "no-nearby-station"}}No nearby currents prediction station.{{else}}Current prediction unavailable.{{end}}{{if eq .CurrentAvailabilityStatus "no-nearby-station"}}{{if .CurrentAvailabilityDetail}}<div class="meta">{{.CurrentAvailabilityDetail}}</div>{{end}}{{end}}</p>{{end}}</section>
+{{if .CurrentChart}}<section id="current-chart-card" class="card full"><div class="current-chart-header"><div><h2>Tidal Current</h2>{{if .CurrentRangeLabel}}<div class="current-date-label">{{.CurrentRangeLabel}}</div>{{end}}</div></div><div class="current-range-toolbar" aria-label="Current graph date controls"><a class="current-date-nav" href="{{.CurrentPrevURL}}" aria-label="Previous date range">← Previous range</a><label class="current-control-label"><span>Start date</span><input id="current-date-picker" class="current-date-picker" type="date" value="{{.CurrentDateISO}}" aria-label="Choose starting date"></label><label class="current-control-label"><span>Range</span><select id="current-days-picker" class="current-date-picker" aria-label="Number of days"><option value="1" {{if eq .CurrentDays 1}}selected{{end}}>1 day</option><option value="3" {{if eq .CurrentDays 3}}selected{{end}}>3 days</option><option value="7" {{if eq .CurrentDays 7}}selected{{end}}>7 days</option></select></label><a class="current-date-nav {{if .CurrentIsToday}}is-current{{end}}" href="{{.CurrentTodayURL}}">Today</a><a class="current-date-nav" href="{{.CurrentNextURL}}" aria-label="Next date range">Next range →</a></div><div class="chart-explainer"><strong>This is current, not tide height.</strong> Above zero = flood; below zero = ebb; crossings = slack water.</div><div class="current-chart-wrap">{{.CurrentChart}}</div><div class="chart-note">NOAA 6-minute harmonic current predictions. Darker bands are night; light areas are daylight; warm bands mark the configured preferred planning period. {{if eq .CurrentDays 1}}Max flood, max ebb, and slack events are labeled with their times.{{else}}Small dots mark max flood, max ebb, and slack. Use the event navigator below for large, readable times.{{end}} {{if .CurrentIsToday}}Red line marks report time when it falls inside the displayed range.{{end}}{{if gt .CurrentDays 1}} Day boundaries are emphasized for multi-day planning.{{end}}</div>{{if gt .CurrentDays 1}}<div class="current-event-browser" data-current-event-browser><div class="current-event-readout" aria-live="polite"><div class="current-event-time">Select an event</div><div class="current-event-label">Use the slider or Previous / Next event</div></div><div class="current-event-controls"><button type="button" class="current-event-button" data-event-prev>← Previous event</button><input class="current-event-slider" data-event-slider type="range" min="0" max="0" value="0" step="1" aria-label="Current event"><button type="button" class="current-event-button" data-event-next>Next event →</button></div></div>{{end}}{{if .CurrentPlanningHints}}<div class="current-planning"><div class="current-planning-head"><strong>Preferred-period planning hint{{if eq .CurrentDays 1}} — today / selected day{{end}}</strong><span>Current strength has separate caution and red-flag thresholds; the time buffer also warns about strong current just outside the preferred period.</span></div><div class="planning-preferences"><label><span>Start</span><input id="planning-start" type="time" value="{{.PlanningStart}}" aria-label="Preferred period start"></label><label><span>End</span><input id="planning-end" type="time" value="{{.PlanningEnd}}" aria-label="Preferred period end"></label><label><span>Ebb caution</span><input id="planning-caution-ebb" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningCautionEbb}}" aria-label="Ebb caution threshold in knots"><b>kt</b></label><label><span>Ebb red</span><input id="planning-max-ebb" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningMaxEbb}}" aria-label="Ebb red flag threshold in knots"><b>kt</b></label><label><span>Flood caution</span><input id="planning-caution-flood" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningCautionFlood}}" aria-label="Flood caution threshold in knots"><b>kt</b></label><label><span>Flood red</span><input id="planning-max-flood" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningMaxFlood}}" aria-label="Flood red flag threshold in knots"><b>kt</b></label><label><span>Buffer</span><input id="planning-buffer" type="number" min="0" max="360" step="15" value="{{.PlanningBuffer}}" aria-label="Preferred-period buffer in minutes"><b>min</b></label></div><div class="planning-help"><strong>How these settings work:</strong> By default, ebb or flood below 2.0 kt is <strong>Preferred</strong>, 2.0 kt up to but not including 3.0 kt is <strong>Caution</strong>, and 3.0 kt or more during the preferred period is a <strong>Red flag</strong>. Ebb and flood thresholds can be adjusted independently. The buffer checks for caution-level or stronger current immediately before and after the preferred period; a threshold reached only in the buffer is reported as <strong>Caution</strong>.</div><div class="current-planning-days">{{range .CurrentPlanningHints}}<div class="planning-day {{.Class}}"><div class="planning-date">{{.Date}}</div><div class="planning-status">{{if eq .Class "preferred"}}✓{{else if eq .Class "redflag"}}⚠{{else}}△{{end}} {{.Status}}</div><div class="planning-detail">{{.Detail}}</div></div>{{end}}</div><div class="planning-disclaimer">Current-based planning hint only; wind, swell, weather, traffic, and local effects still matter.</div></div>{{end}}</section>{{end}}
 <section id="current-timeline-card" class="card full"><h2>Current timeline{{if .CurrentDateLabel}} — {{.CurrentDateLabel}}{{end}}</h2>{{if gt .CurrentDays 1}}<p class="timeline-scope-note">Events below are for the selected start date only. The graph above shows the full {{.CurrentDays}}-day range.</p>{{end}}{{range .CurrentEvents}}<div class="event {{.Class}}"><div class="time">{{.Time}}</div><div class="dot"></div><div class="eventbody"><div class="eventlabel">{{.Label}}</div>{{if .Speed}}<div class="eventdata">{{.Speed}} · {{.Direction}}</div>{{end}}</div></div>{{else}}<p>No current events in the conditions window.</p>{{end}}</section>
 <section id="full-report-card" class="card full details-link-card"><div><h2>Need the details?</h2><p class="details-note">Open the complete text-style report, including diagnostic and supporting information.</p></div><a class="details-link" href="{{.FullDetailsURL}}">View full report details →</a></section></div>
 <div class="footer"><strong>Mauri's Wind & Current Conditions</strong><br>NOAA/NDBC observations + NOAA CO-OPS current predictions · Conditions-planning aid, not a navigation system</div></main><script>
@@ -2316,7 +2491,6 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 
   map.on("baselayerchange", function(e) {
     activeMapLayerName = e.layer === nauticalLayer ? "nautical" : "map";
-    updateGo();
   });
 
   var RecenterControl = L.Control.extend({
@@ -2554,7 +2728,7 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
     updateRecenterControls();
   }
 
-  function windCandidateMarker(lat, lon, station, name, distance, url, isAuto, isSelected, currentStation, currentName, currentDistance, currentLat, currentLon) {
+  function windCandidateMarker(lat, lon, station, name, distance, url, isAuto, isSelected, currentStation, currentName, currentDistance, currentLat, currentLon, currentNote) {
     var fill = "#718794";
     var radius = 7;
     if (isAuto) {
@@ -2588,7 +2762,7 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 
     marker.on("click", function(e) {
       if (e && e.originalEvent) L.DomEvent.stopPropagation(e.originalEvent);
-      showWindInfo(station, name, distance, url, currentStation, currentName, currentDistance);
+      showWindInfo(station, name, distance, url, currentStation, currentName, currentDistance, currentNote);
       previewCurrentsForWind(
         station,
         currentStation,
@@ -2626,7 +2800,8 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
       currentName: {{.CurrentName}},
       currentDistance: {{.CurrentDistance}},
       currentLat: {{printf "%.6f" .CurrentLat}},
-      currentLon: {{printf "%.6f" .CurrentLon}}
+      currentLon: {{printf "%.6f" .CurrentLon}},
+      currentNote: {{.CurrentNote}}
     },
     {{end}}
   ];
@@ -2697,7 +2872,8 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
         String(c.currentName || ""),
         String(c.currentDistance || ""),
         Number(c.currentLat),
-        Number(c.currentLon)
+        Number(c.currentLon),
+        String(c.currentNote || "")
       );
     });
 
@@ -2779,7 +2955,6 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
   });
 
   var coord = document.getElementById("map-coordinate");
-  var go = document.getElementById("map-go");
   var findPoint = document.getElementById("map-find-point");
   var reset = document.getElementById("map-reset");
 
@@ -2787,12 +2962,25 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 
   function renderSearchControls() {
     if (findPoint) {
-      findPoint.hidden = !mapState.selectedLocation;
-      findPoint.textContent = "Find stations near this point";
-      findPoint.setAttribute(
-        "aria-disabled",
-        mapState.stationSearch.busy ? "true" : "false"
-      );
+      findPoint.hidden = false;
+      if (!mapState.selectedLocation) {
+        findPoint.textContent = "Select a location to find stations";
+        findPoint.setAttribute("aria-disabled", "true");
+      } else {
+        findPoint.textContent = mapState.stationSearch.busy
+          ? "Finding stations..."
+          : "Find stations near selected location";
+        findPoint.setAttribute(
+          "aria-disabled",
+          mapState.stationSearch.busy ? "true" : "false"
+        );
+      }
+    }
+
+    if (reset) {
+      var hasSelectedLocation = !!mapState.selectedLocation;
+      reset.disabled = !hasSelectedLocation;
+      reset.setAttribute("aria-disabled", hasSelectedLocation ? "false" : "true");
     }
 
     if (searchStatus) {
@@ -2809,38 +2997,6 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 
   renderSearchControls();
 
-  function updateGo() {
-    if (!mapState.selectedLocation) {
-      go.setAttribute("aria-disabled","true");
-      go.setAttribute("href","#");
-      return;
-    }
-
-    var target = new URL(window.location.href);
-    target.pathname = "/report";
-    target.searchParams.set("lat", mapState.selectedLocation.lat.toFixed(5));
-    target.searchParams.set("lon", mapState.selectedLocation.lon.toFixed(5));
-    target.searchParams.set("format","html");
-    var liveCenter = map.getCenter();
-    target.searchParams.set("map_center_lat", liveCenter.lat.toFixed(5));
-    target.searchParams.set("map_center_lon", liveCenter.lng.toFixed(5));
-    target.searchParams.set("map_zoom", String(map.getZoom()));
-    if (activeMapLayerName === "nautical") {
-      target.searchParams.set("map_layer", "nautical");
-    } else {
-      target.searchParams.delete("map_layer");
-    }
-
-    // A new sailing location should drive fresh automatic station selection.
-    target.searchParams.delete("station");
-    target.searchParams.delete("current_station");
-    target.searchParams.delete("bin");
-
-    go.href = target.pathname + "?" + target.searchParams.toString();
-    go.setAttribute("aria-disabled","false");
-  }
-
-
   function escapeHTML(value) {
     return String(value)
       .replace(/&/g, "&amp;")
@@ -2851,7 +3007,7 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
   }
 
   var windInfo = document.getElementById("map-wind-info");
-  function showWindInfo(station, name, distance, url, currentStation, currentName, currentDistance) {
+  function showWindInfo(station, name, distance, url, currentStation, currentName, currentDistance, currentNote) {
     if (!windInfo) return;
     var action = "";
     if (url) {
@@ -2867,6 +3023,10 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
         escapeHTML(currentStation) +
         (currentName ? " — " + escapeHTML(currentName) : "") +
         (currentDistance ? " (" + escapeHTML(currentDistance) + " from wind station)" : "");
+    } else {
+      currentLine =
+        "<br><strong>◆ Currents preview:</strong> " +
+        escapeHTML(currentNote || "No nearby currents prediction station available.");
     }
     windInfo.innerHTML =
       '<button type="button" class="map-wind-info-close" aria-label="Close station information">×</button>' +
@@ -2966,7 +3126,8 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
               currentName: String(c.current_name || ""),
               currentDistance: String(c.current_distance || ""),
               currentLat: Number(c.current_lat),
-              currentLon: Number(c.current_lon)
+              currentLon: Number(c.current_lon),
+              currentNote: String(c.current_note || "")
             };
           });
 
@@ -3098,13 +3259,13 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
       mapState.selectedLocation.lon.toFixed(5);
 
     renderSearchControls();
-    updateGo();
     updateRecenterControls();
     renderWindMarkers();
   });
 
   if (reset) {
     reset.addEventListener("click", function() {
+      if (!mapState.selectedLocation) return;
       mapState.selectedLocation = null;
       if (selectedMarker) {
         map.removeLayer(selectedMarker);
@@ -3112,13 +3273,11 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
       }
       coord.textContent = "Click the map to choose a location.";
       renderSearchControls();
-      updateGo();
       updateRecenterControls();
       renderWindMarkers();
     });
   }
 
-  updateGo();
 })();
 
 (function(){
@@ -3157,20 +3316,26 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 
     var start = document.getElementById("planning-start");
     var end = document.getElementById("planning-end");
+    var cautionEbb = document.getElementById("planning-caution-ebb");
+    var cautionFlood = document.getElementById("planning-caution-flood");
     var maxEbb = document.getElementById("planning-max-ebb");
     var maxFlood = document.getElementById("planning-max-flood");
     var buffer = document.getElementById("planning-buffer");
 
     var startValue = start ? start.value : "12:00";
     var endValue = end ? end.value : "17:00";
-    var maxValue = maxEbb ? Number(maxEbb.value) : 1.5;
-    var maxFloodValue = maxFlood ? Number(maxFlood.value) : 1.5;
+    var cautionEbbValue = cautionEbb ? Number(cautionEbb.value) : 2.0;
+    var cautionFloodValue = cautionFlood ? Number(cautionFlood.value) : 2.0;
+    var maxValue = maxEbb ? Number(maxEbb.value) : 3.0;
+    var maxFloodValue = maxFlood ? Number(maxFlood.value) : 3.0;
     var bufferValue = buffer ? Number(buffer.value) : 60;
 
     if (!/^\d{2}:\d{2}$/.test(startValue)) startValue = "12:00";
     if (!/^\d{2}:\d{2}$/.test(endValue)) endValue = "17:00";
-    if (!Number.isFinite(maxValue) || maxValue <= 0) maxValue = 1.5;
-    if (!Number.isFinite(maxFloodValue) || maxFloodValue <= 0) maxFloodValue = 1.5;
+    if (!Number.isFinite(cautionEbbValue) || cautionEbbValue <= 0) cautionEbbValue = 2.0;
+    if (!Number.isFinite(cautionFloodValue) || cautionFloodValue <= 0) cautionFloodValue = 2.0;
+    if (!Number.isFinite(maxValue) || maxValue <= cautionEbbValue) maxValue = 3.0;
+    if (!Number.isFinite(maxFloodValue) || maxFloodValue <= cautionFloodValue) maxFloodValue = 3.0;
     if (!Number.isFinite(bufferValue) || bufferValue < 0) bufferValue = 60;
     bufferValue = Math.max(0, Math.min(360, Math.round(bufferValue)));
 
@@ -3180,10 +3345,16 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
     if (endValue === "17:00") target.searchParams.delete("planning_end");
     else target.searchParams.set("planning_end", endValue);
 
-    if (Math.abs(maxValue - 1.5) < 0.001) target.searchParams.delete("max_ebb");
+    if (Math.abs(cautionEbbValue - 2.0) < 0.001) target.searchParams.delete("caution_ebb");
+    else target.searchParams.set("caution_ebb", cautionEbbValue.toFixed(1));
+
+    if (Math.abs(cautionFloodValue - 2.0) < 0.001) target.searchParams.delete("caution_flood");
+    else target.searchParams.set("caution_flood", cautionFloodValue.toFixed(1));
+
+    if (Math.abs(maxValue - 3.0) < 0.001) target.searchParams.delete("max_ebb");
     else target.searchParams.set("max_ebb", maxValue.toFixed(1));
 
-    if (Math.abs(maxFloodValue - 1.5) < 0.001) target.searchParams.delete("max_flood");
+    if (Math.abs(maxFloodValue - 3.0) < 0.001) target.searchParams.delete("max_flood");
     else target.searchParams.set("max_flood", maxFloodValue.toFixed(1));
 
     if (bufferValue === 60) target.searchParams.delete("planning_buffer");
@@ -3254,6 +3425,8 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
     if (
       e.target.id !== "planning-start" &&
       e.target.id !== "planning-end" &&
+      e.target.id !== "planning-caution-ebb" &&
+      e.target.id !== "planning-caution-flood" &&
       e.target.id !== "planning-max-ebb" &&
       e.target.id !== "planning-max-flood" &&
       e.target.id !== "planning-buffer"
