@@ -235,3 +235,31 @@ Current-planning thresholds are independently configurable for ebb and flood. Th
 The browser UI exposes independent caution and red-flag thresholds for ebb and flood. The query parameters `caution_ebb` and `caution_flood` control caution thresholds; `max_ebb` and `max_flood` retain their existing names and represent the red-flag thresholds.
 
 The **Bottom Line** card summarizes the entire displayed one-, three-, or seven-day planning period using the worst status present: any red-flag day makes the period Red Flag; otherwise any caution day makes it Caution; otherwise it is Preferred. The card also reports the count of preferred, caution, and red-flag days and uses a corresponding background treatment for quick scanning.
+
+## Versioning and releases
+
+The public application version is maintained as a single static `appVersion` constant in `main.go`. Intermediate file regenerations do not change this value. Bump it only when preparing a committed release.
+
+This project uses semantic versioning:
+
+- patch release: `1.0.1` for fixes that do not materially change the workflow
+- minor release: `1.1.0` for new user-facing features or behavior
+- major release: `2.0.0` for intentionally incompatible or substantially changed behavior
+
+The Render service can continue building and deploying from the `main` branch. A Git tag marks the exact commit that corresponds to a public release without changing the deployment workflow.
+
+For release `1.0.0`, after the final code and README changes are ready:
+
+```sh
+git status
+git add main.go README.md
+git commit -m "Release 1.0.0"
+git push origin main
+git tag -a v1.0.0 -m "Release 1.0.0"
+git push origin v1.0.0
+git log --oneline --decorate -5
+```
+
+The application displays `1.0.0`, while the corresponding Git tag uses the conventional `v1.0.0` form.
+
+For a later release, update only the static `appVersion` value in `main.go` during the final pre-commit regeneration, update this README if release notes or workflow documentation changed, commit and push `main`, then create and push the matching annotated tag.
