@@ -8,7 +8,7 @@ The project supports command-line use, plain-text and JSON reports, and a browse
 
 The service answers two practical questions: what the wind is doing now, and what the current is expected to do during the sailing window.
 
-Wind observations come from NOAA/NDBC. Current predictions come from NOAA CO-OPS. The service combines those sources into concise reports, nearby-station choices, current-event timelines, and planning-oriented summaries.
+Wind observations come from NOAA/NDBC. Current predictions come from NOAA CO-OPS. The service combines those sources into concise reports, nearby-station choices, tidal-current charts, tidal-range context, and planning-oriented summaries.
 
 ## Browser workflow
 
@@ -20,7 +20,7 @@ The map legend is intentionally not context-specific. It always defines **★ Se
 
 Clicking a nearby wind-station candidate opens a fixed information panel. The candidate is not committed until **Use this wind station** is selected. When a suitable currents prediction station is available within the automatic-selection distance limit, the panel previews that station. If no suitable currents station exists within the limit, the panel explicitly reports that no nearby currents prediction station is available.
 
-The map includes recenter controls for the selected location, selected wind station, and currents station. These controls preserve the user's current zoom level.
+The map includes recenter controls for the selected location, selected wind station, and currents station. These controls preserve the user's current zoom level. The **Nearby Wind Stations** table is constrained to a compact scrolling panel with a sticky header so the full candidate list remains available without consuming excessive vertical space.
 
 ## Features
 
@@ -34,7 +34,11 @@ The service dynamically retrieves NDBC station metadata instead of maintaining a
 
 NOAA CO-OPS current predictions provide flood, ebb, slack, current direction, prediction bin/depth, timelines, and current charts. The service automatically chooses a suitable current-prediction station and supports manual station/bin overrides. Automatic current-station selection is capped at **30 nautical miles** from the selected wind station; farther stations are treated as unavailable rather than presented as representative local current data. Explicit `current_station` overrides are not blocked by this automatic-selection limit.
 
-The HTML report also supports one-, three-, and seven-day current views and planning hints for a preferred sailing period.
+The HTML report also supports one-, three-, and seven-day current views and planning hints for a preferred sailing period. The current-speed chart uses a stable default scale of **±3.5 kt** so different dates can be compared visually; it expands only when displayed predictions exceed that range.
+
+The current chart can also overlay each day's predicted high-to-low tidal range on a separate right-side axis. That axis uses a stable default **0–10 ft** scale and expands only when needed. Each day is shown as a thin vertical marker centered in its day bucket rather than as a wide bar that could imply duration. The marker color is classified relative to the surrounding lunar-cycle median: **Normal-cycle** is less than 15% above the median, **Elevated** is at least 15% above, **Large** is at least 30% above, and **Exceptional** is at least 45% above. The numeric tidal-range value uses a consistent text color so the classification color is carried by the marker rather than the number.
+
+Multi-day current views keep the ordinary flood/ebb/slack event dots on the graph but no longer include the separate Previous/Next event navigator, slider, selected-event cursor line, or selected-event red-dot state. The graph itself is the event reference. The actual **NOW** marker is shown only when the real current time falls within the displayed date range.
 
 ### Service
 
@@ -202,7 +206,7 @@ These are reference stations, not a hard-coded application whitelist. The servic
 
 `main.go` is currently large and relatively monolithic. In addition to application startup and HTTP orchestration, it contains substantial embedded HTML, CSS, JavaScript, and Leaflet map behavior. That concentration makes UI state changes harder to reason about and increases the risk of regressions when otherwise small map changes touch several concerns at once.
 
-This is not currently a reason to refactor a working deployment. A future cleanup should be treated as a separate, deliberate project after the current behavior is stable.
+This is not currently a reason to refactor a working deployment. A future cleanup should be treated as a separate, deliberate project after the current behavior is stable. Recent UI work has deliberately removed low-value interaction state, including the multi-day event navigator, where the graph itself already communicates the needed information.
 
 The safest first step would be to separate the browser-facing assets from `main.go`: move the embedded templates, CSS, and Leaflet JavaScript into dedicated template/static files while preserving behavior. After that, HTTP/report orchestration could be moved into a `report.go` or `handlers.go`, leaving `main.go` primarily responsible for startup, configuration, and route registration.
 
@@ -240,26 +244,28 @@ The **Bottom Line** card summarizes the entire displayed one-, three-, or seven-
 
 The public application version is maintained as a single static `appVersion` constant in `main.go`. Intermediate file regenerations do not change this value. Bump it only when preparing a committed release.
 
-This project uses semantic versioning:
+The project uses a three-part version number with this convention:
 
-- patch release: `1.0.1` for fixes that do not materially change the workflow
-- minor release: `1.1.0` for new user-facing features or behavior
-- major release: `2.0.0` for intentionally incompatible or substantially changed behavior
+- **major** — a finalized release milestone
+- **minor** — a new feature or significant bug fix
+- **micro** — small UI polish or a minor refinement
+
+The current release is **1.1.0**.
 
 The Render service can continue building and deploying from the `main` branch. A Git tag marks the exact commit that corresponds to a public release without changing the deployment workflow.
 
-For release `1.0.0`, after the final code and README changes are ready:
+For release `1.1.0`, after the final code and README changes are ready:
 
 ```sh
 git status
 git add main.go README.md
-git commit -m "Release 1.0.0"
+git commit -m "Release v1.1.0: enhance current planning UI and tidal-range context"
 git push origin main
-git tag -a v1.0.0 -m "Release 1.0.0"
-git push origin v1.0.0
+git tag -a v1.1.0 -m "Release v1.1.0"
+git push origin v1.1.0
 git log --oneline --decorate -5
 ```
 
-The application displays `1.0.0`, while the corresponding Git tag uses the conventional `v1.0.0` form.
+The application displays `1.1.0`, while the corresponding Git tag uses the conventional `v1.1.0` form.
 
 For a later release, update only the static `appVersion` value in `main.go` during the final pre-commit regeneration, update this README if release notes or workflow documentation changed, commit and push `main`, then create and push the matching annotated tag.

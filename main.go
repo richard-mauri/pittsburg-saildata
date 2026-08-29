@@ -12,18 +12,23 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
 const (
-	appVersion                      = "1.0.1"
+	appVersion                      = "1.1.0"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
 	maxAutoCurrentStationDistanceNM = 30.0
-	defaultStartHour                = -1
-	defaultEndHour                  = -1
-	timeZoneName                    = "America/Los_Angeles"
+	// Tidal-range context thresholds are relative to the surrounding lunar-cycle median.
+	elevatedTideRangePercent    = 15.0
+	largeTideRangePercent       = 30.0
+	exceptionalTideRangePercent = 45.0
+	defaultStartHour            = -1
+	defaultEndHour              = -1
+	timeZoneName                = "America/Los_Angeles"
 )
 
 type SailingReport struct {
@@ -1005,6 +1010,25 @@ type currentPlanningHint struct {
 	Date, Status, Class, Detail string
 }
 
+type tidePredictionStation struct {
+	ID   string  `json:"id"`
+	Name string  `json:"name"`
+	Lat  float64 `json:"lat"`
+	Lon  float64 `json:"lng"`
+	Type string  `json:"type"`
+}
+
+type tideRangeDay struct {
+	Date  string
+	Range float64
+}
+
+var tideStationCache struct {
+	sync.Mutex
+	Fetched time.Time
+	Items   []tidePredictionStation
+}
+
 type htmlReportData struct {
 	AppVersion                                               string
 	Title, Station, ReportTime                               string
@@ -1026,6 +1050,19 @@ type htmlReportData struct {
 	MapWindStation, MapCurrentStation                        string
 	CurrentStation, CurrentMeta                              string
 	CurrentDistanceWarning                                   string
+	TideContextMoon                                          string
+	TideContextCycle                                         string
+	TideContextStation                                       string
+	TideContextStationMeta                                   string
+	TideContextRange                                         string
+	TideContextComparison                                    string
+	TideContextNote                                          string
+	TideRanges                                               []tideRangeDay
+	TideRangeOverlayAvailable                                bool
+	TideRangeLegendTypical                                   string
+	TideRangeLegendElevated                                  string
+	TideRangeLegendLarge                                     string
+	TideRangeLegendExceptional                               string
 	CurrentAvailabilityStatus                                string
 	CurrentAvailabilityDetail                                string
 	CurrentWindow, CurrentWindowMode                         string
@@ -1098,6 +1135,388 @@ func heroLocationTitle(name string) string {
 		return name
 	}
 	return title
+}
+
+func getTidePredictionStations() ([]tidePredictionStation, error) {
+	tideStationCache.Lock()
+	defer tideStationCache.Unlock()
+
+	if len(tideStationCache.Items) > 0 &&
+		time.Since(tideStationCache.Fetched) < 24*time.Hour {
+		return append([]tidePredictionStation(nil), tideStationCache.Items...), nil
+	}
+
+	req, err := http.NewRequest(
+		http.MethodGet,
+		"https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations.json?type=tidepredictions",
+		nil,
+	)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "pittsburg-saildata/"+appVersion)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("NOAA tide-station metadata returned HTTP %d", resp.StatusCode)
+	}
+
+	var payload struct {
+		Stations []tidePredictionStation `json:"stations"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&payload); err != nil {
+		return nil, err
+	}
+	if len(payload.Stations) == 0 {
+		return nil, fmt.Errorf("NOAA tide-station metadata returned no prediction stations")
+	}
+
+	tideStationCache.Items = append([]tidePredictionStation(nil), payload.Stations...)
+	tideStationCache.Fetched = time.Now()
+
+	return append([]tidePredictionStation(nil), payload.Stations...), nil
+}
+
+func selectTidePredictionStation(
+	windLat, windLon float64,
+	currentStation *CurrentStation,
+) (*tidePredictionStation, float64, float64, error) {
+	stations, err := getTidePredictionStations()
+	if err != nil {
+		return nil, 0, 0, err
+	}
+
+	var best *tidePredictionStation
+	bestScore := math.MaxFloat64
+	bestWindDistance := 0.0
+	bestCurrentDistance := 0.0
+
+	for i := range stations {
+		station := stations[i]
+		windDistance := distanceNM(windLat, windLon, station.Lat, station.Lon)
+		currentDistance := windDistance
+		score := windDistance
+
+		if currentStation != nil {
+			currentDistance = distanceNM(
+				currentStation.Lat,
+				currentStation.Lon,
+				station.Lat,
+				station.Lon,
+			)
+			// Prefer a tide station that represents the same general water
+			// body as both selected stations, rather than merely the one
+			// geographically closest to the wind sensor.
+			score = math.Max(windDistance, currentDistance) +
+				0.25*(windDistance+currentDistance)
+		}
+
+		if score < bestScore {
+			copy := station
+			best = &copy
+			bestScore = score
+			bestWindDistance = windDistance
+			bestCurrentDistance = currentDistance
+		}
+	}
+
+	if best == nil {
+		return nil, 0, 0, fmt.Errorf("no NOAA tide prediction station found")
+	}
+	return best, bestWindDistance, bestCurrentDistance, nil
+}
+
+func fetchTideHighLowRanges(
+	stationID string,
+	centerDay time.Time,
+	loc *time.Location,
+) ([]tideRangeDay, error) {
+	begin := centerDay.AddDate(0, 0, -14)
+	end := centerDay.AddDate(0, 0, 14)
+
+	q := url.Values{}
+	q.Set("product", "predictions")
+	q.Set("application", "pittsburg-saildata")
+	q.Set("begin_date", begin.Format("20060102"))
+	q.Set("end_date", end.Format("20060102"))
+	q.Set("datum", "MLLW")
+	q.Set("station", stationID)
+	q.Set("time_zone", "gmt")
+	q.Set("units", "english")
+	q.Set("interval", "hilo")
+	q.Set("format", "json")
+
+	req, err := http.NewRequest(
+		http.MethodGet,
+		"https://api.tidesandcurrents.noaa.gov/api/prod/datagetter?"+q.Encode(),
+		nil,
+	)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "pittsburg-saildata/"+appVersion)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("NOAA tide predictions returned HTTP %d", resp.StatusCode)
+	}
+
+	var payload struct {
+		Predictions []struct {
+			Time  string `json:"t"`
+			Value string `json:"v"`
+			Type  string `json:"type"`
+		} `json:"predictions"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&payload); err != nil {
+		return nil, err
+	}
+	if payload.Error != nil && strings.TrimSpace(payload.Error.Message) != "" {
+		return nil, fmt.Errorf("%s", strings.TrimSpace(payload.Error.Message))
+	}
+
+	type extremes struct {
+		Min    float64
+		Max    float64
+		HasMin bool
+		HasMax bool
+	}
+	byDay := make(map[string]extremes)
+
+	for _, prediction := range payload.Predictions {
+		t, err := time.Parse("2006-01-02 15:04", prediction.Time)
+		if err != nil {
+			continue
+		}
+		t = t.UTC().In(loc)
+
+		var value float64
+		if _, err := fmt.Sscanf(prediction.Value, "%f", &value); err != nil {
+			continue
+		}
+
+		key := t.Format("2006-01-02")
+		x := byDay[key]
+		switch strings.ToUpper(strings.TrimSpace(prediction.Type)) {
+		case "H":
+			if !x.HasMax || value > x.Max {
+				x.Max = value
+				x.HasMax = true
+			}
+		case "L":
+			if !x.HasMin || value < x.Min {
+				x.Min = value
+				x.HasMin = true
+			}
+		}
+		byDay[key] = x
+	}
+
+	var ranges []tideRangeDay
+	for offset := -14; offset <= 14; offset++ {
+		day := centerDay.AddDate(0, 0, offset)
+		key := day.Format("2006-01-02")
+		x, ok := byDay[key]
+		if !ok || !x.HasMin || !x.HasMax {
+			continue
+		}
+		ranges = append(ranges, tideRangeDay{
+			Date:  key,
+			Range: x.Max - x.Min,
+		})
+	}
+	if len(ranges) == 0 {
+		return nil, fmt.Errorf("NOAA returned no usable high/low tide predictions")
+	}
+	return ranges, nil
+}
+
+func approximateMoonContext(day time.Time) (string, string) {
+	const synodicMonth = 29.530588853
+
+	// Commonly used mean-new-moon epoch. This is intentionally an
+	// approximate lunar-cycle indicator, not an astronomical ephemeris.
+	epoch := time.Date(2000, 1, 6, 18, 14, 0, 0, time.UTC)
+	noon := time.Date(day.Year(), day.Month(), day.Day(), 12, 0, 0, 0, day.Location()).UTC()
+	age := noon.Sub(epoch).Hours() / 24.0
+	age = math.Mod(age, synodicMonth)
+	if age < 0 {
+		age += synodicMonth
+	}
+
+	phase := ""
+	switch {
+	case age < 1.84566:
+		phase = "New moon"
+	case age < 5.53699:
+		phase = "Waxing crescent"
+	case age < 9.22831:
+		phase = "First quarter"
+	case age < 12.91963:
+		phase = "Waxing gibbous"
+	case age < 16.61096:
+		phase = "Full moon"
+	case age < 20.30228:
+		phase = "Waning gibbous"
+	case age < 23.99361:
+		phase = "Last quarter"
+	case age < 27.68493:
+		phase = "Waning crescent"
+	default:
+		phase = "New moon"
+	}
+
+	circularDistance := func(a, b float64) float64 {
+		d := math.Abs(a - b)
+		return math.Min(d, synodicMonth-d)
+	}
+
+	toNew := circularDistance(age, 0)
+	toFull := circularDistance(age, synodicMonth/2)
+	toFirstQuarter := circularDistance(age, synodicMonth/4)
+	toLastQuarter := circularDistance(age, 3*synodicMonth/4)
+
+	cycle := "Between spring- and neap-tide phases."
+	switch {
+	case toNew <= 3:
+		cycle = fmt.Sprintf("Spring-tide period near new moon (about %.1f days from new moon).", toNew)
+	case toFull <= 3:
+		cycle = fmt.Sprintf("Spring-tide period near full moon (about %.1f days from full moon).", toFull)
+	case toFirstQuarter <= 3 || toLastQuarter <= 3:
+		quarterDistance := math.Min(toFirstQuarter, toLastQuarter)
+		cycle = fmt.Sprintf("Neap-tide period near quarter moon (about %.1f days from quarter moon).", quarterDistance)
+	}
+
+	return "Approximate lunar phase: " + phase + ".", cycle
+}
+
+func tideRangeContext(
+	ranges []tideRangeDay,
+	centerDay time.Time,
+) (string, string) {
+	targetKey := centerDay.Format("2006-01-02")
+	target := -1.0
+	values := make([]float64, 0, len(ranges))
+
+	for _, day := range ranges {
+		if day.Range <= 0 {
+			continue
+		}
+		values = append(values, day.Range)
+		if day.Date == targetKey {
+			target = day.Range
+		}
+	}
+	if target < 0 || len(values) == 0 {
+		return "", ""
+	}
+
+	sort.Float64s(values)
+	median := values[len(values)/2]
+	maxRange := values[len(values)-1]
+
+	summary := fmt.Sprintf(
+		"Predicted tidal range today: %.1f ft (high-to-low range at the tide reference station).",
+		target,
+	)
+
+	comparison := ""
+	switch {
+	case maxRange > 0 && target >= 0.90*maxRange:
+		comparison = fmt.Sprintf(
+			"Today's predicted range is near the largest in the surrounding 28-day window (maximum %.1f ft).",
+			maxRange,
+		)
+	case median > 0 && target >= 1.15*median:
+		comparison = fmt.Sprintf(
+			"Today's predicted range is elevated versus the surrounding 28-day median of %.1f ft.",
+			median,
+		)
+	case median > 0 && target <= 0.85*median:
+		comparison = fmt.Sprintf(
+			"Today's predicted range is smaller than the surrounding 28-day median of %.1f ft.",
+			median,
+		)
+	default:
+		comparison = fmt.Sprintf(
+			"Today's predicted range is near the surrounding 28-day median of %.1f ft.",
+			median,
+		)
+	}
+
+	return summary, comparison
+}
+
+func populateTideContext(
+	d *htmlReportData,
+	report *SailingReport,
+	day time.Time,
+	loc *time.Location,
+) {
+	if d == nil {
+		return
+	}
+
+	d.TideContextMoon, d.TideContextCycle = approximateMoonContext(day)
+	d.TideContextNote =
+		"Lunar phase and tide range provide context only; they do not by themselves change the Preferred/Caution/Red Flag planning classification."
+
+	if report == nil || report.Current == nil || report.Current.WindReference == nil {
+		d.TideContextStationMeta =
+			"NOAA tide-station context unavailable for this report."
+		return
+	}
+
+	wind := report.Current.WindReference
+	station, windDistance, currentDistance, err := selectTidePredictionStation(
+		wind.Lat,
+		wind.Lon,
+		report.Current.CurrentStation,
+	)
+	if err != nil {
+		d.TideContextStationMeta =
+			"NOAA tide-station context unavailable: " + err.Error()
+		return
+	}
+
+	d.TideContextStation = station.Name + " (" + station.ID + ")"
+	if report.Current.CurrentStation != nil {
+		d.TideContextStationMeta = fmt.Sprintf(
+			"Automatically selected tide reference · %.1f nmi from wind station · %.1f nmi from currents station.",
+			windDistance,
+			currentDistance,
+		)
+	} else {
+		d.TideContextStationMeta = fmt.Sprintf(
+			"Automatically selected tide reference · %.1f nmi from wind station.",
+			windDistance,
+		)
+	}
+
+	ranges, err := fetchTideHighLowRanges(station.ID, day, loc)
+	if err != nil {
+		d.TideContextRange =
+			"Tide-range comparison unavailable: " + err.Error()
+		return
+	}
+	d.TideRanges = append([]tideRangeDay(nil), ranges...)
+	d.TideRangeOverlayAvailable = len(d.TideRanges) > 0
+	d.TideContextRange, d.TideContextComparison = tideRangeContext(ranges, day)
 }
 
 func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportData {
@@ -1460,6 +1879,17 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 			currentDay.Year() == today.Year() &&
 				currentDay.YearDay() == today.YearDay()
 
+		populateTideContext(&d, report, currentDay, loc)
+		if tideMedian := tideRangeMedian(d.TideRanges); tideMedian > 0 {
+			elevatedThreshold := tideMedian * (1 + elevatedTideRangePercent/100)
+			largeThreshold := tideMedian * (1 + largeTideRangePercent/100)
+			exceptionalThreshold := tideMedian * (1 + exceptionalTideRangePercent/100)
+			d.TideRangeLegendTypical = fmt.Sprintf("Normal-cycle < %.1f ft", elevatedThreshold)
+			d.TideRangeLegendElevated = fmt.Sprintf("Elevated ≥ %.1f ft (+%.0f%%)", elevatedThreshold, elevatedTideRangePercent)
+			d.TideRangeLegendLarge = fmt.Sprintf("Large ≥ %.1f ft (+%.0f%%)", largeThreshold, largeTideRangePercent)
+			d.TideRangeLegendExceptional = fmt.Sprintf("Exceptional ≥ %.1f ft (+%.0f%%)", exceptionalThreshold, exceptionalTideRangePercent)
+		}
+
 		dateURL := func(day time.Time, todayMode bool) string {
 			q := cloneQuery(report.RequestQuery)
 			q.Set("format", "html")
@@ -1651,6 +2081,7 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 			d.CurrentDays,
 			planningStartMinutes,
 			planningEndMinutes,
+			d.TideRanges,
 		)
 	}
 	if d.WindError != "" {
@@ -1961,6 +2392,154 @@ func buildCurrentPlanningHints(
 	return hints
 }
 
+func fetchChartCurrentPredictionsGMT(
+	station string,
+	bin int,
+	beginDate string,
+	endDate string,
+	interval string,
+) ([]CurrentPrediction, error) {
+	params := url.Values{}
+	params.Set("product", "currents_predictions")
+	params.Set("application", "pittsburg-saildata")
+	params.Set("begin_date", beginDate)
+	params.Set("end_date", endDate)
+	params.Set("station", dataGetterStationID(station))
+	params.Set("time_zone", "gmt")
+	params.Set("units", "english")
+	params.Set("interval", interval)
+	params.Set("format", "json")
+	if bin > 0 {
+		params.Set("bin", fmt.Sprintf("%d", bin))
+	}
+
+	req, err := http.NewRequest(
+		http.MethodGet,
+		currentDataURL+"?"+params.Encode(),
+		nil,
+	)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "pittsburg-saildata/"+appVersion)
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf(
+			"NOAA chart current API returned HTTP %d",
+			resp.StatusCode,
+		)
+	}
+
+	var data currentAPIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil, err
+	}
+	if data.Error != nil {
+		return nil, fmt.Errorf(
+			"NOAA chart current error: %s",
+			strings.TrimSpace(data.Error.Message),
+		)
+	}
+	if len(data.CurrentPredictions.CP) == 0 {
+		return nil, fmt.Errorf("NOAA returned no chart current predictions")
+	}
+	return data.CurrentPredictions.CP, nil
+}
+
+func chartTimedPredictionsFromGMT(
+	predictions []CurrentPrediction,
+	loc *time.Location,
+) ([]TimedPrediction, error) {
+	result := make([]TimedPrediction, 0, len(predictions))
+	for _, p := range predictions {
+		t, err := time.ParseInLocation(
+			noaaCurrentTimeFormat,
+			p.Time,
+			time.UTC,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"unable to parse NOAA GMT current time %q: %w",
+				p.Time,
+				err,
+			)
+		}
+		result = append(result, TimedPrediction{
+			Prediction: p,
+			Time:       t.In(loc),
+		})
+	}
+	return result, nil
+}
+
+func chartSamplesFromGMT(
+	predictions []CurrentPrediction,
+	loc *time.Location,
+	start time.Time,
+	end time.Time,
+) ([]CurrentSample, error) {
+	timed, err := chartTimedPredictionsFromGMT(predictions, loc)
+	if err != nil {
+		return nil, err
+	}
+	samples := make([]CurrentSample, 0, len(timed))
+	for _, item := range timed {
+		if item.Time.Before(start) || !item.Time.Before(end) {
+			continue
+		}
+		samples = append(samples, CurrentSample{
+			Time:       item.Time,
+			VelocityKT: item.Prediction.Velocity,
+		})
+	}
+	sort.Slice(samples, func(i, j int) bool {
+		return samples[i].Time.Before(samples[j].Time)
+	})
+	return samples, nil
+}
+
+func tideRangeMedian(ranges []tideRangeDay) float64 {
+	values := make([]float64, 0, len(ranges))
+	for _, day := range ranges {
+		if day.Range > 0 {
+			values = append(values, day.Range)
+		}
+	}
+	if len(values) == 0 {
+		return 0
+	}
+	sort.Float64s(values)
+	mid := len(values) / 2
+	if len(values)%2 == 0 {
+		return (values[mid-1] + values[mid]) / 2
+	}
+	return values[mid]
+}
+
+func tideRangeClass(value, median float64) (string, string) {
+	if value <= 0 || median <= 0 {
+		return "typical", "Normal-cycle"
+	}
+	percentAbove := (value/median - 1) * 100
+	switch {
+	case percentAbove >= exceptionalTideRangePercent:
+		return "exceptional", "Exceptional"
+	case percentAbove >= largeTideRangePercent:
+		return "large", "Large"
+	case percentAbove >= elevatedTideRangePercent:
+		return "elevated", "Elevated"
+	default:
+		return "typical", "Normal-cycle"
+	}
+}
+
 func buildCurrentChartSVG(
 	report *CurrentReport,
 	reportTime time.Time,
@@ -1968,6 +2547,7 @@ func buildCurrentChartSVG(
 	days int,
 	planningStartMinutes int,
 	planningEndMinutes int,
+	tideRanges []tideRangeDay,
 ) template.HTML {
 	if report == nil || len(report.Series) < 2 {
 		return ""
@@ -1976,22 +2556,31 @@ func buildCurrentChartSVG(
 		days = 1
 	}
 
+	dayStart := dayStartForCurrentChart(report, loc)
+	dayEnd := dayStart.AddDate(0, 0, days)
+
+	// NOAA's lst_ldt timestamps are ambiguous during the repeated hour when
+	// daylight saving time ends. Fetch chart data in GMT, then convert each
+	// unambiguous instant to local time. This keeps the curve continuous
+	// across DST transitions.
 	series := append([]CurrentSample(nil), report.Series...)
-	if days > 1 && report.CurrentStation != nil {
-		for offset := 1; offset < days; offset++ {
-			day := report.Start.In(loc).AddDate(0, 0, offset)
-			dateString := day.Format("20060102")
-			if densePredictions, _, err := fetchCurrentDensePredictions(
-				report.CurrentStation.ID,
-				report.CurrentStation.CurrBin,
-				dateString,
-			); err == nil {
-				if samples, parseErr := currentSamplesFromPredictions(
-					densePredictions,
-					loc,
-				); parseErr == nil {
-					series = append(series, samples...)
-				}
+	if report.CurrentStation != nil {
+		utcBegin := dayStart.UTC().Format("20060102")
+		utcEnd := dayEnd.UTC().Format("20060102")
+		if predictions, err := fetchChartCurrentPredictionsGMT(
+			report.CurrentStation.ID,
+			report.CurrentStation.CurrBin,
+			utcBegin,
+			utcEnd,
+			"6",
+		); err == nil {
+			if samples, parseErr := chartSamplesFromGMT(
+				predictions,
+				loc,
+				dayStart,
+				dayEnd,
+			); parseErr == nil && len(samples) >= 2 {
+				series = samples
 			}
 		}
 	}
@@ -2003,17 +2592,28 @@ func buildCurrentChartSVG(
 	// multi-day planning views. Fetch the NOAA max/slack series across the
 	// whole displayed range so every day can carry compact time labels.
 	chartEvents := append([]CurrentEvent(nil), report.Events...)
-	if days > 1 && report.CurrentStation != nil {
-		beginDate := dayStartForCurrentChart(report, loc).Format("20060102")
-		endDate := dayStartForCurrentChart(report, loc).AddDate(0, 0, days-1).Format("20060102")
-		if predictions, _, err := fetchCurrentPredictionsRange(
+	if report.CurrentStation != nil {
+		utcBegin := dayStart.UTC().Format("20060102")
+		utcEnd := dayEnd.UTC().Format("20060102")
+		if predictions, err := fetchChartCurrentPredictionsGMT(
 			report.CurrentStation.ID,
 			report.CurrentStation.CurrBin,
-			beginDate,
-			endDate,
+			utcBegin,
+			utcEnd,
+			"max_slack",
 		); err == nil {
-			if timed, parseErr := parseCurrentPredictions(predictions, loc); parseErr == nil {
-				chartEvents = currentEventsFromTimed(timed)
+			if timed, parseErr := chartTimedPredictionsFromGMT(
+				predictions,
+				loc,
+			); parseErr == nil {
+				filtered := make([]TimedPrediction, 0, len(timed))
+				for _, item := range timed {
+					if item.Time.Before(dayStart) || !item.Time.Before(dayEnd) {
+						continue
+					}
+					filtered = append(filtered, item)
+				}
+				chartEvents = currentEventsFromTimed(filtered)
 			}
 		}
 	}
@@ -2022,7 +2622,7 @@ func buildCurrentChartSVG(
 		width  = 860.0
 		height = 330.0
 		left   = 54.0
-		right  = 18.0
+		right  = 66.0
 		top    = 18.0
 		bottom = 42.0
 	)
@@ -2030,17 +2630,31 @@ func buildCurrentChartSVG(
 	plotW := width - left - right
 	plotH := height - top - bottom
 
-	dayStart := dayStartForCurrentChart(report, loc)
-	dayEnd := dayStart.AddDate(0, 0, days)
+	tideMedian := tideRangeMedian(tideRanges)
+	tideByDate := make(map[string]float64, len(tideRanges))
+	maxTideRange := 0.0
+	for _, item := range tideRanges {
+		tideByDate[item.Date] = item.Range
+		day, err := time.ParseInLocation("2006-01-02", item.Date, loc)
+		if err == nil && !day.Before(dayStart) && day.Before(dayEnd) && item.Range > maxTideRange {
+			maxTideRange = item.Range
+		}
+	}
+	if maxTideRange > 0 {
+		// Keep the tidal-range axis stable for date-to-date comparison.
+		// Use 0–10 ft normally and expand only when a displayed range
+		// actually exceeds 10 ft.
+		maxTideRange = math.Max(10.0, math.Ceil(maxTideRange))
+	}
 
-	maxAbs := 0.0
+	// Keep the current-speed scale stable while stepping through dates so
+	// vertical height remains visually comparable from one range to the next.
+	// Expand beyond +/-3.5 kt only when the displayed predictions require it.
+	maxAbs := 3.5
 	for _, sample := range series {
 		if v := math.Abs(sample.VelocityKT); v > maxAbs {
 			maxAbs = v
 		}
-	}
-	if maxAbs < 0.5 {
-		maxAbs = 0.5
 	}
 	maxAbs = math.Ceil(maxAbs*2.0) / 2.0
 
@@ -2056,6 +2670,19 @@ func buildCurrentChartSVG(
 	}
 	yFor := func(v float64) float64 {
 		return top + (maxAbs-v)/(2*maxAbs)*plotH
+	}
+	tideYFor := func(v float64) float64 {
+		if maxTideRange <= 0 {
+			return top + plotH
+		}
+		f := v / maxTideRange
+		if f < 0 {
+			f = 0
+		}
+		if f > 1 {
+			f = 1
+		}
+		return top + (1-f)*plotH
 	}
 	zeroY := yFor(0)
 
@@ -2187,6 +2814,39 @@ func buildCurrentChartSVG(
 	fmt.Fprintf(&svg, `<path class="ebb-area" d="%s" clip-path="url(#ebbClip)"/>`, areaPath)
 	fmt.Fprintf(&svg, `<path class="current-line" d="%s"/>`, path.String())
 
+	// Draw the tidal-range overlay after the current fills and curve so its
+	// category color remains fully visible over both daylight and night.
+	if maxTideRange > 0 {
+		svg.WriteString(`<g class="tide-range-layer" aria-label="Daily predicted tidal range">`)
+		for offset := 0; offset < days; offset++ {
+			day := dayStart.AddDate(0, 0, offset)
+			value, ok := tideByDate[day.Format("2006-01-02")]
+			if !ok || value <= 0 {
+				continue
+			}
+			className, label := tideRangeClass(value, tideMedian)
+			x := xFor(day.Add(12 * time.Hour))
+			y := tideYFor(value)
+			baseY := top + plotH
+			labelY := baseY - 10
+			capHalfWidth := 5.0
+			fmt.Fprintf(&svg, `<g class="tide-range-marker %s"><title>%s tidal range · %.1f ft · %s</title><line class="tide-range-bar %s" x1="%.2f" y1="%.2f" x2="%.2f" y2="%.2f"/><line class="tide-range-bar %s" x1="%.2f" y1="%.2f" x2="%.2f" y2="%.2f"/></g>`,
+				className, template.HTMLEscapeString(day.Format("Mon Jan 2")), value, label,
+				className, x, baseY, x, y,
+				className, x-capHalfWidth, y, x+capHalfWidth, y)
+			fmt.Fprintf(&svg, `<text class="tide-range-value %s" x="%.2f" y="%.2f">%.1f</text>`,
+				className, x, labelY, value)
+		}
+		for v := 0.0; v <= maxTideRange+0.001; v += 1.0 {
+			y := tideYFor(v)
+			fmt.Fprintf(&svg, `<text class="axis-label tide-y-label" x="%.2f" y="%.2f">%.0f</text>`,
+				left+plotW+10, y+4, v)
+		}
+		fmt.Fprintf(&svg, `<text class="axis-title tide-axis-title" x="%.2f" y="%.2f" transform="rotate(90 %.2f %.2f)">Tidal range (ft)</text>`,
+			width-13, top+plotH/2, width-13, top+plotH/2)
+		svg.WriteString(`</g>`)
+	}
+
 	// Mark max flood, max ebb, and slack throughout the displayed range.
 	// Multi-day labels are deliberately compact: the curve/zero line tells
 	// the event type while the text supplies the planning-critical time.
@@ -2234,8 +2894,11 @@ func buildCurrentChartSVG(
 		}
 	}
 
-	// "Now" marker appears when report time falls inside the plotted range.
-	nowLocal := reportTime.In(loc)
+	// "Now" marker represents the actual current time, not a historical
+	// report/request timestamp. Omit it entirely when now is outside the
+	// plotted range so date navigation cannot pin a misleading red line
+	// to the left or right edge.
+	nowLocal := time.Now().In(loc)
 	if !nowLocal.Before(dayStart) && nowLocal.Before(dayEnd) {
 		x := xFor(nowLocal)
 		fmt.Fprintf(&svg, `<line class="now-line" x1="%.2f" y1="%.2f" x2="%.2f" y2="%.2f"/>`,
@@ -2460,7 +3123,7 @@ var sailingHTMLTemplate = template.Must(template.New("sailing").Parse(`<!doctype
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <style>:root{--navy:#082b45;--blue:#126b91;--sea:#0b8793;--ink:#153242;--muted:#607886;--paper:#f5fafc;--card:#fff;--line:#d8e7ed;--flood:#087f8c;--ebb:#365f91;--slack:#756d64;--shadow:0 12px 34px rgba(8,43,69,.10)}*{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#dff3f8,#f7fbfc 32rem);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Avenir Next",Avenir,Helvetica,Arial,sans-serif;line-height:1.45}.shell{max-width:880px;margin:auto;padding:28px 18px 64px}.hero{color:#fff;padding:34px 30px 30px;border-radius:24px;min-height:360px;display:flex;flex-direction:column;justify-content:flex-end;background:
 linear-gradient(180deg,rgba(4,24,38,.06) 12%,rgba(4,24,38,.24) 48%,rgba(4,24,38,.86) 100%),
-url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text-shadow:0 2px 12px rgba(0,0,0,.45)}.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-weight:800;font-size:.76rem;opacity:.8}.photo-tag{margin-top:14px;font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;opacity:.72}h1{font-size:clamp(1.8rem,6vw,3.2rem);line-height:1.05;margin:.4rem 0 .6rem;letter-spacing:-.035em}.sub{opacity:.82}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}.full{grid-column:1/-1}h2{font-size:.82rem;letter-spacing:.13em;text-transform:uppercase;color:var(--blue);margin:0 0 16px}.bottom{font-size:1.13rem}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.metric{background:var(--paper);border-radius:15px;padding:14px}.label{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700}.value{font-size:1.55rem;font-weight:800;color:var(--navy)}.meta{color:var(--muted);font-size:.88rem;margin-top:12px}.station{font-weight:800;font-size:1.1rem;color:var(--navy)}.wind-distance-warning{margin-top:10px;padding:10px 12px;border:1px solid #e7c978;border-radius:12px;background:#fff8df;color:#654d08;font-size:.9rem}.wind-distance-warning strong{color:#4e3a00}.wind-summary{white-space:pre-line;margin-top:14px;padding:13px 14px;background:#eef7fa;border-left:4px solid var(--sea);border-radius:10px;color:var(--ink);font-size:.92rem}.event{display:grid;grid-template-columns:88px 12px 1fr;gap:12px;align-items:center;min-height:58px}.time{font-weight:800;color:var(--navy)}.dot{width:12px;height:12px;border-radius:50%;background:var(--slack);box-shadow:0 0 0 5px #edf3f5}.flood .dot{background:var(--flood)}.ebb .dot{background:var(--ebb)}.eventbody{border-left:2px solid var(--line);padding:8px 0 8px 18px}.eventlabel{font-weight:800}.eventdata{color:var(--muted);font-size:.9rem}.badge{display:inline-block;border-radius:999px;padding:5px 10px;background:#e9f6fb;color:var(--blue);font-size:.75rem;font-weight:800;margin-top:12px}.footer{text-align:center;color:var(--muted);font-size:.78rem;margin-top:22px}.full-report{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:.88rem;line-height:1.55;background:#071f31;color:#e7f4f8;border-radius:14px;padding:18px;overflow-x:auto}.card-action-row{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}#current-summary-card,.wind-card{min-width:0}.timeline-scope-note{margin:.15rem 0 1rem;color:var(--muted);font-size:.88rem}.details-link-card{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap}.details-link-card h2{margin-bottom:.2rem}.details-link{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;white-space:nowrap}.details-note{color:var(--muted);font-size:.88rem;margin:-4px 0 14px}.current-chart-header{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap}.current-chart-header h2{margin-bottom:.15rem}.current-date-label{color:var(--muted);font-weight:750;font-size:.9rem}.current-range-toolbar{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin:8px 0 10px;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:var(--paper)}.current-range-toolbar .current-date-nav{display:inline-flex;align-items:center;min-height:44px;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:8px 12px;background:#fff;color:var(--blue);font-size:.86rem;font-weight:850}.current-range-toolbar .current-date-nav.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-control-label{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:.75rem;font-weight:850}.current-control-label .current-date-picker{min-height:44px;font-size:1rem}@media(max-width:640px){.current-range-toolbar{align-items:stretch}.current-control-label{flex:1 1 140px}.current-range-toolbar .current-date-nav{justify-content:center;flex:1 1 135px}}.current-date-controls{display:flex;gap:7px;flex-wrap:wrap;align-items:center}.current-date-picker{border:1px solid var(--line);border-radius:999px;padding:6px 10px;background:#fff;color:var(--navy);font:inherit;font-size:.82rem;font-weight:750;min-height:34px}.current-date-picker:focus{outline:2px solid var(--blue);outline-offset:2px}.current-refreshing{opacity:.55;transition:opacity .15s ease}.current-date-controls a{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:7px 11px;background:#fff;color:var(--blue);font-size:.82rem;font-weight:850}.current-date-controls a:hover{background:var(--paper)}.current-date-controls a.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-planning{margin:16px 0 12px;padding:14px 16px;border:1px solid var(--line);border-radius:16px;background:#fff}.current-planning-head{display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:10px}.current-planning-head strong{color:var(--navy);font-size:1rem}.current-planning-head span{color:var(--muted);font-size:.82rem}.planning-preferences{display:flex;flex-direction:column;gap:10px;margin:8px 0 12px}.planning-preferences-row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;width:100%}.planning-preferences label{display:flex;gap:5px;align-items:center;color:var(--muted);font-size:.78rem;font-weight:850}.planning-preferences input{min-height:40px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--navy);font:inherit;font-size:1rem;padding:6px 8px}.planning-preferences input[type="number"]{width:76px}.planning-preferences b{color:var(--muted);font-size:.82rem}@media(max-width:640px){.planning-preferences label{flex:1 1 130px;justify-content:space-between}.planning-preferences input[type="time"]{min-width:110px}}.planning-help{margin:2px 0 12px;padding:10px 12px;border-radius:10px;background:#f7f9fa;color:var(--ink);font-size:.82rem;line-height:1.45}.planning-help strong{color:var(--navy)}.current-planning-days{display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:8px}.planning-day{border:1px solid var(--line);border-radius:12px;padding:10px;min-width:0}.planning-day.preferred{background:#eef8f3}.planning-day.caution{background:#fff8df;border-color:#e7c978}.planning-day.redflag{background:#fff0ed;border-color:#dfa297}.planning-date{font-size:.78rem;font-weight:850;color:var(--navy)}.planning-status{font-size:.92rem;font-weight:900;margin-top:2px}.preferred .planning-status{color:#176246}.caution .planning-status{color:#775900}.redflag .planning-status{color:#9a3328}.planning-detail{font-size:.78rem;line-height:1.35;color:var(--ink);margin-top:5px}.planning-disclaimer{color:var(--muted);font-size:.75rem;margin-top:9px}@media(max-width:640px){.current-planning-days{grid-template-columns:1fr 1fr}.planning-detail{font-size:.8rem}}.current-event-browser{margin:12px 0 4px;padding:14px 16px;background:var(--paper);border:1px solid var(--line);border-radius:16px}.current-event-readout{text-align:center;min-height:64px}.current-event-time{font-size:clamp(1.15rem,3vw,1.55rem);font-weight:900;color:var(--navy);font-variant-numeric:tabular-nums}.current-event-label{font-size:1rem;font-weight:750;color:var(--muted);margin-top:2px}.current-event-controls{display:grid;grid-template-columns:auto minmax(120px,1fr) auto;gap:10px;align-items:center;margin-top:10px}.current-event-slider{width:100%;min-height:44px;accent-color:var(--blue)}.current-event-button{min-height:44px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--blue);font-weight:850;padding:8px 12px;cursor:pointer}.event-point.is-selected{stroke:#c63a2b;stroke-width:3;r:6}.event-cursor-line{stroke:#c63a2b;stroke-width:2;stroke-dasharray:5 4;pointer-events:none}@media(max-width:640px){.current-event-controls{grid-template-columns:1fr 1fr}.current-event-slider{grid-column:1/-1;grid-row:1}.current-event-button{font-size:.82rem}}.current-chart-wrap .event-point,.current-chart-wrap .event-point:hover{cursor:default!important;pointer-events:none}.current-chart-wrap{margin-top:16px}.current-chart-svg{display:block;width:100%;height:auto;background:#f8fbfc;border:1px solid var(--line);border-radius:16px}.grid-line{stroke:#d9e4e8;stroke-width:1}.v-grid-line{stroke:#e6eef1;stroke-width:1}.day-grid-line{stroke:#b7cbd4;stroke-width:1.4}.zero-line{stroke:#17384a;stroke-width:2}.axis-label{fill:#657d89;font-size:11px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.y-label{text-anchor:end}.x-label{text-anchor:middle}.axis-title{fill:#657d89;font-size:11px;text-anchor:middle}.night-window{fill:#aebdc4;opacity:.78}.sail-window{fill:#f8fbfc;opacity:.96}.preferred-window{fill:#f0d46d;opacity:.34}.flood-area{fill:#6d8fd0;opacity:.86}.ebb-area{fill:#0b9d83;opacity:.90}.current-line{fill:none;stroke:#214b62;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}.event-point{stroke:#fff;stroke-width:1.5}.event-point.flood{fill:#5478bd}.event-point.ebb{fill:#078a75}.event-point.slack{fill:#756d64}.event-time{fill:#17384a;font-size:9px;font-weight:800;text-anchor:middle;paint-order:stroke;stroke:#fff;stroke-width:2.5px;stroke-linejoin:round}.event-time.flood{fill:#294f91}.event-time.ebb{fill:#066c5d}.event-time.slack{fill:#514b46}.now-line{stroke:#c63a2b;stroke-width:2.5}.now-label{fill:#c63a2b;font-size:11px;font-weight:800}.chart-explainer{color:var(--ink);font-size:.94rem;line-height:1.45;margin:2px 0 12px}.chart-note{color:var(--muted);font-size:.82rem;margin-top:9px}.candidate-table{width:100%;border-collapse:collapse;font-size:.86rem}.candidate-table th,.candidate-table td{padding:10px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}.candidate-table th{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}.candidate-table td.num,.candidate-table th.num{text-align:right;white-space:nowrap}.candidate-good td.status{font-weight:800}.candidate-bad{opacity:.82}.candidate-selected{background:rgba(20,120,100,.08)}.candidate-selected td:first-child{font-weight:800}.candidate-note{color:var(--muted);font-size:.82rem;margin:0 0 12px}.candidate-scroll{overflow-x:auto}.candidate-link{color:var(--blue);text-decoration:none;font-weight:800}.candidate-link:hover{text-decoration:underline}.candidate-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:0 0 12px}.nearest-link{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:7px 12px;color:var(--blue);font-weight:800;text-decoration:none;background:#fff}.nearest-link:hover{background:var(--paper)}.map-card{overflow:hidden}.map-intro{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px}.map-help{color:var(--muted);font-size:.9rem;max-width:600px}.map-wrap{border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#dfecef}.location-map{height:390px;width:100%}.map-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px}.map-coordinate{font-variant-numeric:tabular-nums;color:var(--muted);font-size:.9rem}.map-go{display:inline-block;border:0;border-radius:999px;padding:10px 16px;background:var(--blue);color:#fff;font-weight:850;text-decoration:none;cursor:pointer}.map-go[aria-disabled="true"]{opacity:.45;pointer-events:none}.map-search-area{border:0;cursor:pointer}.map-search-area[aria-disabled="true"]{opacity:.55;pointer-events:none}.map-search-area[hidden]{display:none}.map-search-status{color:var(--muted);font-size:.82rem}.map-reset{border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:800;cursor:pointer}.map-reset:disabled{opacity:.45;cursor:default}.map-navigation{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}.map-state-controls{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:10px}.map-current-toggle{display:inline-flex;align-items:center;gap:7px;color:var(--ink);font-weight:750;font-size:.88rem}.map-current-toggle input{margin:0}.map-nav-button{border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;cursor:pointer}.map-nav-button:disabled{opacity:.45;cursor:default}.map-layer-note{margin-top:8px;color:var(--muted);font-size:.8rem;line-height:1.4}.map-symbol{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;margin-right:4px;font-size:27px;font-weight:950;line-height:1;vertical-align:-6px;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff,0 2px 3px rgba(0,0,0,.35)}
+url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text-shadow:0 2px 12px rgba(0,0,0,.45)}.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-weight:800;font-size:.76rem;opacity:.8}.photo-tag{margin-top:14px;font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;opacity:.72}h1{font-size:clamp(1.8rem,6vw,3.2rem);line-height:1.05;margin:.4rem 0 .6rem;letter-spacing:-.035em}.sub{opacity:.82}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}.full{grid-column:1/-1}h2{font-size:.82rem;letter-spacing:.13em;text-transform:uppercase;color:var(--blue);margin:0 0 16px}.bottom{font-size:1.13rem}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.metric{background:var(--paper);border-radius:15px;padding:14px}.label{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700}.value{font-size:1.55rem;font-weight:800;color:var(--navy)}.meta{color:var(--muted);font-size:.88rem;margin-top:12px}.station{font-weight:800;font-size:1.1rem;color:var(--navy)}.wind-distance-warning{margin-top:10px;padding:10px 12px;border:1px solid #e7c978;border-radius:12px;background:#fff8df;color:#654d08;font-size:.9rem}.wind-distance-warning strong{color:#4e3a00}.wind-summary{white-space:pre-line;margin-top:14px;padding:13px 14px;background:#eef7fa;border-left:4px solid var(--sea);border-radius:10px;color:var(--ink);font-size:.92rem}.event{display:grid;grid-template-columns:88px 12px 1fr;gap:12px;align-items:center;min-height:58px}.time{font-weight:800;color:var(--navy)}.dot{width:12px;height:12px;border-radius:50%;background:var(--slack);box-shadow:0 0 0 5px #edf3f5}.flood .dot{background:var(--flood)}.ebb .dot{background:var(--ebb)}.eventbody{border-left:2px solid var(--line);padding:8px 0 8px 18px}.eventlabel{font-weight:800}.eventdata{color:var(--muted);font-size:.9rem}.badge{display:inline-block;border-radius:999px;padding:5px 10px;background:#e9f6fb;color:var(--blue);font-size:.75rem;font-weight:800;margin-top:12px}.footer{text-align:center;color:var(--muted);font-size:.78rem;margin-top:22px}.full-report{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:.88rem;line-height:1.55;background:#071f31;color:#e7f4f8;border-radius:14px;padding:18px;overflow-x:auto}.card-action-row{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}#current-summary-card,.wind-card{min-width:0}.timeline-scope-note{margin:.15rem 0 1rem;color:var(--muted);font-size:.88rem}.details-link-card{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap}.details-link-card h2{margin-bottom:.2rem}.details-link{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;white-space:nowrap}.details-note{color:var(--muted);font-size:.88rem;margin:-4px 0 14px}.current-chart-header{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap}.current-chart-header h2{margin-bottom:.15rem}.current-date-label{color:var(--muted);font-weight:750;font-size:.9rem}.current-range-toolbar{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin:8px 0 10px;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:var(--paper)}.current-range-toolbar .current-date-nav{display:inline-flex;align-items:center;min-height:44px;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:8px 12px;background:#fff;color:var(--blue);font-size:.86rem;font-weight:850}.current-range-toolbar .current-date-nav.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-control-label{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:.75rem;font-weight:850}.current-control-label .current-date-picker{min-height:44px;font-size:1rem}@media(max-width:640px){.current-range-toolbar{align-items:stretch}.current-control-label{flex:1 1 140px}.current-range-toolbar .current-date-nav{justify-content:center;flex:1 1 135px}}.current-date-controls{display:flex;gap:7px;flex-wrap:wrap;align-items:center}.current-date-picker{border:1px solid var(--line);border-radius:999px;padding:6px 10px;background:#fff;color:var(--navy);font:inherit;font-size:.82rem;font-weight:750;min-height:34px}.current-date-picker:focus{outline:2px solid var(--blue);outline-offset:2px}.current-refreshing{opacity:.55;transition:opacity .15s ease}.current-date-controls a{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:7px 11px;background:#fff;color:var(--blue);font-size:.82rem;font-weight:850}.current-date-controls a:hover{background:var(--paper)}.current-date-controls a.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-planning{margin:16px 0 12px;padding:14px 16px;border:1px solid var(--line);border-radius:16px;background:#fff}.current-planning-head{display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:10px}.current-planning-head strong{color:var(--navy);font-size:1rem}.current-planning-head span{color:var(--muted);font-size:.82rem}.planning-preferences{display:flex;flex-direction:column;gap:10px;margin:8px 0 12px}.planning-preferences-row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;width:100%}.planning-preferences label{display:flex;gap:5px;align-items:center;color:var(--muted);font-size:.78rem;font-weight:850}.planning-preferences input{min-height:40px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--navy);font:inherit;font-size:1rem;padding:6px 8px}.planning-preferences input[type="number"]{width:76px}.planning-preferences b{color:var(--muted);font-size:.82rem}@media(max-width:640px){.planning-preferences label{flex:1 1 130px;justify-content:space-between}.planning-preferences input[type="time"]{min-width:110px}}.planning-help{margin:2px 0 12px;padding:10px 12px;border-radius:10px;background:#f7f9fa;color:var(--ink);font-size:.82rem;line-height:1.45}.planning-help strong{color:var(--navy)}.current-planning-days{display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:8px}.planning-day{border:1px solid var(--line);border-radius:12px;padding:10px;min-width:0}.planning-day.preferred{background:#eef8f3}.planning-day.caution{background:#fff8df;border-color:#e7c978}.planning-day.redflag{background:#fff0ed;border-color:#dfa297}.planning-date{font-size:.78rem;font-weight:850;color:var(--navy)}.planning-status{font-size:.92rem;font-weight:900;margin-top:2px}.preferred .planning-status{color:#176246}.caution .planning-status{color:#775900}.redflag .planning-status{color:#9a3328}.planning-detail{font-size:.78rem;line-height:1.35;color:var(--ink);margin-top:5px}.planning-disclaimer{color:var(--muted);font-size:.75rem;margin-top:9px}@media(max-width:640px){.current-planning-days{grid-template-columns:1fr 1fr}.planning-detail{font-size:.8rem}}.current-chart-wrap .event-point,.current-chart-wrap .event-point:hover{cursor:default!important;pointer-events:none}.current-chart-wrap{margin-top:16px}.current-chart-svg{display:block;width:100%;height:auto;background:#f8fbfc;border:1px solid var(--line);border-radius:16px}.grid-line{stroke:#d9e4e8;stroke-width:1}.v-grid-line{stroke:#e6eef1;stroke-width:1}.day-grid-line{stroke:#b7cbd4;stroke-width:1.4}.zero-line{stroke:#17384a;stroke-width:2}.axis-label{fill:#657d89;font-size:11px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.y-label{text-anchor:end}.x-label{text-anchor:middle}.axis-title{fill:#657d89;font-size:11px;text-anchor:middle}.tide-y-label{text-anchor:start}.tide-range-bar{opacity:1;stroke-width:3;stroke-linecap:round;fill:none}.tide-range-bar.typical{stroke:#4a6473}.tide-range-bar.elevated{stroke:#d5ad28}.tide-range-bar.large{stroke:#d9791f}.tide-range-bar.exceptional{stroke:#c94a3f}.tide-range-value{font-size:11px;font-weight:900;text-anchor:middle;paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round;fill:#17384a}.tide-range-toggle{display:flex;align-items:center;gap:7px;color:var(--ink);font-size:.84rem;font-weight:800}.tide-range-toggle input{margin:0}.tide-range-legend{display:flex;gap:10px;flex-wrap:wrap;align-items:center;color:var(--muted);font-size:.76rem}.tide-range-key{display:inline-flex;align-items:center;gap:5px}.tide-range-swatch{width:11px;height:11px;border-radius:3px;display:inline-block}.tide-range-swatch.typical{background:#4a6473}.tide-range-swatch.elevated{background:#d5ad28}.tide-range-swatch.large{background:#d9791f}.tide-range-swatch.exceptional{background:#c94a3f}.night-window{fill:#aebdc4;opacity:.78}.sail-window{fill:#f8fbfc;opacity:.96}.preferred-window{fill:#f0d46d;opacity:.34}.flood-area{fill:#6d8fd0;opacity:.86}.ebb-area{fill:#0b9d83;opacity:.90}.current-line{fill:none;stroke:#214b62;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}.event-point{stroke:#fff;stroke-width:1.5}.event-point.flood{fill:#5478bd}.event-point.ebb{fill:#078a75}.event-point.slack{fill:#756d64}.event-time{fill:#17384a;font-size:9px;font-weight:800;text-anchor:middle;paint-order:stroke;stroke:#fff;stroke-width:2.5px;stroke-linejoin:round}.event-time.flood{fill:#294f91}.event-time.ebb{fill:#066c5d}.event-time.slack{fill:#514b46}.now-line{stroke:#c63a2b;stroke-width:2.5}.now-label{fill:#c63a2b;font-size:11px;font-weight:800}.chart-explainer{color:var(--ink);font-size:.94rem;line-height:1.45;margin:2px 0 12px}.chart-note{color:var(--muted);font-size:.82rem;margin-top:9px}.candidate-table{width:100%;border-collapse:collapse;font-size:.86rem}.candidate-table th,.candidate-table td{padding:10px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}.candidate-table th{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}.candidate-table td.num,.candidate-table th.num{text-align:right;white-space:nowrap}.candidate-good td.status{font-weight:800}.candidate-bad{opacity:.82}.candidate-selected{background:rgba(20,120,100,.08)}.candidate-selected td:first-child{font-weight:800}.candidate-note{color:var(--muted);font-size:.82rem;margin:0 0 12px}.candidate-scroll{overflow-x:auto}.candidate-link{color:var(--blue);text-decoration:none;font-weight:800}.candidate-link:hover{text-decoration:underline}.candidate-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:0 0 12px}.nearest-link{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:7px 12px;color:var(--blue);font-weight:800;text-decoration:none;background:#fff}.nearest-link:hover{background:var(--paper)}.map-card{overflow:hidden}.map-intro{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px}.map-help{color:var(--muted);font-size:.9rem;max-width:600px}.map-wrap{border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#dfecef}.location-map{height:390px;width:100%}.map-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px}.map-coordinate{font-variant-numeric:tabular-nums;color:var(--muted);font-size:.9rem}.map-go{display:inline-block;border:0;border-radius:999px;padding:10px 16px;background:var(--blue);color:#fff;font-weight:850;text-decoration:none;cursor:pointer}.map-go[aria-disabled="true"]{opacity:.45;pointer-events:none}.map-search-area{border:0;cursor:pointer}.map-search-area[aria-disabled="true"]{opacity:.55;pointer-events:none}.map-search-area[hidden]{display:none}.map-search-status{color:var(--muted);font-size:.82rem}.map-reset{border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:800;cursor:pointer}.map-reset:disabled{opacity:.45;cursor:default}.map-navigation{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}.map-state-controls{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:10px}.map-current-toggle{display:inline-flex;align-items:center;gap:7px;color:var(--ink);font-weight:750;font-size:.88rem}.map-current-toggle input{margin:0}.map-nav-button{border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;cursor:pointer}.map-nav-button:disabled{opacity:.45;cursor:default}.map-layer-note{margin-top:8px;color:var(--muted);font-size:.8rem;line-height:1.4}.map-symbol{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;margin-right:4px;font-size:27px;font-weight:950;line-height:1;vertical-align:-6px;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff,0 2px 3px rgba(0,0,0,.35)}
 .map-symbol.request{color:#126b91}.map-symbol.wind{color:#2f855a}.map-symbol.current{color:#7d55a6}.map-symbol.wind-candidate{color:#4f6978}
 .map-leaflet-symbol{background:transparent;border:0}
 .location-map,
@@ -2557,7 +3220,7 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 
 
 .location-map-wrap{position:relative}
-.map-station-list{margin-top:12px}.map-station-list-title{font-weight:850;color:var(--navy);margin:0 0 8px}.map-station-table-wrap{overflow-x:auto}.map-station-table{width:100%;border-collapse:collapse;font-size:.86rem}.map-station-table th,.map-station-table td{padding:8px 10px;border-top:1px solid var(--line);text-align:left;vertical-align:top}.map-station-table th{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}.map-station-table a{color:var(--blue);font-weight:800;text-decoration:none}.map-station-table a:hover{text-decoration:underline}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#2f855a}.map-dot.current{background:#7d55a6}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}.error-card{border-left:5px solid #b64735;background:#fff7f4}.error-card h2{color:#8f3025}.error-message{font-weight:650;line-height:1.5}.error-help{color:var(--muted);font-size:.9rem}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}.bottom.planning-preferred{background:#eff8f1;border-color:#b8d8c0}.bottom.planning-caution{background:#fff8e6;border-color:#e6c66a}.bottom.planning-redflag{background:#fff0ef;border-color:#e0a39d}.bottom .planning-period-status{margin:0 0 10px;font-weight:900;font-size:1.05rem}.bottom .planning-period-status.preferred{color:#176246}.bottom .planning-period-status.caution{color:#8a5a00}.bottom .planning-period-status.redflag{color:#9b3027}</style></head><body><main class="shell">
+.map-station-list{margin-top:12px}.map-station-list-title{font-weight:850;color:var(--navy);margin:0 0 8px}.map-station-table-wrap{max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:14px;background:#fff}.map-station-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.86rem}.map-station-table th,.map-station-table td{padding:8px 10px;border-top:1px solid var(--line);text-align:left;vertical-align:top;background:#fff}.map-station-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc}.map-station-table th{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}.map-station-table tbody tr:first-child td{border-top:0}.map-station-table a{color:var(--blue);font-weight:800;text-decoration:none}.map-station-table a:hover{text-decoration:underline}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#2f855a}.map-dot.current{background:#7d55a6}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}.error-card{border-left:5px solid #b64735;background:#fff7f4}.error-card h2{color:#8f3025}.error-message{font-weight:650;line-height:1.5}.error-help{color:var(--muted);font-size:.9rem}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}.bottom.planning-preferred{background:#eff8f1;border-color:#b8d8c0}.bottom.planning-caution{background:#fff8e6;border-color:#e6c66a}.bottom.planning-redflag{background:#fff0ef;border-color:#e0a39d}.bottom .planning-period-status{margin:0 0 10px;font-weight:900;font-size:1.05rem}.bottom .planning-period-status.preferred{color:#176246}.bottom .planning-period-status.caution{color:#8a5a00}.bottom .planning-period-status.redflag{color:#9b3027}</style></head><body><main class="shell">
 <section class="hero"><div class="eyebrow">Mauri's Wind & Current Conditions</div><h1>{{.Title}}</h1><div class="sub">{{.ReportTime}} · {{.Station}}</div>{{if .Historical}}<span class="badge">Historical · {{.RequestedTime}}</span>{{end}}</section><div class="grid">
 <section id="bottom-line-card" class="card full bottom{{if .PlanningPeriodClass}} planning-{{.PlanningPeriodClass}}{{end}}"><h2>Bottom line</h2>{{if .PlanningPeriodStatus}}<div class="planning-period-status {{.PlanningPeriodClass}}">{{.PlanningPeriodStatus}}</div>{{if .PlanningPeriodCause}}<p><strong>{{.PlanningPeriodCause}}</strong></p>{{end}}{{if .PlanningPeriodDetail}}<p>{{.PlanningPeriodDetail}}</p>{{end}}{{end}}{{range .BottomLine}}<p>{{.}}</p>{{else}}<p>Summary unavailable.</p>{{end}}</section>
 <section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map to choose a sailing location, then use Find stations near selected location. Panning only changes the view; to search somewhere else, click the map to move the selected ★ location first. Click a nearby wind station to pin its details and preview the associated currents station, then use the selection link in the map panel to commit the wind-station choice. Candidate stations and distances always refer to the selected location.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-navigation" aria-label="Map navigation"><button id="map-nav-selected" class="map-nav-button" type="button" title="Center map on selected location" {{if not .MapHasRequest}}disabled{{end}}>Center on selected location</button><button id="map-nav-wind" class="map-nav-button" type="button" title="Center map on selected wind station" {{if not .MapHasWind}}disabled{{end}}>Center on selected wind station</button><button id="map-nav-current" class="map-nav-button" type="button" title="Center map on selected currents station" {{if not .MapHasCurrent}}disabled{{end}}>Center on selected currents station</button></div><div class="map-state-controls" aria-label="Map selection controls"><label class="map-current-toggle"><input type="checkbox" id="map-show-currents" checked> Show selected currents station</label><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}" {{if not .MapHasRequest}}disabled{{end}}>Clear selected location</button></div><div class="map-controls"><span id="map-coordinate" class="map-coordinate">{{if .MapHasRequest}}Selected: {{printf "%.5f" .MapRequestLat}}, {{printf "%.5f" .MapRequestLon}}{{else}}Click the map to choose a location.{{end}}</span><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Select a location to find stations</span><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><div class="map-layer-note">Layer control: <strong>Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service. Chart layer is for planning/reference and does not replace official navigation products.</div><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
@@ -2576,8 +3239,9 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 </section>
 
 <section id="current-summary-card" class="card"><h2>Current{{if .CurrentDateLabel}} — {{.CurrentDateLabel}}{{end}}</h2>{{if .CurrentStation}}<div class="station">{{.CurrentStation}}</div><div class="meta">{{.CurrentMeta}}</div>{{if .CurrentDistanceWarning}}<div class="wind-distance-warning"><strong>Currents station distance warning:</strong> {{.CurrentDistanceWarning}}</div>{{end}}{{if .CurrentWindowMode}}<p><strong>{{.CurrentWindowMode}}</strong><br>{{.CurrentWindow}}</p>{{else if .CurrentWindow}}<p><strong>Conditions window</strong><br>{{.CurrentWindow}}</p>{{end}}{{range .CurrentOutlook}}<p>{{.}}</p>{{end}}{{else}}<p>{{if eq .CurrentAvailabilityStatus "no-nearby-station"}}No nearby currents prediction station.{{else}}Current prediction unavailable.{{end}}{{if eq .CurrentAvailabilityStatus "no-nearby-station"}}{{if .CurrentAvailabilityDetail}}<div class="meta">{{.CurrentAvailabilityDetail}}</div>{{end}}{{end}}</p>{{end}}</section>
-{{if .CurrentChart}}<section id="current-chart-card" class="card full"><div class="current-chart-header"><div><h2>Tidal Current</h2>{{if .CurrentRangeLabel}}<div class="current-date-label">{{.CurrentRangeLabel}}</div>{{end}}</div></div><div class="current-range-toolbar" aria-label="Current graph date controls"><a class="current-date-nav" href="{{.CurrentPrevURL}}" aria-label="Previous date range">← Previous range</a><label class="current-control-label"><span>Start date</span><input id="current-date-picker" class="current-date-picker" type="date" value="{{.CurrentDateISO}}" aria-label="Choose starting date"></label><label class="current-control-label"><span>Range</span><select id="current-days-picker" class="current-date-picker" aria-label="Number of days"><option value="1" {{if eq .CurrentDays 1}}selected{{end}}>1 day</option><option value="3" {{if eq .CurrentDays 3}}selected{{end}}>3 days</option><option value="7" {{if eq .CurrentDays 7}}selected{{end}}>7 days</option></select></label><a class="current-date-nav {{if .CurrentIsToday}}is-current{{end}}" href="{{.CurrentTodayURL}}">Today</a><a class="current-date-nav" href="{{.CurrentNextURL}}" aria-label="Next date range">Next range →</a></div><div class="chart-explainer"><strong>This is current, not tide height.</strong> Above zero = flood; below zero = ebb; crossings = slack water.</div><div class="current-chart-wrap">{{.CurrentChart}}</div><div class="chart-note">NOAA 6-minute harmonic current predictions. Darker bands are night; light areas are daylight; warm bands mark the configured preferred planning period. {{if eq .CurrentDays 1}}Max flood, max ebb, and slack events are labeled with their times.{{else}}Small dots mark max flood, max ebb, and slack. Use the event navigator below for large, readable times.{{end}} {{if .CurrentIsToday}}Red line marks report time when it falls inside the displayed range.{{end}}{{if gt .CurrentDays 1}} Day boundaries are emphasized for multi-day planning.{{end}}</div>{{if gt .CurrentDays 1}}<div class="current-event-browser" data-current-event-browser><div class="current-event-readout" aria-live="polite"><div class="current-event-time">Select an event</div><div class="current-event-label">Use the slider or Previous / Next event</div></div><div class="current-event-controls"><button type="button" class="current-event-button" data-event-prev>← Previous event</button><input class="current-event-slider" data-event-slider type="range" min="0" max="0" value="0" step="1" aria-label="Current event"><button type="button" class="current-event-button" data-event-next>Next event →</button></div></div>{{end}}{{if .CurrentPlanningHints}}<div class="current-planning"><div class="current-planning-head"><strong>Preferred-period planning hint{{if eq .CurrentDays 1}} — today / selected day{{end}}</strong><span>Current strength has separate caution and red-flag thresholds; the time buffer also warns about strong current just outside the preferred period.</span></div><div class="planning-preferences"><div class="planning-preferences-row"><label><span>Start</span><input id="planning-start" type="time" value="{{.PlanningStart}}" aria-label="Preferred period start"></label><label><span>End</span><input id="planning-end" type="time" value="{{.PlanningEnd}}" aria-label="Preferred period end"></label></div><div class="planning-preferences-row"><label><span>Ebb caution</span><input id="planning-caution-ebb" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningCautionEbb}}" aria-label="Ebb caution threshold in knots"><b>kt</b></label><label><span>Ebb red</span><input id="planning-max-ebb" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningMaxEbb}}" aria-label="Ebb red flag threshold in knots"><b>kt</b></label></div><div class="planning-preferences-row"><label><span>Flood caution</span><input id="planning-caution-flood" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningCautionFlood}}" aria-label="Flood caution threshold in knots"><b>kt</b></label><label><span>Flood red</span><input id="planning-max-flood" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningMaxFlood}}" aria-label="Flood red flag threshold in knots"><b>kt</b></label></div><div class="planning-preferences-row"><label><span>Caution time before/after period</span><input id="planning-buffer" type="number" min="0" max="360" step="15" value="{{.PlanningBuffer}}" aria-label="Caution time before or after preferred planning period in minutes"><b>min</b></label></div><div class="planning-preferences-row"><label><span>Currents station distance caution</span><input id="planning-current-distance-warning" type="number" min="0.1" max="{{.PlanningAutoCurrentLimit}}" step="0.1" value="{{.PlanningCurrentDistanceWarning}}" aria-label="Currents station distance caution threshold in nautical miles"><b>nmi</b></label></div></div><div class="planning-help"><strong>How these settings work:</strong> By default, ebb or flood below 2.0 kt is <strong>Preferred</strong>, 2.0 kt up to but not including 3.0 kt is <strong>Caution</strong>, and 3.0 kt or more during the preferred period is a <strong>Red flag</strong>. Ebb and flood thresholds can be adjusted independently. The caution time before/after period setting also warns when caution-level or stronger current occurs within that many minutes immediately before or after the preferred planning period; a threshold reached only there is reported as <strong>Caution</strong>. A currents station farther than the configured distance-caution threshold also makes the overall Bottom Line <strong>Caution</strong>, without changing the current-strength classification. Automatic current-station selection will not use a station beyond {{.PlanningAutoCurrentLimit}} nmi.</div><div class="current-planning-days">{{range .CurrentPlanningHints}}<div class="planning-day {{.Class}}"><div class="planning-date">{{.Date}}</div><div class="planning-status">{{if eq .Class "preferred"}}✓{{else if eq .Class "redflag"}}⚠{{else}}△{{end}} {{.Status}}</div><div class="planning-detail">{{.Detail}}</div></div>{{end}}</div><div class="planning-disclaimer">Current-based planning hint only; wind, swell, weather, traffic, and local effects still matter.</div></div>{{end}}</section>{{end}}
-<section id="current-timeline-card" class="card full"><h2>Current timeline{{if .CurrentDateLabel}} — {{.CurrentDateLabel}}{{end}}</h2>{{if gt .CurrentDays 1}}<p class="timeline-scope-note">Events below are for the selected start date only. The graph above shows the full {{.CurrentDays}}-day range.</p>{{end}}{{range .CurrentEvents}}<div class="event {{.Class}}"><div class="time">{{.Time}}</div><div class="dot"></div><div class="eventbody"><div class="eventlabel">{{.Label}}</div>{{if .Speed}}<div class="eventdata">{{.Speed}} · {{.Direction}}</div>{{end}}</div></div>{{else}}<p>No current events in the conditions window.</p>{{end}}</section>
+<section id="tide-context-card" class="card"><h2>Tidal &amp; Lunar Context{{if .CurrentDateLabel}} — {{.CurrentDateLabel}}{{end}}</h2>{{if .TideContextMoon}}<p><strong>{{.TideContextMoon}}</strong></p>{{end}}{{if .TideContextCycle}}<p>{{.TideContextCycle}}</p>{{end}}{{if .TideContextStation}}<div class="station">{{.TideContextStation}}</div>{{end}}{{if .TideContextStationMeta}}<div class="meta">{{.TideContextStationMeta}}</div>{{end}}{{if .TideContextRange}}<p><strong>Tidal range context:</strong> {{.TideContextRange}}</p>{{end}}{{if .TideContextComparison}}<p><strong>{{.TideContextComparison}}</strong></p>{{end}}{{if .TideContextNote}}<p class="note">{{.TideContextNote}} NOAA does not provide a universal “king tide” classification here; the 28-day range comparison provides the quantitative context across roughly one lunar cycle.</p>{{end}}</section>
+<section id="current-timeline-card" class="card"><h2>Current timeline{{if .CurrentDateLabel}} — {{.CurrentDateLabel}}{{end}}</h2>{{if gt .CurrentDays 1}}<p class="timeline-scope-note">Events below are for the selected start date only. The graph above shows the full {{.CurrentDays}}-day range.</p>{{end}}{{range .CurrentEvents}}<div class="event {{.Class}}"><div class="time">{{.Time}}</div><div class="dot"></div><div class="eventbody"><div class="eventlabel">{{.Label}}</div>{{if .Speed}}<div class="eventdata">{{.Speed}} · {{.Direction}}</div>{{end}}</div></div>{{else}}<p>No current events in the conditions window.</p>{{end}}</section>
+{{if .CurrentChart}}<section id="current-chart-card" class="card full"><div class="current-chart-header"><div><h2>Tidal Current</h2>{{if .CurrentRangeLabel}}<div class="current-date-label">{{.CurrentRangeLabel}}</div>{{end}}</div></div><div class="current-range-toolbar" aria-label="Current graph date controls"><a class="current-date-nav" href="{{.CurrentPrevURL}}" aria-label="Previous date range">← Previous range</a><label class="current-control-label"><span>Start date</span><input id="current-date-picker" class="current-date-picker" type="date" value="{{.CurrentDateISO}}" aria-label="Choose starting date"></label><label class="current-control-label"><span>Range</span><select id="current-days-picker" class="current-date-picker" aria-label="Number of days"><option value="1" {{if eq .CurrentDays 1}}selected{{end}}>1 day</option><option value="3" {{if eq .CurrentDays 3}}selected{{end}}>3 days</option><option value="7" {{if eq .CurrentDays 7}}selected{{end}}>7 days</option></select></label><a class="current-date-nav {{if .CurrentIsToday}}is-current{{end}}" href="{{.CurrentTodayURL}}">Today</a><a class="current-date-nav" href="{{.CurrentNextURL}}" aria-label="Next date range">Next range →</a></div><div class="chart-explainer"><strong>This is current, not tide height.</strong> Above zero = flood; below zero = ebb; crossings = slack water.</div>{{if .TideRangeOverlayAvailable}}<div class="tide-range-legend"><label class="tide-range-toggle"><input id="show-tide-range-overlay" type="checkbox" checked> Show daily tidal range on right axis</label><span class="tide-range-key"><span class="tide-range-swatch typical"></span>{{if .TideRangeLegendTypical}}{{.TideRangeLegendTypical}}{{else}}Normal-cycle (&lt; +15%){{end}}</span><span class="tide-range-key"><span class="tide-range-swatch elevated"></span>{{if .TideRangeLegendElevated}}{{.TideRangeLegendElevated}}{{else}}Elevated (≥ +15%){{end}}</span><span class="tide-range-key"><span class="tide-range-swatch large"></span>{{if .TideRangeLegendLarge}}{{.TideRangeLegendLarge}}{{else}}Large (≥ +30%){{end}}</span><span class="tide-range-key"><span class="tide-range-swatch exceptional"></span>{{if .TideRangeLegendExceptional}}{{.TideRangeLegendExceptional}}{{else}}Exceptional (≥ +45%){{end}}</span></div>{{end}}<div class="current-chart-wrap">{{.CurrentChart}}</div><div class="chart-note">NOAA 6-minute harmonic current predictions. The current-speed axis stays at ±3.5 kt for date-to-date comparison and expands only when needed. Darker bands are night; light areas are daylight; warm bands mark the configured preferred planning period. When enabled, thin daily markers use a stable 0–10 ft right axis for predicted high-to-low tidal range, expanding only above 10 ft when needed; marker color is classified relative to the surrounding lunar-cycle median, where Normal-cycle means less than 15% above that median. {{if eq .CurrentDays 1}}Max flood, max ebb, and slack events are labeled with their times.{{else}}Small dots mark max flood, max ebb, and slack across the displayed range.{{end}} {{if .CurrentIsToday}}Red line marks report time when it falls inside the displayed range.{{end}}{{if gt .CurrentDays 1}} Day boundaries are emphasized for multi-day planning.{{end}}</div>{{if .CurrentPlanningHints}}<div class="current-planning"><div class="current-planning-head"><strong>Preferred-period planning hint{{if eq .CurrentDays 1}} — today / selected day{{end}}</strong><span>Current strength has separate caution and red-flag thresholds; the time buffer also warns about strong current just outside the preferred period.</span></div><div class="planning-preferences"><div class="planning-preferences-row"><label><span>Start</span><input id="planning-start" type="time" value="{{.PlanningStart}}" aria-label="Preferred period start"></label><label><span>End</span><input id="planning-end" type="time" value="{{.PlanningEnd}}" aria-label="Preferred period end"></label></div><div class="planning-preferences-row"><label><span>Ebb caution</span><input id="planning-caution-ebb" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningCautionEbb}}" aria-label="Ebb caution threshold in knots"><b>kt</b></label><label><span>Ebb red</span><input id="planning-max-ebb" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningMaxEbb}}" aria-label="Ebb red flag threshold in knots"><b>kt</b></label></div><div class="planning-preferences-row"><label><span>Flood caution</span><input id="planning-caution-flood" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningCautionFlood}}" aria-label="Flood caution threshold in knots"><b>kt</b></label><label><span>Flood red</span><input id="planning-max-flood" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningMaxFlood}}" aria-label="Flood red flag threshold in knots"><b>kt</b></label></div><div class="planning-preferences-row"><label><span>Caution time before/after period</span><input id="planning-buffer" type="number" min="0" max="360" step="15" value="{{.PlanningBuffer}}" aria-label="Caution time before or after preferred planning period in minutes"><b>min</b></label></div><div class="planning-preferences-row"><label><span>Currents station distance caution</span><input id="planning-current-distance-warning" type="number" min="0.1" max="{{.PlanningAutoCurrentLimit}}" step="0.1" value="{{.PlanningCurrentDistanceWarning}}" aria-label="Currents station distance caution threshold in nautical miles"><b>nmi</b></label></div></div><div class="planning-help"><strong>How these settings work:</strong> By default, ebb or flood below 2.0 kt is <strong>Preferred</strong>, 2.0 kt up to but not including 3.0 kt is <strong>Caution</strong>, and 3.0 kt or more during the preferred period is a <strong>Red flag</strong>. Ebb and flood thresholds can be adjusted independently. The caution time before/after period setting also warns when caution-level or stronger current occurs within that many minutes immediately before or after the preferred planning period; a threshold reached only there is reported as <strong>Caution</strong>. A currents station farther than the configured distance-caution threshold also makes the overall Bottom Line <strong>Caution</strong>, without changing the current-strength classification. Automatic current-station selection will not use a station beyond {{.PlanningAutoCurrentLimit}} nmi.</div><div class="current-planning-days">{{range .CurrentPlanningHints}}<div class="planning-day {{.Class}}"><div class="planning-date">{{.Date}}</div><div class="planning-status">{{if eq .Class "preferred"}}✓{{else if eq .Class "redflag"}}⚠{{else}}△{{end}} {{.Status}}</div><div class="planning-detail">{{.Detail}}</div></div>{{end}}</div><div class="planning-disclaimer">Current-based planning hint only; wind, swell, weather, traffic, and local effects still matter.</div></div>{{end}}</section>{{end}}
 <section id="full-report-card" class="card full details-link-card"><div><h2>Need the details?</h2><p class="details-note">Open the complete text-style report, including diagnostic and supporting information.</p></div><a class="details-link" href="{{.FullDetailsURL}}">View full report details →</a></section></div>
 <div class="footer"><strong>Mauri's Wind & Current Conditions</strong><br>NOAA/NDBC observations + NOAA CO-OPS current predictions · Conditions-planning aid, not a navigation system<br>Version {{.AppVersion}}</div></main><script>
 (function(){
@@ -3390,6 +4054,7 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
   var replaceIDs = [
     "bottom-line-card",
     "current-summary-card",
+    "tide-context-card",
     "current-chart-card",
     "current-timeline-card",
     "full-report-card"
@@ -3511,7 +4176,6 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
         var newEl = doc.getElementById(id);
         if (oldEl && newEl) oldEl.replaceWith(newEl);
       });
-      initCurrentEventBrowser();
       if (pushHistory) history.pushState({}, "", target.pathname + target.search);
     } catch (err) {
       // Preserve the reliable server-rendered fallback if partial refresh fails.
@@ -3542,6 +4206,15 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
   });
 
   document.addEventListener("change", function(e) {
+    if (e.target.id !== "show-tide-range-overlay") return;
+    var card = e.target.closest("#current-chart-card");
+    if (!card) return;
+    card.querySelectorAll(".tide-range-layer").forEach(function(layer) {
+      layer.style.display = e.target.checked ? "" : "none";
+    });
+  });
+
+  document.addEventListener("change", function(e) {
     if (
       e.target.id !== "planning-start" &&
       e.target.id !== "planning-end" &&
@@ -3555,53 +4228,9 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
     loadCurrentURL(currentURLForPlanning(), true);
   });
 
-  function initCurrentEventBrowser() {
-    var browser = document.querySelector("[data-current-event-browser]");
-    var svg = document.querySelector("#current-chart-card .current-chart-svg");
-    if (!browser || !svg || browser.dataset.ready === "1") return;
-    var events = Array.prototype.slice.call(svg.querySelectorAll("circle.event-point[data-event-time]"));
-    if (!events.length) return;
-    browser.dataset.ready = "1";
-    var slider = browser.querySelector("[data-event-slider]");
-    var timeEl = browser.querySelector(".current-event-time");
-    var labelEl = browser.querySelector(".current-event-label");
-    var prev = browser.querySelector("[data-event-prev]");
-    var next = browser.querySelector("[data-event-next]");
-    slider.max = String(events.length - 1);
-    var cursor = document.createElementNS("http://www.w3.org/2000/svg", "line");
-    cursor.setAttribute("class", "event-cursor-line");
-    cursor.setAttribute("y1", "18");
-    cursor.setAttribute("y2", "288");
-    svg.appendChild(cursor);
-    function select(index) {
-      index = Math.max(0, Math.min(events.length - 1, index));
-      slider.value = String(index);
-      events.forEach(function(el){ el.classList.remove("is-selected"); });
-      var event = events[index];
-      event.classList.add("is-selected");
-      var x = event.getAttribute("cx");
-      cursor.setAttribute("x1", x);
-      cursor.setAttribute("x2", x);
-      timeEl.textContent = event.dataset.eventTime || "Current event";
-      labelEl.textContent = event.dataset.eventLabel || "";
-      prev.disabled = index === 0;
-      next.disabled = index === events.length - 1;
-    }
-    slider.addEventListener("input", function(){ select(Number(slider.value)); });
-    prev.addEventListener("click", function(){ select(Number(slider.value) - 1); });
-    next.addEventListener("click", function(){ select(Number(slider.value) + 1); });
-    events.forEach(function(event, index){
-      event.style.cursor = "pointer";
-      event.addEventListener("click", function(){ select(index); });
-    });
-    select(0);
-  }
-
   document.addEventListener("click", function(e) {
-    if (e.target.closest("[data-current-event-browser]")) initCurrentEventBrowser();
   });
 
-  initCurrentEventBrowser();
 
   window.addEventListener("popstate", function() {
     loadCurrentURL(new URL(window.location.href), false);
