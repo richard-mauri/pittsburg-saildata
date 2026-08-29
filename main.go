@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	appVersion                      = "1.1.0"
+	appVersion                      = "1.1.1"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -769,6 +769,28 @@ func runServer(
 		}
 	})
 
+	// Voice-oriented endpoint: return only the live Bottom Line sentences.
+	// Reuse the /report calculation path so voice output cannot drift from the
+	// browser/text report logic. All normal report query parameters, including
+	// station, lat/lon, current overrides, and planning hours, are preserved.
+	mux.HandleFunc("/voice", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		voiceRequest := r.Clone(r.Context())
+		voiceURL := *r.URL
+		q := cloneQuery(r.URL.Query())
+		q.Set("bottom_line", "1")
+		q.Del("format")
+		q.Del("compact")
+		voiceURL.Path = "/report"
+		voiceURL.RawQuery = q.Encode()
+		voiceRequest.URL = &voiceURL
+		mux.ServeHTTP(w, voiceRequest)
+	})
+
 	mux.HandleFunc("/report", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -892,6 +914,11 @@ func runServer(
 		report.DebugWindSelection = queryBool(r, "debug_wind")
 		report.RequestQuery = cloneQuery(r.URL.Query())
 
+		if queryBool(r, "bottom_line") {
+			writeVoiceBottomLine(w, report, loc)
+			return
+		}
+
 		compact := queryBool(r, "compact")
 		format := requestedFormat
 		if format == "html" {
@@ -1007,7 +1034,9 @@ type htmlWindCandidate struct {
 type htmlCurrentEvent struct{ Time, Label, Speed, Direction, Class string }
 
 type currentPlanningHint struct {
-	Date, Status, Class, Detail string
+	Date, Status, Class, Detail      string
+	WindowMaxEbbKT, WindowMaxFloodKT float64
+	BufferMaxEbbKT, BufferMaxFloodKT float64
 }
 
 type tidePredictionStation struct {
@@ -2053,6 +2082,10 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 		currentCause := planningPeriodCause(
 			d.CurrentPlanningHints,
 			currentCauseClass,
+			planningCautionEbb,
+			planningCautionFlood,
+			planningMaxEbb,
+			planningMaxFlood,
 		)
 
 		switch {
@@ -2119,15 +2152,24 @@ func dayStartForCurrentChart(report *CurrentReport, loc *time.Location) time.Tim
 	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, loc)
 }
 
-func planningPeriodCause(hints []currentPlanningHint, periodClass string) string {
+func planningPeriodCause(
+	hints []currentPlanningHint,
+	periodClass string,
+	cautionEbbKT float64,
+	cautionFloodKT float64,
+	maxEbbKT float64,
+	maxFloodKT float64,
+) string {
 	if periodClass == "" || periodClass == "preferred" {
 		return ""
 	}
 
-	hasEbb := false
-	hasFlood := false
 	hasBufferOnly := false
 	hasUnavailable := false
+	windowMaxEbb := 0.0
+	windowMaxFlood := 0.0
+	bufferMaxEbb := 0.0
+	bufferMaxFlood := 0.0
 
 	for _, hint := range hints {
 		if hint.Class != periodClass {
@@ -2135,40 +2177,100 @@ func planningPeriodCause(hints []currentPlanningHint, periodClass string) string
 		}
 
 		detail := strings.ToLower(hint.Detail)
-		hasEbb = hasEbb || strings.Contains(detail, "ebb ")
-		hasFlood = hasFlood || strings.Contains(detail, "flood ")
 		hasUnavailable = hasUnavailable ||
 			strings.Contains(detail, "not enough prediction samples")
-
 		if strings.Contains(detail, "within the ") &&
 			strings.Contains(detail, "-minute buffer") &&
 			!strings.Contains(detail, " during ") {
 			hasBufferOnly = true
 		}
+
+		windowMaxEbb = math.Max(windowMaxEbb, hint.WindowMaxEbbKT)
+		windowMaxFlood = math.Max(windowMaxFlood, hint.WindowMaxFloodKT)
+		bufferMaxEbb = math.Max(bufferMaxEbb, hint.BufferMaxEbbKT)
+		bufferMaxFlood = math.Max(bufferMaxFlood, hint.BufferMaxFloodKT)
 	}
 
 	switch periodClass {
 	case "redflag":
+		ebbTriggered := windowMaxEbb >= maxEbbKT
+		floodTriggered := windowMaxFlood >= maxFloodKT
 		switch {
-		case hasEbb && hasFlood:
-			return "Red flag due to ebb and flood currents exceeding red-flag thresholds."
-		case hasFlood:
-			return "Red flag due to flood current exceeding the red-flag threshold."
-		case hasEbb:
-			return "Red flag due to ebb current exceeding the red-flag threshold."
+		case ebbTriggered && floodTriggered:
+			return fmt.Sprintf(
+				"Red flag due to ebb current reaching %.1f kt and flood current reaching %.1f kt during the preferred sailing period; red-flag thresholds are %.1f kt ebb and %.1f kt flood.",
+				windowMaxEbb,
+				windowMaxFlood,
+				maxEbbKT,
+				maxFloodKT,
+			)
+		case floodTriggered:
+			return fmt.Sprintf(
+				"Red flag due to flood current reaching %.1f kt during the preferred sailing period; flood red-flag threshold is %.1f kt.",
+				windowMaxFlood,
+				maxFloodKT,
+			)
+		case ebbTriggered:
+			return fmt.Sprintf(
+				"Red flag due to ebb current reaching %.1f kt during the preferred sailing period; ebb red-flag threshold is %.1f kt.",
+				windowMaxEbb,
+				maxEbbKT,
+			)
 		}
+
 	case "caution":
-		switch {
-		case hasUnavailable:
+		if hasUnavailable {
 			return "Caution because current prediction samples are incomplete."
-		case hasBufferOnly && !hasEbb && !hasFlood:
-			return "Caution due to strong current within the planning buffer."
-		case hasEbb && hasFlood:
-			return "Caution due to ebb and flood currents exceeding caution thresholds."
-		case hasFlood:
-			return "Caution due to flood current exceeding the caution threshold."
-		case hasEbb:
-			return "Caution due to ebb current exceeding the caution threshold."
+		}
+
+		ebbTriggered := windowMaxEbb >= cautionEbbKT
+		floodTriggered := windowMaxFlood >= cautionFloodKT
+		switch {
+		case ebbTriggered && floodTriggered:
+			return fmt.Sprintf(
+				"Caution due to ebb current reaching %.1f kt and flood current reaching %.1f kt during the preferred sailing period; caution thresholds are %.1f kt ebb and %.1f kt flood.",
+				windowMaxEbb,
+				windowMaxFlood,
+				cautionEbbKT,
+				cautionFloodKT,
+			)
+		case floodTriggered:
+			return fmt.Sprintf(
+				"Caution due to flood current reaching %.1f kt during the preferred sailing period; flood caution threshold is %.1f kt.",
+				windowMaxFlood,
+				cautionFloodKT,
+			)
+		case ebbTriggered:
+			return fmt.Sprintf(
+				"Caution due to ebb current reaching %.1f kt during the preferred sailing period; ebb caution threshold is %.1f kt.",
+				windowMaxEbb,
+				cautionEbbKT,
+			)
+		}
+
+		bufferEbbTriggered := bufferMaxEbb >= cautionEbbKT
+		bufferFloodTriggered := bufferMaxFlood >= cautionFloodKT
+		switch {
+		case bufferEbbTriggered && bufferFloodTriggered:
+			return fmt.Sprintf(
+				"Caution due to ebb current reaching %.1f kt and flood current reaching %.1f kt within the planning buffer; caution thresholds are %.1f kt ebb and %.1f kt flood.",
+				bufferMaxEbb,
+				bufferMaxFlood,
+				cautionEbbKT,
+				cautionFloodKT,
+			)
+		case bufferFloodTriggered:
+			return fmt.Sprintf(
+				"Caution due to flood current reaching %.1f kt within the planning buffer; flood caution threshold is %.1f kt.",
+				bufferMaxFlood,
+				cautionFloodKT,
+			)
+		case bufferEbbTriggered:
+			return fmt.Sprintf(
+				"Caution due to ebb current reaching %.1f kt within the planning buffer; ebb caution threshold is %.1f kt.",
+				bufferMaxEbb,
+				cautionEbbKT,
+			)
 		case hasBufferOnly:
 			return "Caution due to strong current within the planning buffer."
 		}
@@ -2341,7 +2443,13 @@ func buildCurrentPlanningHints(
 			}
 		}
 
-		h := currentPlanningHint{Date: day.Format("Mon Jan 2")}
+		h := currentPlanningHint{
+			Date:             day.Format("Mon Jan 2"),
+			WindowMaxEbbKT:   windowMaxEbb,
+			WindowMaxFloodKT: windowMaxFlood,
+			BufferMaxEbbKT:   bufferMaxEbb,
+			BufferMaxFloodKT: bufferMaxFlood,
+		}
 		var redReasons, cautionReasons, bufferReasons []string
 		if windowMaxEbb >= maxEbbKT {
 			redReasons = append(redReasons, fmt.Sprintf("ebb %.1f kt at %s", windowMaxEbb, windowMaxEbbTime.Format("3:04 PM")))
@@ -3222,7 +3330,7 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 .location-map-wrap{position:relative}
 .map-station-list{margin-top:12px}.map-station-list-title{font-weight:850;color:var(--navy);margin:0 0 8px}.map-station-table-wrap{max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:14px;background:#fff}.map-station-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.86rem}.map-station-table th,.map-station-table td{padding:8px 10px;border-top:1px solid var(--line);text-align:left;vertical-align:top;background:#fff}.map-station-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc}.map-station-table th{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}.map-station-table tbody tr:first-child td{border-top:0}.map-station-table a{color:var(--blue);font-weight:800;text-decoration:none}.map-station-table a:hover{text-decoration:underline}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#2f855a}.map-dot.current{background:#7d55a6}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}.error-card{border-left:5px solid #b64735;background:#fff7f4}.error-card h2{color:#8f3025}.error-message{font-weight:650;line-height:1.5}.error-help{color:var(--muted);font-size:.9rem}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}.bottom.planning-preferred{background:#eff8f1;border-color:#b8d8c0}.bottom.planning-caution{background:#fff8e6;border-color:#e6c66a}.bottom.planning-redflag{background:#fff0ef;border-color:#e0a39d}.bottom .planning-period-status{margin:0 0 10px;font-weight:900;font-size:1.05rem}.bottom .planning-period-status.preferred{color:#176246}.bottom .planning-period-status.caution{color:#8a5a00}.bottom .planning-period-status.redflag{color:#9b3027}</style></head><body><main class="shell">
 <section class="hero"><div class="eyebrow">Mauri's Wind & Current Conditions</div><h1>{{.Title}}</h1><div class="sub">{{.ReportTime}} · {{.Station}}</div>{{if .Historical}}<span class="badge">Historical · {{.RequestedTime}}</span>{{end}}</section><div class="grid">
-<section id="bottom-line-card" class="card full bottom{{if .PlanningPeriodClass}} planning-{{.PlanningPeriodClass}}{{end}}"><h2>Bottom line</h2>{{if .PlanningPeriodStatus}}<div class="planning-period-status {{.PlanningPeriodClass}}">{{.PlanningPeriodStatus}}</div>{{if .PlanningPeriodCause}}<p><strong>{{.PlanningPeriodCause}}</strong></p>{{end}}{{if .PlanningPeriodDetail}}<p>{{.PlanningPeriodDetail}}</p>{{end}}{{end}}{{range .BottomLine}}<p>{{.}}</p>{{else}}<p>Summary unavailable.</p>{{end}}</section>
+<section id="bottom-line-card" class="card full bottom{{if .PlanningPeriodClass}} planning-{{.PlanningPeriodClass}}{{end}}"><h2>Bottom line</h2>{{if .PlanningPeriodCause}}<p><strong>{{.PlanningPeriodCause}}</strong></p>{{end}}{{if .PlanningPeriodDetail}}<p>{{.PlanningPeriodDetail}}</p>{{end}}{{range .BottomLine}}<p>{{.}}</p>{{else}}<p>Summary unavailable.</p>{{end}}</section>
 <section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map to choose a sailing location, then use Find stations near selected location. Panning only changes the view; to search somewhere else, click the map to move the selected ★ location first. Click a nearby wind station to pin its details and preview the associated currents station, then use the selection link in the map panel to commit the wind-station choice. Candidate stations and distances always refer to the selected location.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-navigation" aria-label="Map navigation"><button id="map-nav-selected" class="map-nav-button" type="button" title="Center map on selected location" {{if not .MapHasRequest}}disabled{{end}}>Center on selected location</button><button id="map-nav-wind" class="map-nav-button" type="button" title="Center map on selected wind station" {{if not .MapHasWind}}disabled{{end}}>Center on selected wind station</button><button id="map-nav-current" class="map-nav-button" type="button" title="Center map on selected currents station" {{if not .MapHasCurrent}}disabled{{end}}>Center on selected currents station</button></div><div class="map-state-controls" aria-label="Map selection controls"><label class="map-current-toggle"><input type="checkbox" id="map-show-currents" checked> Show selected currents station</label><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}" {{if not .MapHasRequest}}disabled{{end}}>Clear selected location</button></div><div class="map-controls"><span id="map-coordinate" class="map-coordinate">{{if .MapHasRequest}}Selected: {{printf "%.5f" .MapRequestLat}}, {{printf "%.5f" .MapRequestLon}}{{else}}Click the map to choose a location.{{end}}</span><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Select a location to find stations</span><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><div class="map-layer-note">Layer control: <strong>Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service. Chart layer is for planning/reference and does not replace official navigation products.</div><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
 {{if .WindError}}<section class="card full error-card"><h2>Wind station selection unavailable</h2><p class="error-message">{{.WindError}}</p><p class="error-help">The page is still available so you can inspect the request and nearby station diagnostics. Try nearby coordinates or an explicit NDBC station ID.</p></section>{{end}}
 <section class="card wind-card"><h2>Wind</h2>
@@ -4355,6 +4463,54 @@ func buildCompactReport(report *SailingReport) *CompactReport {
 	return result
 }
 
+func writeVoiceBottomLine(
+	w http.ResponseWriter,
+	report *SailingReport,
+	loc *time.Location,
+) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+
+	// Reuse the same HTML report-data path that drives the visible Bottom Line
+	// card. Voice emits the complete planning cause sentence, not a redundant
+	// standalone status line.
+	d := makeHTMLReportData(report, loc)
+	cause := strings.TrimSpace(d.PlanningPeriodCause)
+
+	if cause == "" && len(d.CurrentPlanningHints) > 0 {
+		worstClass := "preferred"
+		for _, hint := range d.CurrentPlanningHints {
+			switch hint.Class {
+			case "redflag":
+				worstClass = "redflag"
+			case "caution":
+				if worstClass != "redflag" {
+					worstClass = "caution"
+				}
+			}
+		}
+
+		cause = planningPeriodCause(
+			d.CurrentPlanningHints,
+			worstClass,
+			parsePlanningCautionEbb(report.RequestQuery),
+			parsePlanningCautionFlood(report.RequestQuery),
+			parsePlanningMaxEbb(report.RequestQuery),
+			parsePlanningMaxFlood(report.RequestQuery),
+		)
+	}
+
+	if cause != "" {
+		fmt.Fprintln(w, cause)
+	}
+	for _, line := range d.BottomLine {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			fmt.Fprintln(w, line)
+		}
+	}
+}
+
 func writeCompactTextReport(
 	w io.Writer,
 	report *SailingReport,
@@ -4800,6 +4956,10 @@ Examples:
   Compact text (BOTTOM LINE, WIND, CURRENT only):
     curl -sS \
       "http://localhost:8080/report?station=PSBC1&compact=1"
+
+  Voice-friendly Bottom Line only:
+    curl -sS \
+      "http://localhost:8080/voice?station=PSBC1"
 
   Compact JSON for Alexa / assistants:
     curl -sS \
