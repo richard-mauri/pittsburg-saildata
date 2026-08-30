@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"io/ioutil"
 	"math"
 	"net/http"
 	"net/url"
@@ -17,7 +18,7 @@ import (
 )
 
 const (
-	appVersion                      = "1.1.1"
+	appVersion                      = "1.2.0"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -596,6 +597,122 @@ func writeWindSelectionText(
 	)
 }
 
+func fetchNDBCAirTemperatureF(stationID string) (float64, bool) {
+	stationID = strings.ToUpper(strings.TrimSpace(stationID))
+	if !validStationID(stationID) {
+		return 0, false
+	}
+
+	req, err := http.NewRequest(
+		http.MethodGet,
+		"https://www.ndbc.noaa.gov/data/realtime2/"+stationID+".txt",
+		nil,
+	)
+	if err != nil {
+		return 0, false
+	}
+	req.Header.Set("User-Agent", "pittsburg-saildata/"+appVersion)
+
+	client := &http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, false
+	}
+
+	body, err := ioutil.ReadAll(io.LimitReader(resp.Body, 512<<10))
+	if err != nil {
+		return 0, false
+	}
+
+	airTempColumn := -1
+	for _, rawLine := range strings.Split(string(body), "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+
+		if strings.HasPrefix(line, "#") {
+			header := strings.Fields(strings.TrimPrefix(line, "#"))
+			for i, field := range header {
+				if strings.EqualFold(field, "ATMP") {
+					airTempColumn = i
+					break
+				}
+			}
+			continue
+		}
+
+		if airTempColumn < 0 {
+			continue
+		}
+
+		fields := strings.Fields(line)
+		if airTempColumn >= len(fields) {
+			continue
+		}
+
+		value := strings.TrimSpace(fields[airTempColumn])
+		if value == "" || strings.EqualFold(value, "MM") {
+			continue
+		}
+
+		var airTempC float64
+		if _, err := fmt.Sscanf(value, "%f", &airTempC); err != nil {
+			continue
+		}
+		if airTempC < -90 || airTempC > 70 {
+			continue
+		}
+
+		return airTempC*9/5 + 32, true
+	}
+
+	return 0, false
+}
+
+func latestNearbyStationWind(stationID string) (string, string) {
+	observations, err := getWindStation(stationID)
+	if err != nil || len(observations) == 0 {
+		return "", ""
+	}
+
+	report := buildCurrentWindReport(stationID, observations, time.UTC)
+	if report == nil || report.Latest == nil {
+		return "", ""
+	}
+
+	latest := report.Latest
+	wind := ""
+	switch {
+	case latest.Direction != "" && latest.GustKT > 0:
+		wind = fmt.Sprintf(
+			"%s %.0f kt G%.0f",
+			latest.Direction,
+			latest.WindKT,
+			latest.GustKT,
+		)
+	case latest.Direction != "":
+		wind = fmt.Sprintf("%s %.0f kt", latest.Direction, latest.WindKT)
+	case latest.GustKT > 0:
+		wind = fmt.Sprintf("%.0f kt G%.0f", latest.WindKT, latest.GustKT)
+	default:
+		wind = fmt.Sprintf("%.0f kt", latest.WindKT)
+	}
+
+	age := time.Since(latest.Time.UTC())
+	if age < 0 {
+		age = 0
+	}
+	ageMinutes := int(age.Round(time.Minute) / time.Minute)
+
+	return wind, fmt.Sprintf("%d min", ageMinutes)
+}
+
 func runServer(
 	port string,
 	defaultStation string,
@@ -706,6 +823,8 @@ func runServer(
 			Station         string  `json:"station"`
 			Name            string  `json:"name"`
 			Distance        string  `json:"distance"`
+			Wind            string  `json:"wind,omitempty"`
+			ObservationAge  string  `json:"observation_age,omitempty"`
 			Lat             float64 `json:"lat"`
 			Lon             float64 `json:"lon"`
 			URL             string  `json:"url"`
@@ -742,6 +861,7 @@ func runServer(
 				Lon:      c.Station.Lon,
 				URL:      "/report?" + linkQ.Encode(),
 			}
+			item.Wind, item.ObservationAge = latestNearbyStationWind(item.Station)
 			currentPreview, currentPreviewErr := previewCurrentStationForPoint(c.Station.Lat, c.Station.Lon)
 			switch {
 			case currentPreviewErr != nil:
@@ -1012,6 +1132,8 @@ type htmlWindCandidate struct {
 	Station         string
 	Name            string
 	Distance        string
+	Wind            string
+	ObservationAge  string
 	Lat             float64
 	Lon             float64
 	Met             string
@@ -1059,63 +1181,63 @@ var tideStationCache struct {
 }
 
 type htmlReportData struct {
-	AppVersion                                               string
-	Title, Station, ReportTime                               string
-	Historical                                               bool
-	RequestedTime                                            string
-	WindDirection, WindSpeed, WindGust, WindObserved         string
-	WindSummary                                              string
-	WindSelection                                            string
-	WindDistanceWarning                                      string
-	WindCandidates                                           []htmlWindCandidate
-	DebugWind                                                bool
-	WindError                                                string
-	UseNearestURL                                            string
-	MapCenterLat, MapCenterLon                               float64
-	MapRequestLat, MapRequestLon                             float64
-	MapWindLat, MapWindLon                                   float64
-	MapCurrentLat, MapCurrentLon                             float64
-	MapHasRequest, MapHasWind, MapHasCurrent                 bool
-	MapWindStation, MapCurrentStation                        string
-	CurrentStation, CurrentMeta                              string
-	CurrentDistanceWarning                                   string
-	TideContextMoon                                          string
-	TideContextCycle                                         string
-	TideContextStation                                       string
-	TideContextStationMeta                                   string
-	TideContextRange                                         string
-	TideContextComparison                                    string
-	TideContextNote                                          string
-	TideRanges                                               []tideRangeDay
-	TideRangeOverlayAvailable                                bool
-	TideRangeLegendTypical                                   string
-	TideRangeLegendElevated                                  string
-	TideRangeLegendLarge                                     string
-	TideRangeLegendExceptional                               string
-	CurrentAvailabilityStatus                                string
-	CurrentAvailabilityDetail                                string
-	CurrentWindow, CurrentWindowMode                         string
-	CurrentDateLabel, CurrentDateISO                         string
-	CurrentDays                                              int
-	CurrentRangeLabel                                        string
-	FullDetailsURL                                           string
-	WindStationsURL                                          string
-	CurrentPrevURL, CurrentTodayURL, CurrentNextURL          string
-	CurrentIsToday                                           bool
-	CurrentOutlook                                           []string
-	CurrentEvents                                            []htmlCurrentEvent
-	CurrentPlanningHints                                     []currentPlanningHint
-	PlanningPeriodStatus                                     string
-	PlanningPeriodClass                                      string
-	PlanningPeriodCause                                      string
-	PlanningPeriodDetail                                     string
-	PlanningStart, PlanningEnd                               string
-	PlanningCautionEbb, PlanningCautionFlood                 string
-	PlanningMaxEbb, PlanningMaxFlood, PlanningBuffer         string
-	PlanningCurrentDistanceWarning, PlanningAutoCurrentLimit string
-	CurrentChart                                             template.HTML
-	BottomLine                                               []string
-	FullText                                                 string
+	AppVersion                                                    string
+	Title, Station, ReportTime                                    string
+	Historical                                                    bool
+	RequestedTime                                                 string
+	WindDirection, WindSpeed, WindGust, WindAirTemp, WindObserved string
+	WindSummary                                                   string
+	WindSelection                                                 string
+	WindDistanceWarning                                           string
+	WindCandidates                                                []htmlWindCandidate
+	DebugWind                                                     bool
+	WindError                                                     string
+	UseNearestURL                                                 string
+	MapCenterLat, MapCenterLon                                    float64
+	MapRequestLat, MapRequestLon                                  float64
+	MapWindLat, MapWindLon                                        float64
+	MapCurrentLat, MapCurrentLon                                  float64
+	MapHasRequest, MapHasWind, MapHasCurrent                      bool
+	MapWindStation, MapCurrentStation                             string
+	CurrentStation, CurrentMeta                                   string
+	CurrentDistanceWarning                                        string
+	TideContextMoon                                               string
+	TideContextCycle                                              string
+	TideContextStation                                            string
+	TideContextStationMeta                                        string
+	TideContextRange                                              string
+	TideContextComparison                                         string
+	TideContextNote                                               string
+	TideRanges                                                    []tideRangeDay
+	TideRangeOverlayAvailable                                     bool
+	TideRangeLegendTypical                                        string
+	TideRangeLegendElevated                                       string
+	TideRangeLegendLarge                                          string
+	TideRangeLegendExceptional                                    string
+	CurrentAvailabilityStatus                                     string
+	CurrentAvailabilityDetail                                     string
+	CurrentWindow, CurrentWindowMode                              string
+	CurrentDateLabel, CurrentDateISO                              string
+	CurrentDays                                                   int
+	CurrentRangeLabel                                             string
+	FullDetailsURL                                                string
+	WindStationsURL                                               string
+	CurrentPrevURL, CurrentTodayURL, CurrentNextURL               string
+	CurrentIsToday                                                bool
+	CurrentOutlook                                                []string
+	CurrentEvents                                                 []htmlCurrentEvent
+	CurrentPlanningHints                                          []currentPlanningHint
+	PlanningPeriodStatus                                          string
+	PlanningPeriodClass                                           string
+	PlanningPeriodCause                                           string
+	PlanningPeriodDetail                                          string
+	PlanningStart, PlanningEnd                                    string
+	PlanningCautionEbb, PlanningCautionFlood                      string
+	PlanningMaxEbb, PlanningMaxFlood, PlanningBuffer              string
+	PlanningCurrentDistanceWarning, PlanningAutoCurrentLimit      string
+	CurrentChart                                                  template.HTML
+	BottomLine                                                    []string
+	FullText                                                      string
 }
 
 func writeHTMLReport(w http.ResponseWriter, report *SailingReport, loc *time.Location) {
@@ -1617,6 +1739,18 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 		d.WindGust = "—"
 		d.WindObserved = "Wind observation unavailable"
 	}
+
+	// NDBC realtime2 observations include ATMP (air temperature) at stations
+	// that report it. Keep temperature tied to the selected wind station. Do not
+	// mix a live temperature into a historical report, and avoid the extra NOAA
+	// request on the voice-only Bottom Line path.
+	if report.Historical == nil &&
+		strings.TrimSpace(report.RequestQuery.Get("bottom_line")) != "1" {
+		if airTempF, ok := fetchNDBCAirTemperatureF(report.Station); ok {
+			d.WindAirTemp = fmt.Sprintf("%.0f°F", airTempF)
+		}
+	}
+
 	// Generate the same wind summary used by the text report when wind
 	// data are available. Error pages use the explicit WindError instead.
 	if d.WindError == "" {
@@ -1761,6 +1895,7 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 				IsAuto:     isAuto,
 				IsSelected: isSelected,
 			}
+			item.Wind, item.ObservationAge = latestNearbyStationWind(item.Station)
 			currentPreview, currentPreviewErr := previewCurrentStationForPoint(candidate.Lat, candidate.Lon)
 			switch {
 			case currentPreviewErr != nil:
@@ -3328,22 +3463,23 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 
 
 .location-map-wrap{position:relative}
+.map-coordinate-entry{display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-top:10px}.map-coordinate-field{display:flex;flex-direction:column;gap:3px}.map-coordinate-field label{font-size:.72rem;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}.map-coordinate-field input{width:132px;padding:7px 9px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--ink);font:inherit}.map-coordinate-use{padding:8px 12px;border:1px solid #126b91;border-radius:9px;background:#126b91;color:#fff;font-weight:850;cursor:pointer}.map-coordinate-use:hover{filter:brightness(.97)}.map-coordinate-error{font-size:.8rem;color:#9b3027;min-height:1.2em}
 .map-station-list{margin-top:12px}.map-station-list-title{font-weight:850;color:var(--navy);margin:0 0 8px}.map-station-table-wrap{max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:14px;background:#fff}.map-station-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.86rem}.map-station-table th,.map-station-table td{padding:8px 10px;border-top:1px solid var(--line);text-align:left;vertical-align:top;background:#fff}.map-station-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc}.map-station-table th{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}.map-station-table tbody tr:first-child td{border-top:0}.map-station-table a{color:var(--blue);font-weight:800;text-decoration:none}.map-station-table a:hover{text-decoration:underline}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#2f855a}.map-dot.current{background:#7d55a6}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}.error-card{border-left:5px solid #b64735;background:#fff7f4}.error-card h2{color:#8f3025}.error-message{font-weight:650;line-height:1.5}.error-help{color:var(--muted);font-size:.9rem}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}.bottom.planning-preferred{background:#eff8f1;border-color:#b8d8c0}.bottom.planning-caution{background:#fff8e6;border-color:#e6c66a}.bottom.planning-redflag{background:#fff0ef;border-color:#e0a39d}.bottom .planning-period-status{margin:0 0 10px;font-weight:900;font-size:1.05rem}.bottom .planning-period-status.preferred{color:#176246}.bottom .planning-period-status.caution{color:#8a5a00}.bottom .planning-period-status.redflag{color:#9b3027}</style></head><body><main class="shell">
 <section class="hero"><div class="eyebrow">Mauri's Wind & Current Conditions</div><h1>{{.Title}}</h1><div class="sub">{{.ReportTime}} · {{.Station}}</div>{{if .Historical}}<span class="badge">Historical · {{.RequestedTime}}</span>{{end}}</section><div class="grid">
 <section id="bottom-line-card" class="card full bottom{{if .PlanningPeriodClass}} planning-{{.PlanningPeriodClass}}{{end}}"><h2>Bottom line</h2>{{if .PlanningPeriodCause}}<p><strong>{{.PlanningPeriodCause}}</strong></p>{{end}}{{if .PlanningPeriodDetail}}<p>{{.PlanningPeriodDetail}}</p>{{end}}{{range .BottomLine}}<p>{{.}}</p>{{else}}<p>Summary unavailable.</p>{{end}}</section>
-<section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map to choose a sailing location, then use Find stations near selected location. Panning only changes the view; to search somewhere else, click the map to move the selected ★ location first. Click a nearby wind station to pin its details and preview the associated currents station, then use the selection link in the map panel to commit the wind-station choice. Candidate stations and distances always refer to the selected location.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-navigation" aria-label="Map navigation"><button id="map-nav-selected" class="map-nav-button" type="button" title="Center map on selected location" {{if not .MapHasRequest}}disabled{{end}}>Center on selected location</button><button id="map-nav-wind" class="map-nav-button" type="button" title="Center map on selected wind station" {{if not .MapHasWind}}disabled{{end}}>Center on selected wind station</button><button id="map-nav-current" class="map-nav-button" type="button" title="Center map on selected currents station" {{if not .MapHasCurrent}}disabled{{end}}>Center on selected currents station</button></div><div class="map-state-controls" aria-label="Map selection controls"><label class="map-current-toggle"><input type="checkbox" id="map-show-currents" checked> Show selected currents station</label><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}" {{if not .MapHasRequest}}disabled{{end}}>Clear selected location</button></div><div class="map-controls"><span id="map-coordinate" class="map-coordinate">{{if .MapHasRequest}}Selected: {{printf "%.5f" .MapRequestLat}}, {{printf "%.5f" .MapRequestLon}}{{else}}Click the map to choose a location.{{end}}</span><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Select a location to find stations</span><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><div class="map-layer-note">Layer control: <strong>Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service. Chart layer is for planning/reference and does not replace official navigation products.</div><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
+<section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map to choose a sailing location, then use Find stations near selected location. Panning only changes the view; to search somewhere else, click the map to move the selected ★ location first. Click a nearby wind station to pin its details and preview the associated currents station, then use the selection link in the map panel to commit the wind-station choice. Candidate stations and distances always refer to the selected location.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-navigation" aria-label="Map navigation"><button id="map-nav-selected" class="map-nav-button" type="button" title="Center map on selected location" {{if not .MapHasRequest}}disabled{{end}}>Center on selected location</button><button id="map-nav-wind" class="map-nav-button" type="button" title="Center map on selected wind station" {{if not .MapHasWind}}disabled{{end}}>Center on selected wind station</button><button id="map-nav-current" class="map-nav-button" type="button" title="Center map on selected currents station" {{if not .MapHasCurrent}}disabled{{end}}>Center on selected currents station</button></div><div class="map-state-controls" aria-label="Map selection controls"><label class="map-current-toggle"><input type="checkbox" id="map-show-currents" checked> Show selected currents station</label><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}" {{if not .MapHasRequest}}disabled{{end}}>Clear selected location</button></div><div class="map-coordinate-entry" aria-label="Enter exact location"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="number" step="any" min="-90" max="90" inputmode="decimal" placeholder="38.03542" {{if .MapHasRequest}}value="{{printf "%.5f" .MapRequestLat}}"{{end}}></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="number" step="any" min="-180" max="180" inputmode="decimal" placeholder="-121.88631" {{if .MapHasRequest}}value="{{printf "%.5f" .MapRequestLon}}"{{end}}></div><button id="map-use-coordinate" class="map-coordinate-use" type="button">Use location</button><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div class="map-controls"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Select a location to find stations</span><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><div class="map-layer-note">Layer control: <strong>Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service. Chart layer is for planning/reference and does not replace official navigation products.</div><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
 {{if .WindError}}<section class="card full error-card"><h2>Wind station selection unavailable</h2><p class="error-message">{{.WindError}}</p><p class="error-help">The page is still available so you can inspect the request and nearby station diagnostics. Try nearby coordinates or an explicit NDBC station ID.</p></section>{{end}}
 <section class="card wind-card"><h2>Wind</h2>
 <div class="metrics">
 <div class="metric"><div class="label">Direction</div><div class="value">{{if .WindDirection}}{{.WindDirection}}{{else}}—{{end}}</div></div>
 <div class="metric"><div class="label">Wind</div><div class="value">{{if .WindSpeed}}{{.WindSpeed}}{{else}}—{{end}}</div></div>
 <div class="metric"><div class="label">Gust</div><div class="value">{{if .WindGust}}{{.WindGust}}{{else}}—{{end}}</div></div>
+<div class="metric"><div class="label">Air temp</div><div class="value">{{if .WindAirTemp}}{{.WindAirTemp}}{{else}}—{{end}}</div></div>
 </div>
 <div class="meta"><strong>Observed:</strong> {{if .WindObserved}}{{.WindObserved}}{{else}}unavailable{{end}}</div>
 {{if .WindSelection}}<div class="meta"><strong>Wind station:</strong> {{.WindSelection}}</div>{{end}}
 {{if .WindDistanceWarning}}<div class="wind-distance-warning"><strong>Wind station distance warning:</strong> {{.WindDistanceWarning}}</div>{{end}}
 {{if .WindSummary}}<div class="wind-summary">{{.WindSummary}}</div>{{end}}
-{{if .WindCandidates}}<div class="card-action-row"><a class="details-link" href="{{.WindStationsURL}}">Browse nearby wind stations →</a></div>{{end}}
 </section>
 
 <section id="current-summary-card" class="card"><h2>Current{{if .CurrentDateLabel}} — {{.CurrentDateLabel}}{{end}}</h2>{{if .CurrentStation}}<div class="station">{{.CurrentStation}}</div><div class="meta">{{.CurrentMeta}}</div>{{if .CurrentDistanceWarning}}<div class="wind-distance-warning"><strong>Currents station distance warning:</strong> {{.CurrentDistanceWarning}}</div>{{end}}{{if .CurrentWindowMode}}<p><strong>{{.CurrentWindowMode}}</strong><br>{{.CurrentWindow}}</p>{{else if .CurrentWindow}}<p><strong>Conditions window</strong><br>{{.CurrentWindow}}</p>{{end}}{{range .CurrentOutlook}}<p>{{.}}</p>{{end}}{{else}}<p>{{if eq .CurrentAvailabilityStatus "no-nearby-station"}}No nearby currents prediction station.{{else}}Current prediction unavailable.{{end}}{{if eq .CurrentAvailabilityStatus "no-nearby-station"}}{{if .CurrentAvailabilityDetail}}<div class="meta">{{.CurrentAvailabilityDetail}}</div>{{end}}{{end}}</p>{{end}}</section>
@@ -3622,9 +3758,10 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
       keyboard:false,
       interactive:true,
       bubblingMouseEvents:false,
-      zIndexOffset:500,
-      title:station + " " + name
+      zIndexOffset:500
     }).addTo(candidateLayer);
+
+    marker.bindTooltip(station + " " + name);
 
 
     var state = "";
@@ -3653,7 +3790,7 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
     {{printf "%.6f" .MapRequestLon}},
     "★",
     "request",
-    "Selected sailing location"
+    "Selected location"
   );
   {{end}}
 
@@ -3663,6 +3800,8 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
       station: {{.Station}},
       name: {{.Name}},
       distance: {{.Distance}},
+      wind: {{.Wind}},
+      observationAge: {{.ObservationAge}},
       lat: {{printf "%.6f" .Lat}},
       lon: {{printf "%.6f" .Lon}},
       url: {{.JSURL}},
@@ -3812,9 +3951,12 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 
   updateRecenterControls();
 
-  var coord = document.getElementById("map-coordinate");
   var findPoint = document.getElementById("map-find-point");
   var reset = document.getElementById("map-reset");
+  var latInput = document.getElementById("map-lat-input");
+  var lonInput = document.getElementById("map-lon-input");
+  var useCoordinate = document.getElementById("map-use-coordinate");
+  var coordinateError = document.getElementById("map-coordinate-error");
 
   var searchStatus = document.getElementById("map-search-status");
 
@@ -3856,6 +3998,48 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
   }
 
   renderSearchControls();
+
+  function selectSailingLocation(lat, lon, recenter) {
+    lat = Number(lat);
+    lon = Number(lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) ||
+        lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+      if (coordinateError) {
+        coordinateError.textContent =
+          "Enter a valid latitude (-90 to 90) and longitude (-180 to 180).";
+      }
+      return false;
+    }
+
+    if (coordinateError) coordinateError.textContent = "";
+
+    mapState.selectedLocation = {lat:lat, lon:lon};
+    var point = L.latLng(lat, lon);
+
+    if (selectedMarker) {
+      selectedMarker.setLatLng(point);
+    } else {
+      selectedMarker = symbolMarker(
+        lat,
+        lon,
+        "★",
+        "request",
+        "Selected location"
+      );
+    }
+
+    if (latInput) latInput.value = lat.toFixed(5);
+    if (lonInput) lonInput.value = lon.toFixed(5);
+
+    if (recenter) {
+      map.setView(point, Math.max(map.getZoom(), 11));
+    }
+
+    renderSearchControls();
+    updateRecenterControls();
+    renderWindMarkers();
+    return true;
+  }
 
   function escapeHTML(value) {
     return String(value)
@@ -3978,6 +4162,8 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
               station: normalizeWindStationID(c.station),
               name: String(c.name || c.station || ""),
               distance: String(c.distance || ""),
+              wind: String(c.wind || ""),
+              observationAge: String(c.observation_age || ""),
               lat: Number(c.lat),
               lon: Number(c.lon),
               url: String(c.url || ""),
@@ -4000,12 +4186,16 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
               var station = escapeHTML(c.station);
               var name = escapeHTML(c.name || c.station);
               var distance = escapeHTML(c.distance);
+              var wind = escapeHTML(c.wind || "—");
+              var observationAge = escapeHTML(c.observationAge || "—");
               var reportURL = escapeHTML(c.url || "#");
               return "<tr>" +
                 '<td><a class="map-station-report-link" href="' + reportURL +
                 '" data-base-href="' + reportURL + '">' + station + "</a></td>" +
                 '<td><a class="map-station-report-link" href="' + reportURL +
                 '" data-base-href="' + reportURL + '">' + name + "</a></td>" +
+                "<td>" + wind + "</td>" +
+                "<td>" + observationAge + "</td>" +
                 "<td>" + distance + "</td>" +
                 "</tr>";
             }).join("");
@@ -4014,7 +4204,7 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
               '<div class="map-station-list-title">Nearby Wind Stations</div>' +
               '<div class="map-station-table-wrap">' +
               '<table class="map-station-table">' +
-              '<thead><tr><th>Station</th><th>Name</th><th>From selected location</th></tr></thead>' +
+              '<thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead>' +
               "<tbody>" + rows + "</tbody></table></div>";
           } else {
             stationList.innerHTML =
@@ -4087,6 +4277,24 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
     findStationsWithoutReload();
   });
 
+  if (useCoordinate) {
+    useCoordinate.addEventListener("click", function() {
+      selectSailingLocation(
+        latInput ? latInput.value : "",
+        lonInput ? lonInput.value : "",
+        true
+      );
+    });
+  }
+
+  function useCoordinateOnEnter(e) {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    if (useCoordinate) useCoordinate.click();
+  }
+  if (latInput) latInput.addEventListener("keydown", useCoordinateOnEnter);
+  if (lonInput) lonInput.addEventListener("keydown", useCoordinateOnEnter);
+
   map.on("click", function(e) {
     var originalTarget =
       e && e.originalEvent && e.originalEvent.target
@@ -4099,29 +4307,7 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
       return;
     }
 
-    mapState.selectedLocation = {lat:e.latlng.lat, lon:e.latlng.lng};
-
-    if (selectedMarker) {
-      selectedMarker.setLatLng(e.latlng);
-    } else {
-      selectedMarker = symbolMarker(
-        e.latlng.lat,
-        e.latlng.lng,
-        "★",
-        "request",
-        "Selected sailing location"
-      );
-    }
-
-    coord.textContent =
-      "Selected: " +
-      mapState.selectedLocation.lat.toFixed(5) +
-      ", " +
-      mapState.selectedLocation.lon.toFixed(5);
-
-    renderSearchControls();
-    updateRecenterControls();
-    renderWindMarkers();
+    selectSailingLocation(e.latlng.lat, e.latlng.lng, false);
   });
 
   if (reset) {
@@ -4149,7 +4335,9 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
           '<div class="meta">Select a location to find nearby wind stations.</div>';
       }
 
-      coord.textContent = "Click the map to choose a location.";
+      if (latInput) latInput.value = "";
+      if (lonInput) lonInput.value = "";
+      if (coordinateError) coordinateError.textContent = "";
       renderSearchControls();
       updateRecenterControls();
       renderWindMarkers();
@@ -4683,12 +4871,19 @@ func writeBottomLineText(
 	}
 
 	latest := report.Latest
+	airTempText := ""
+	if report.Historical == nil {
+		if airTempF, ok := fetchNDBCAirTemperatureF(report.Station); ok {
+			airTempText = fmt.Sprintf(", air temperature %.0f°F", airTempF)
+		}
+	}
+
 	if latest.GustKT > 0 {
-		fmt.Fprintf(w, "Latest wind at %s: %s %.0f kt, gusting %.0f kt.\n",
-			latest.Time.Format("3:04 PM"), latest.Direction, latest.WindKT, latest.GustKT)
+		fmt.Fprintf(w, "Latest wind at %s: %s %.0f kt, gusting %.0f kt%s.\n",
+			latest.Time.Format("3:04 PM"), latest.Direction, latest.WindKT, latest.GustKT, airTempText)
 	} else {
-		fmt.Fprintf(w, "Latest wind at %s: %s %.0f kt.\n",
-			latest.Time.Format("3:04 PM"), latest.Direction, latest.WindKT)
+		fmt.Fprintf(w, "Latest wind at %s: %s %.0f kt%s.\n",
+			latest.Time.Format("3:04 PM"), latest.Direction, latest.WindKT, airTempText)
 	}
 
 	if report.Current == nil || report.Current.Error != "" {

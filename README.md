@@ -1,26 +1,36 @@
 # Delta Sailing Data
 
-A Go service that combines NOAA/NDBC wind observations with NOAA CO-OPS current predictions to produce sailing-oriented reports for the San Francisco Bay and Delta.
+A Go service that combines NOAA/NDBC wind observations with NOAA CO-OPS current predictions to produce conditions-oriented reports for the San Francisco Bay and Delta.
 
 The project supports command-line use, plain-text and JSON reports, and a browser UI with an interactive Leaflet map. The default wind station is **PSBC1**.
 
 ## What it does
 
-The service answers two practical questions: what the wind is doing now, and what the current is expected to do during the sailing window.
+The service answers two practical questions: what the wind is doing now, and what the current is expected to do during the preferred planning window.
 
 Wind observations come from NOAA/NDBC. Current predictions come from NOAA CO-OPS. The service combines those sources into concise reports, nearby-station choices, tidal-current charts, tidal-range context, and planning-oriented summaries.
 
 ## Browser workflow
 
-The current map workflow is intentionally simple.
+The map workflow is intentionally explicit.
 
-Click the map to set the **★ Selected location**. Then use **Find stations near selected location** to retrieve nearby wind stations. Panning and zooming only change the view; they do not change the search location. To search somewhere else, click the map again to move the selected location and run Find again.
+Click the map to set the **★ Selected location**, or enter an exact latitude and longitude and choose **Use location**. This supports users who already have coordinates from a GPS, chartplotter, chart, or other navigation source.
 
-The map legend is intentionally not context-specific. It always defines **★ Selected location**, **▲ Selected wind station**, **△ Nearby wind station**, and **◆ Currents station**, even when one or more of those markers are not currently present on the map.
+Then use **Find stations near selected location** to retrieve nearby wind stations. Panning and zooming only change the view; they do not change the selected location. To search somewhere else, click the map again or enter different coordinates.
+
+The latitude/longitude entry fields are also the visible coordinate readout for the selected location; the older redundant `Selected: lat, lon` status line has been removed.
+
+The map legend is intentionally not context-specific. It always defines **★ Selected location**, **▲ Selected wind station**, **△ Nearby wind station**, and **◆ Selected currents station**, even when one or more markers are not currently present.
 
 Clicking a nearby wind-station candidate opens a fixed information panel. The candidate is not committed until **Use this wind station** is selected. When a suitable currents prediction station is available within the automatic-selection distance limit, the panel previews that station. If no suitable currents station exists within the limit, the panel explicitly reports that no nearby currents prediction station is available.
 
-The map includes recenter controls for the selected location, selected wind station, and currents station. These controls preserve the user's current zoom level. The **Nearby Wind Stations** table is constrained to a compact scrolling panel with a sticky header so the full candidate list remains available without consuming excessive vertical space.
+The map includes recenter controls for the selected location, selected wind station, and selected currents station. These controls preserve the user's current zoom level.
+
+The **Nearby Wind Stations** table is constrained to a compact scrolling panel with a sticky header. It now shows each candidate's latest available wind direction, sustained wind, gust, observation age, and distance from the selected location. The initial server-rendered list and the dynamic **Find Stations** refresh use the same wind-enrichment behavior so the displayed columns do not appear and disappear depending on how the list was loaded.
+
+Candidate map markers use the same Leaflet tooltip styling as the selected markers. The selected-location tooltip is simply **Selected location**.
+
+The former Wind-card **Browse nearby wind stations** link was removed. Station discovery and station selection are now centered on the map workflow rather than exposed through two competing entry points.
 
 ## Features
 
@@ -30,21 +40,49 @@ NOAA/NDBC real-time observations are used for wind data. The service supports th
 
 The service dynamically retrieves NDBC station metadata instead of maintaining a hard-coded list of wind stations.
 
+When the selected NDBC station reports `ATMP`, the browser Wind card also shows the latest air temperature converted to °F. The Bottom Line wind sentence includes that air temperature when available. If the selected station does not report air temperature, the application leaves that value unavailable rather than silently substituting a different weather station.
+
+Nearby-station rows show compact live wind information such as `NW 10 kt G13` plus the age of that station's latest observation.
+
 ### Currents
 
 NOAA CO-OPS current predictions provide flood, ebb, slack, current direction, prediction bin/depth, timelines, and current charts. The service automatically chooses a suitable current-prediction station and supports manual station/bin overrides. Automatic current-station selection is capped at **30 nautical miles** from the selected wind station; farther stations are treated as unavailable rather than presented as representative local current data. Explicit `current_station` overrides are not blocked by this automatic-selection limit.
 
-The HTML report also supports one-, three-, and seven-day current views and planning hints for a preferred sailing period. The current-speed chart uses a stable default scale of **±3.5 kt** so different dates can be compared visually; it expands only when displayed predictions exceed that range.
+The HTML report supports one-, three-, and seven-day current views and planning hints for a preferred planning period. The current-speed chart uses a stable default scale of **±3.5 kt** so different dates can be compared visually; it expands only when displayed predictions exceed that range.
 
-The current chart can also overlay each day's predicted high-to-low tidal range on a separate right-side axis. That axis uses a stable default **0–10 ft** scale and expands only when needed. Each day is shown as a thin vertical marker centered in its day bucket rather than as a wide bar that could imply duration. The marker color is classified relative to the surrounding lunar-cycle median: **Normal-cycle** is less than 15% above the median, **Elevated** is at least 15% above, **Large** is at least 30% above, and **Exceptional** is at least 45% above. The numeric tidal-range value uses a consistent text color so the classification color is carried by the marker rather than the number.
+The current chart can overlay each day's predicted high-to-low tidal range on a separate right-side axis. That axis uses a stable default **0–10 ft** scale and expands only when needed. Each day is shown as a thin vertical marker centered in its day bucket rather than as a wide bar that could imply duration. The marker color is classified relative to the surrounding lunar-cycle median: **Normal-cycle** is less than 15% above the median, **Elevated** is at least 15% above, **Large** is at least 30% above, and **Exceptional** is at least 45% above. The numeric tidal-range value uses a consistent text color so the classification color is carried by the marker rather than the number.
 
-Multi-day current views keep the ordinary flood/ebb/slack event dots on the graph but no longer include the separate Previous/Next event navigator, slider, selected-event cursor line, or selected-event red-dot state. The graph itself is the event reference. The actual **NOW** marker is shown only when the real current time falls within the displayed date range.
+Multi-day current views keep the ordinary flood/ebb/slack event dots on the graph but do not include a separate Previous/Next event navigator, slider, selected-event cursor line, or selected-event red-dot state. The graph itself is the event reference. The actual **NOW** marker is shown only when the real current time falls within the displayed date range.
+
+### Planning thresholds and Bottom Line
+
+Current-planning thresholds are independently configurable for ebb and flood. The current defaults are:
+
+- preferred below **2.0 kt**
+- caution from **2.0 kt** up to **3.0 kt**
+- red flag at **3.0 kt** and above
+
+The browser UI exposes independent caution and red-flag thresholds for ebb and flood. The query parameters `caution_ebb` and `caution_flood` control caution thresholds; `max_ebb` and `max_flood` retain their existing names and represent the red-flag thresholds.
+
+The planning classifier compares the one-decimal current value used by the planning UI with the configured threshold. For example, a predicted flood maximum of 1.96 kt is displayed and classified as 2.0 kt.
+
+The Bottom Line no longer repeats a standalone planning-status label followed by a second sentence beginning with the same status. Instead, the planning cause is expressed once as a complete sentence that includes the triggering current speed and the applicable threshold when available, for example:
+
+```text
+Caution due to flood current reaching 2.0 kt during the preferred planning period; flood caution threshold is 2.0 kt.
+```
+
+The Bottom Line then continues with the wind/current narrative. The wind sentence includes selected-station air temperature when NDBC supplies it.
+
+For multi-day reports, the overall planning period uses the worst status present: any red-flag day makes the period Red Flag; otherwise any caution day makes it Caution; otherwise it is Preferred.
 
 ### Service
 
-The application provides a command-line interface and HTTP service. Important endpoints are `/report`, `/wind-stations`, `/health`, and `/welcome`.
+The application provides a command-line interface and HTTP service. Important endpoints include `/report`, `/wind-stations`, `/health`, `/welcome`, and `/voice`.
 
 `/report?format=html` returns the interactive browser report. Plain text and JSON are also supported.
+
+`/voice` returns a compact plain-text Bottom Line intended for possible voice clients. It uses the same planning cause and Bottom Line generation as the browser report. ChatGPT Voice integration is currently considered experimental/deferred; the endpoint remains available without being a required part of the normal application workflow.
 
 ## Program structure
 
@@ -56,7 +94,9 @@ sailing-go/
 ├── wind.go
 ├── currents.go
 ├── go.mod
-└── README.md
+├── README.md
+└── assets/
+    └── hero.jpg
 ```
 
 `main.go` contains application orchestration, the REST server, report rendering, embedded HTML/JavaScript, map interaction, and combined report formatting.
@@ -123,6 +163,12 @@ Request JSON:
 curl -sS -H "Accept: application/json" "http://localhost:8080/report?station=PSBC1"
 ```
 
+Request the voice-oriented Bottom Line:
+
+```bash
+curl -sS "http://localhost:8080/voice?station=PSBC1"
+```
+
 Historical wind:
 
 ```bash
@@ -147,53 +193,23 @@ https://pittsburg-saildata.onrender.com
 
 A normal development cycle is to format, build, test locally, inspect `git diff`, commit, push to GitHub, and allow Render to deploy the new revision.
 
-## Recent map/UI recovery and simplification
+## Map/UI design notes
 
-The map UI went through a recovery and simplification pass after several state-management regressions. The goal of the current design is to keep the selected sailing location, committed stations, candidate stations, viewport, and UI status from accidentally acting as competing sources of truth.
+The map UI went through a recovery and simplification pass after several state-management regressions. The current design keeps the selected location, committed stations, candidate stations, viewport, and UI status from acting as competing sources of truth.
 
-The browser map now maintains authoritative client-side state for the selected location, selected wind-station ID, wind candidates, search activity, and currents-overlay preference. Candidate markers are rebuilt from the candidate state rather than incrementally accumulated.
+The browser map maintains authoritative client-side state for the selected location, selected wind-station ID, wind candidates, search activity, and currents-overlay preference. Candidate markers are rebuilt from candidate state rather than incrementally accumulated.
 
 Station IDs are normalized before comparison. Literal wrapping quotes are stripped, whitespace is trimmed, IDs are upper-cased, the committed wind station is excluded from the candidate set, and duplicate candidate IDs are suppressed. This prevents the selected **▲** wind station from also appearing as an outlined **△** candidate.
 
-The fixed wind-station information panel replaced clipped or unstable marker tooltips for candidate selection. Clicking a candidate previews information; **Use this wind station** performs the actual commit.
+The fixed wind-station information panel is used for candidate selection. Clicking a candidate previews information; **Use this wind station** performs the actual commit.
 
-The currents overlay is treated as user state rather than being inferred from whether a Leaflet marker happened to exist during initial page construction. The checkbox is no longer permanently disabled merely because a current marker was absent at initialization, and candidate-current preview can create the currents marker lazily when suitable current metadata is available.
+Automatic currents preview and committed-report selection share a **30 nmi** usefulness limit. A candidate whose nearest suitable NOAA current prediction station is farther away does not get a misleading ◆ preview marker.
 
-Automatic currents preview and committed-report selection now share a **30 nmi** usefulness limit. A candidate whose nearest suitable NOAA current prediction station is farther away does not get a misleading ◆ preview marker. The candidate information panel instead says that no nearby currents prediction station is available. When that wind station is committed, the Current card uses the distinct message **No nearby currents prediction station** rather than the generic **Current prediction unavailable**, which remains reserved for actual current prediction/data failures.
+The earlier viewport-centered **Search this area for wind stations** mode was removed. There is one station-discovery model: choose a **★ Selected location**, then use **Find stations near selected location**.
 
-Map initialization now distinguishes a missing `map_center_lat` or `map_center_lon` URL parameter from numeric zero. This matters because JavaScript's `Number(null)` evaluates to `0`; without the explicit missing-value check, an ordinary report URL could incorrectly initialize the Leaflet map near **0°, 0°** instead of near PSBC1 or the server-provided map center.
+Exact latitude/longitude entry and map clicking both feed the same selected-location state transition. This avoids maintaining separate coordinate-selection behaviors.
 
-The earlier **Search this area for wind stations** mode was removed. There is now one station-discovery action: choose a **★ Selected location**, then use **Find stations near selected location**. This removes the ambiguous distinction between viewport-center searches and selected-location searches. The `/wind-stations` request now searches around the selected `lat` and `lon`; `search_lat` and `search_lon` are no longer part of this UI workflow.
-
-The recenter controls for **★ Selected location**, **▲ Selected wind station**, and **◆ Currents station** preserve the user's zoom level. They change map center only, rather than forcing a minimum zoom such as 12.
-
-## Inherited recovery commit
-
-The current code also includes the functional recovery from commit:
-
-```text
-8ff7298 fix: correct double mapState dereference and reset button label in UI
-```
-
-That commit was created with aider using Claude Sonnet 4.6 after a damaged intermediate state was saved.
-
-The important functional repair corrected an erroneous client-side reference from `mapState.mapState.selectedWindStationID` to `mapState.selectedWindStationID`. That bug could break candidate rendering because the renderer was dereferencing a nonexistent nested `mapState`.
-
-The same recovery commit changed the reset control from the accidentally leaked implementation wording **Clear mapState.selectedLocation point** to the user-facing **Clear selected location point**.
-
-That commit also normalized a number of typographic apostrophes in embedded HTML text and fixed a JavaScript indentation issue. Those were cleanup changes rather than behavioral map fixes.
-
-The recorded history at that point was:
-
-```text
-8ff7298 fix: correct double mapState dereference and reset button label in UI
-fa53fef Save damaged ChatGPT state before recovery
-29149f0 Improve tidal-current planning and multi-day navigation
-c294e67 feat: add map search-area workflow for wind stations
-3ef9ac3 feat: add clickable wind station map markers and distance warnings
-```
-
-The search-area workflow from `c294e67` is part of the project's history, but the current UI deliberately removes that mode in favor of the simpler selected-location-plus-Find workflow.
+The recenter controls for **★ Selected location**, **▲ Selected wind station**, and **◆ Selected currents station** preserve the user's zoom level. They change map center only.
 
 ## Useful San Francisco Bay / Delta wind stations
 
@@ -201,48 +217,21 @@ Useful references include PSBC1 for Pittsburg/Suisun Bay, PCOC1 for Port Chicago
 
 These are reference stations, not a hard-coded application whitelist. The service discovers active stations dynamically.
 
-
 ## Maintainability note
 
 `main.go` is currently large and relatively monolithic. In addition to application startup and HTTP orchestration, it contains substantial embedded HTML, CSS, JavaScript, and Leaflet map behavior. That concentration makes UI state changes harder to reason about and increases the risk of regressions when otherwise small map changes touch several concerns at once.
 
-This is not currently a reason to refactor a working deployment. A future cleanup should be treated as a separate, deliberate project after the current behavior is stable. Recent UI work has deliberately removed low-value interaction state, including the multi-day event navigator, where the graph itself already communicates the needed information.
+This is not currently a reason to refactor a working deployment. A future cleanup should be treated as a separate, deliberate project after behavior is stable. Recent UI work has deliberately removed low-value interaction state and redundant entry points.
 
-The safest first step would be to separate the browser-facing assets from `main.go`: move the embedded templates, CSS, and Leaflet JavaScript into dedicated template/static files while preserving behavior. After that, HTTP/report orchestration could be moved into a `report.go` or `handlers.go`, leaving `main.go` primarily responsible for startup, configuration, and route registration.
+A useful cleanup target is the nearby-wind-station enrichment path. Initial HTML rendering and the `/wind-stations` endpoint now intentionally expose the same wind/direction/gust/age information; future refactoring should preserve that behavior while reducing duplicated candidate-assembly logic.
 
-The existing `wind.go` and `currents.go` split already provides a useful boundary for the data-source logic. Any future refactor should preserve those boundaries and prioritize behavior-preserving moves over simultaneous redesign.
+The safest larger refactor would be to separate browser-facing assets from `main.go`: move the embedded templates, CSS, and Leaflet JavaScript into dedicated template/static files while preserving behavior. After that, HTTP/report orchestration could move into a `report.go` or `handlers.go`, leaving `main.go` primarily responsible for startup, configuration, and route registration.
 
-## Development note
-
-The browser map is deliberately being kept simpler than earlier iterations. When adding future map features, prefer explicit state transitions and a single rendering path over event handlers that directly mutate unrelated Leaflet layers and DOM controls.
-
-A useful invariant is that the selected sailing location is the search anchor, the selected wind station is represented only by the committed **▲** marker, and nearby candidates are a rendering of the current candidate set rather than persistent incremental map objects.
-
-## Latest UI behavior
-
-The **Find** control remains visible even before a selected location exists. It is disabled until the user clicks the map, with wording that makes the required action explicit. The reset control is also always present and becomes enabled once a selected location exists.
-
-The former **Show Conditions** control was removed because it could appear to act on the current viewport while actually reusing the previously selected location. The current workflow is intentionally explicit: set the **★ Selected location**, find nearby wind stations, inspect a candidate, and commit it with **Use this wind station**.
-
-Recenter controls preserve the current zoom level. Panning never changes the selected sailing location, and the selected location remains the sole search anchor.
-
-The map legend is a fixed vocabulary rather than a reflection of current state. It always shows all four symbol meanings so an absent marker does not also remove its explanation.
-
-## Planning thresholds and Bottom Line
-
-Current-planning thresholds are independently configurable for ebb and flood. The current defaults are:
-
-- preferred below **2.0 kt**
-- caution from **2.0 kt** up to **3.0 kt**
-- red flag at **3.0 kt** and above
-
-The browser UI exposes independent caution and red-flag thresholds for ebb and flood. The query parameters `caution_ebb` and `caution_flood` control caution thresholds; `max_ebb` and `max_flood` retain their existing names and represent the red-flag thresholds.
-
-The **Bottom Line** card summarizes the entire displayed one-, three-, or seven-day planning period using the worst status present: any red-flag day makes the period Red Flag; otherwise any caution day makes it Caution; otherwise it is Preferred. The card also reports the count of preferred, caution, and red-flag days and uses a corresponding background treatment for quick scanning.
+The existing `wind.go` and `currents.go` split already provides a useful boundary for data-source logic. Any future refactor should preserve those boundaries and prioritize behavior-preserving moves over simultaneous redesign.
 
 ## Versioning and releases
 
-The public application version is maintained as a single static `appVersion` constant in `main.go`. Intermediate file regenerations do not change this value. Bump it only when preparing a committed release.
+The public application version is maintained as a single static `appVersion` constant in `main.go`. Intermediate regeneration filenames do not change the public version. Bump it only when preparing a committed release.
 
 The project uses a three-part version number with this convention:
 
@@ -250,22 +239,25 @@ The project uses a three-part version number with this convention:
 - **minor** — a new feature or significant bug fix
 - **micro** — small UI polish or a minor refinement
 
-The current release is **1.1.0**.
+The current release is **1.2.0**.
 
-The Render service can continue building and deploying from the `main` branch. A Git tag marks the exact commit that corresponds to a public release without changing the deployment workflow.
+Release 1.2.0 adds selected-station air temperature, richer and consistent nearby-station wind observations, direct latitude/longitude location entry, map/UI simplification, consistent marker tooltips, improved planning-cause wording, and the retained experimental `/voice` Bottom Line endpoint.
 
-For release `1.1.0`, after the final code and README changes are ready:
+The Render service can continue building and deploying from the `main` branch. A Git tag marks the exact commit corresponding to a public release without changing the deployment workflow.
+
+For release `1.2.0`, after the final code and README changes are ready:
 
 ```sh
 git status
+git diff
 git add main.go README.md
-git commit -m "Release v1.1.0: enhance current planning UI and tidal-range context"
+git commit -m "Release v1.2.0: improve location and nearby wind reporting"
 git push origin main
-git tag -a v1.1.0 -m "Release v1.1.0"
-git push origin v1.1.0
+git tag -a v1.2.0 -m "Release v1.2.0"
+git push origin v1.2.0
 git log --oneline --decorate -5
 ```
 
-The application displays `1.1.0`, while the corresponding Git tag uses the conventional `v1.1.0` form.
+The application displays `1.2.0`, while the corresponding Git tag uses the conventional `v1.2.0` form.
 
-For a later release, update only the static `appVersion` value in `main.go` during the final pre-commit regeneration, update this README if release notes or workflow documentation changed, commit and push `main`, then create and push the matching annotated tag.
+For a later release, update only the static `appVersion` value in `main.go` during the final pre-commit regeneration, update this README when release notes or workflow documentation change, commit and push `main`, then create and push the matching annotated tag.
