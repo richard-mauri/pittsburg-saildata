@@ -26,7 +26,7 @@ Clicking a nearby wind-station candidate opens a fixed information panel. The ca
 
 The map includes recenter controls for the selected location, selected wind station, and selected currents station. These controls preserve the user's current zoom level. **◎ My location** sets and centers the selected location but does not automatically change the committed wind station.
 
-The Leaflet base-layer selector offers **Street Map**, **Nautical Chart**, **Satellite**, and **Hybrid**. These are mutually exclusive background maps. NWS forecast-zone geometry and NOAA satellite smoke remain separate overlays, so either overlay can be shown on any basemap without changing selection or station state.
+The main map can be resized vertically by dragging the handle immediately below it; this changes only the viewport height, not any map or selection state. The Leaflet base-layer selector offers **Street Map**, **Nautical Chart**, **Satellite**, and **Hybrid**. These are mutually exclusive background maps. NWS forecast-zone geometry and NOAA satellite smoke remain separate overlays, so either overlay can be shown on any basemap without changing selection or station state.
 
 The **Nearby Wind Stations** table is constrained to a compact scrolling panel with a sticky header. It now shows each candidate's latest available wind direction, sustained wind, gust, observation age, and distance from the selected location. The initial server-rendered list and the dynamic **Find Stations** refresh use the same wind-enrichment behavior so the displayed columns do not appear and disappear depending on how the list was loaded.
 
@@ -297,6 +297,8 @@ The current release is **1.7.0**.
 The v87 refinement keeps release **1.6.0** and renames the generic **Map** basemap choice to **Street Map** for clearer distinction from Nautical Chart, Satellite, and Hybrid. This is a label-only UI change; internal `map_layer` behavior remains unchanged.
 
 The v86 refinement keeps release **1.6.0** and makes the NOAA HMS smoke styling basemap-aware. Street Map and Nautical Chart retain the subdued v83 smoke palette. Satellite and Hybrid use brighter yellow/amber/magenta smoke fills with stronger outlines so the smoke remains distinguishable over brown/green aerial imagery. Changing basemaps restyles any visible smoke layer in place and does not alter smoke data, selected location, stations, center, zoom, or NWS forecast-zone state.
+
+The v90 refinement keeps release **1.7.0** and makes the main Leaflet map vertically resizable. A drag handle directly below the map lets the user increase or decrease map height without changing center, zoom, selected location, wind/current stations, basemap, NWS forecast-zone state, or NOAA smoke state. Leaflet `invalidateSize()` is called during/after resizing so tiles and overlays redraw correctly. The handle also supports keyboard resizing with Up/Down arrows.
 
 The v89 refinement keeps release **1.7.0** and fixes the remaining Bottom Line/voice path so the **Latest wind** sentence follows the selected `wind_unit`. Current-speed sentences in the same Bottom Line remain in knots. Compact JSON Bottom Line strings also honor the requested display unit, while their existing numeric `wind_kt` and `gust_kt` fields remain knot-based. The shared afternoon wind-statistics text is also made unit-aware for consistency.
 
