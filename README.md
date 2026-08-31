@@ -50,6 +50,20 @@ The full-width browser Wind card includes a recent-observation history graph wit
 
 The same selected recent-observation set is carried into the full text report. For example, selecting 30 readings causes the text report's wind-detail section to show **LATEST 30 OBSERVATIONS**, keeping the browser graph/table and detailed report aligned.
 
+### Wind-speed display units
+
+The browser Wind card provides a **Wind speed** selector with **Knots** and **MPH** choices.
+
+The selection is carried by:
+
+`wind_unit=kts|mph`
+
+The default is `kts`. Wind observations stay internally represented in knots and MPH is calculated only for display using `1 kt = 1.15078 mph`.
+
+The selected display unit applies to the current/gust metrics, wind summaries, historical wind presentation, recent-reading graph/table, nearby-station wind observations, Full Report Details, and HTTP text/compact-text wind output. The browser-facing `/wind-readings` endpoint also returns its formatted wind/gust strings in the selected display unit.
+
+Tidal-current speeds remain in knots. Existing JSON report numeric fields such as `wind_kt`, `gust_kt`, and the established `latest_10` observation data remain knot-based and are not reinterpreted by `wind_unit`.
+
 ### NWS forecast and forecast-zone context
 
 For live browser reports, the service uses the **selected location's** latitude/longitude to query the National Weather Service `/points` API. The lookup identifies the NWS forecast zone containing that point. If no selected location exists on initial page load, the committed wind station coordinates may be used temporarily; once the user selects a location, that location becomes authoritative.
@@ -278,11 +292,15 @@ The project uses a three-part version number with this convention:
 - **minor** — a new feature or significant bug fix
 - **micro** — small UI polish or a minor refinement
 
-The current release is **1.6.0**.
+The current release is **1.7.0**.
 
 The v87 refinement keeps release **1.6.0** and renames the generic **Map** basemap choice to **Street Map** for clearer distinction from Nautical Chart, Satellite, and Hybrid. This is a label-only UI change; internal `map_layer` behavior remains unchanged.
 
 The v86 refinement keeps release **1.6.0** and makes the NOAA HMS smoke styling basemap-aware. Street Map and Nautical Chart retain the subdued v83 smoke palette. Satellite and Hybrid use brighter yellow/amber/magenta smoke fills with stronger outlines so the smoke remains distinguishable over brown/green aerial imagery. Changing basemaps restyles any visible smoke layer in place and does not alter smoke data, selected location, stations, center, zoom, or NWS forecast-zone state.
+
+The v89 refinement keeps release **1.7.0** and fixes the remaining Bottom Line/voice path so the **Latest wind** sentence follows the selected `wind_unit`. Current-speed sentences in the same Bottom Line remain in knots. Compact JSON Bottom Line strings also honor the requested display unit, while their existing numeric `wind_kt` and `gust_kt` fields remain knot-based. The shared afternoon wind-statistics text is also made unit-aware for consistency.
+
+Release 1.7.0 adds a global browser **Wind speed** selector with **Knots** and **MPH** choices. The selected unit is carried by `wind_unit=kts|mph` and applies to HTML wind metrics and summaries, recent-reading graph/table, nearby-station wind observations, historical wind presentation, Full Report Details, and HTTP text/compact-text wind reporting. Internal NDBC values remain in knots, tidal-current speeds remain in knots, and established JSON numeric fields remain knot-based for compatibility.
 
 Release 1.6.0 expands the Leaflet basemap selector to four mutually exclusive choices: **Street Map** (OpenStreetMap), **Nautical Chart** (NOAA ENC-based Chart Display Service), **Satellite** (Esri World Imagery), and **Hybrid** (Esri imagery with reference labels). Changing the basemap preserves map center, zoom, selected location, selected wind/current stations, NWS forecast-zone state, and NOAA smoke-overlay state. The selected basemap is preserved in generated map URLs through the `map_layer` query parameter.
 
@@ -296,19 +314,19 @@ Release 1.3.0 added the full-width recent-wind history graph, asynchronous 10/20
 
 The Render service can continue building and deploying from the `main` branch. A Git tag marks the exact commit corresponding to a public release without changing the deployment workflow.
 
-For release `1.6.0`, after the final code and README changes are ready:
+For release `1.7.0`, after the final code and README changes are ready:
 
 ```sh
 git status
 git diff
 git add main.go README.md
-git commit -m "Release v1.6.0: add satellite and hybrid basemaps"
+git commit -m "Release v1.7.0: add wind speed unit control"
 git push origin main
-git tag -a v1.6.0 -m "Release v1.6.0"
-git push origin v1.6.0
+git tag -a v1.7.0 -m "Release v1.7.0"
+git push origin v1.7.0
 git log --oneline --decorate -5
 ```
 
-The application displays `1.6.0`, while the corresponding Git tag uses the conventional `v1.6.0` form.
+The application displays `1.7.0`, while the corresponding Git tag uses the conventional `v1.7.0` form.
 
 For a later release, update only the static `appVersion` value in `main.go` during the final pre-commit regeneration, update this README when release notes or workflow documentation change, commit and push `main`, then create and push the matching annotated tag.

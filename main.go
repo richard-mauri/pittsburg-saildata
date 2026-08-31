@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,7 +22,7 @@ import (
 )
 
 const (
-	appVersion                      = "1.6.0"
+	appVersion                      = "1.7.0"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -345,6 +346,95 @@ func parseWindReadingCount(q url.Values) int {
 	default:
 		return defaultWindReadingCount
 	}
+}
+
+const knotsToMPH = 1.15078
+
+var windKTTokenRE = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)\s+kt\b`)
+
+func parseWindUnit(q url.Values) string {
+	if strings.EqualFold(strings.TrimSpace(q.Get("wind_unit")), "mph") {
+		return "mph"
+	}
+	return "kts"
+}
+
+func windUnitLabel(unit string) string {
+	if unit == "mph" {
+		return "mph"
+	}
+	return "kt"
+}
+
+func windSpeedForDisplay(speedKT float64, unit string) float64 {
+	if unit == "mph" {
+		return speedKT * knotsToMPH
+	}
+	return speedKT
+}
+
+func formatWindSpeed(speedKT float64, decimals int, unit string) string {
+	return fmt.Sprintf(
+		"%.*f %s",
+		decimals,
+		windSpeedForDisplay(speedKT, unit),
+		windUnitLabel(unit),
+	)
+}
+
+func convertWindTextUnits(text, unit string) string {
+	if unit != "mph" {
+		return text
+	}
+	return windKTTokenRE.ReplaceAllStringFunc(text, func(token string) string {
+		match := windKTTokenRE.FindStringSubmatch(token)
+		if len(match) != 2 {
+			return token
+		}
+		value, err := strconv.ParseFloat(match[1], 64)
+		if err != nil {
+			return token
+		}
+		decimals := 0
+		if strings.Contains(match[1], ".") {
+			decimals = 1
+		}
+		return fmt.Sprintf("%.*f mph", decimals, value*knotsToMPH)
+	})
+}
+
+func writeWindSummaryDisplay(
+	w io.Writer,
+	report *SailingReport,
+	loc *time.Location,
+	unit string,
+) {
+	var b strings.Builder
+	writeWindSummaryText(&b, report, loc)
+	io.WriteString(w, convertWindTextUnits(b.String(), unit))
+}
+
+func printWindObservationDisplay(
+	w io.Writer,
+	observation *WindObservation,
+	loc *time.Location,
+	reference time.Time,
+	unit string,
+) {
+	var b strings.Builder
+	printWindObservation(&b, observation, loc, reference)
+	io.WriteString(w, convertWindTextUnits(b.String(), unit))
+}
+
+func printWindStatsDisplay(
+	w io.Writer,
+	stats *WindStats,
+	loc *time.Location,
+	unit string,
+) {
+	var b strings.Builder
+	printWindStatsText(&b, stats, loc)
+	io.WriteString(w, convertWindTextUnits(b.String(), unit))
 }
 
 func cloneQuery(values url.Values) url.Values {
@@ -696,7 +786,7 @@ func fetchNDBCAirTemperatureF(stationID string) (float64, bool) {
 	return 0, false
 }
 
-func latestNearbyStationWind(stationID string) (string, string) {
+func latestNearbyStationWind(stationID, windUnit string) (string, string) {
 	observations, err := getWindStation(stationID)
 	if err != nil || len(observations) == 0 {
 		return "", ""
@@ -712,17 +802,18 @@ func latestNearbyStationWind(stationID string) (string, string) {
 	switch {
 	case latest.Direction != "" && latest.GustKT > 0:
 		wind = fmt.Sprintf(
-			"%s %.0f kt G%.0f",
+			"%s %.0f %s G%.0f",
 			latest.Direction,
-			latest.WindKT,
-			latest.GustKT,
+			windSpeedForDisplay(latest.WindKT, windUnit),
+			windUnitLabel(windUnit),
+			windSpeedForDisplay(latest.GustKT, windUnit),
 		)
 	case latest.Direction != "":
-		wind = fmt.Sprintf("%s %.0f kt", latest.Direction, latest.WindKT)
+		wind = fmt.Sprintf("%s %.0f %s", latest.Direction, windSpeedForDisplay(latest.WindKT, windUnit), windUnitLabel(windUnit))
 	case latest.GustKT > 0:
-		wind = fmt.Sprintf("%.0f kt G%.0f", latest.WindKT, latest.GustKT)
+		wind = fmt.Sprintf("%.0f %s G%.0f", windSpeedForDisplay(latest.WindKT, windUnit), windUnitLabel(windUnit), windSpeedForDisplay(latest.GustKT, windUnit))
 	default:
-		wind = fmt.Sprintf("%.0f kt", latest.WindKT)
+		wind = fmt.Sprintf("%.0f %s", windSpeedForDisplay(latest.WindKT, windUnit), windUnitLabel(windUnit))
 	}
 
 	age := time.Since(latest.Time.UTC())
@@ -800,6 +891,7 @@ func runServer(
 		}
 
 		count := parseWindReadingCount(r.URL.Query())
+		windUnit := parseWindUnit(r.URL.Query())
 		observations, err := getWindStation(stationID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
@@ -831,7 +923,7 @@ func runServer(
 		}
 
 		var summary strings.Builder
-		writeWindSummaryText(&summary, report, loc)
+		writeWindSummaryDisplay(&summary, report, loc, windUnit)
 		payload.Summary = strings.TrimSpace(summary.String())
 
 		for _, item := range report.Latest10 {
@@ -842,10 +934,10 @@ func runServer(
 			windText := "—"
 			gustText := "—"
 			if item.WindKT > 0 {
-				windText = fmt.Sprintf("%.1f kt", item.WindKT)
+				windText = formatWindSpeed(item.WindKT, 1, windUnit)
 			}
 			if item.GustKT > 0 {
-				gustText = fmt.Sprintf("%.1f kt", item.GustKT)
+				gustText = formatWindSpeed(item.GustKT, 1, windUnit)
 			}
 			age := report.ReportTime.Sub(item.Time)
 			if age < 0 {
@@ -1018,6 +1110,7 @@ func runServer(
 			CurrentLon      float64 `json:"current_lon,omitempty"`
 			CurrentNote     string  `json:"current_note,omitempty"`
 		}
+		windUnit := parseWindUnit(q)
 		items := make([]stationMapCandidate, 0, len(candidates))
 		for _, c := range candidates {
 			candidateID := strings.ToUpper(strings.Trim(
@@ -1044,7 +1137,7 @@ func runServer(
 				Lon:      c.Station.Lon,
 				URL:      "/report?" + linkQ.Encode(),
 			}
-			item.Wind, item.ObservationAge = latestNearbyStationWind(item.Station)
+			item.Wind, item.ObservationAge = latestNearbyStationWind(item.Station, windUnit)
 			currentPreview, currentPreviewErr := previewCurrentStationForPoint(c.Station.Lat, c.Station.Lon)
 			switch {
 			case currentPreviewErr != nil:
@@ -1391,6 +1484,7 @@ type htmlReportData struct {
 	WindSelection                                                 string
 	WindDistanceWarning                                           string
 	WindReadingCount                                              int
+	WindUnit                                                      string
 	WindReadings                                                  []htmlWindReading
 	WindCandidates                                                []htmlWindCandidate
 	DebugWind                                                     bool
@@ -2434,6 +2528,7 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 	}
 	d.DebugWind = report.DebugWindSelection
 	d.WindError = strings.TrimSpace(report.WindError)
+	d.WindUnit = parseWindUnit(report.RequestQuery)
 	detailsQuery := cloneQuery(report.RequestQuery)
 	detailsQuery.Set("format", "html")
 	detailsQuery.Set("details", "1")
@@ -2477,13 +2572,13 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 		}
 
 		if latest.WindKT > 0 {
-			d.WindSpeed = fmt.Sprintf("%.0f kt", latest.WindKT)
+			d.WindSpeed = formatWindSpeed(latest.WindKT, 0, d.WindUnit)
 		} else {
 			d.WindSpeed = "—"
 		}
 
 		if latest.GustKT > 0 {
-			d.WindGust = fmt.Sprintf("%.0f kt", latest.GustKT)
+			d.WindGust = formatWindSpeed(latest.GustKT, 0, d.WindUnit)
 		} else {
 			d.WindGust = "—"
 		}
@@ -2549,18 +2644,20 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 		var windText strings.Builder
 		if report.Historical != nil {
 			if report.Historical.Closest != nil {
-				printWindObservation(
+				printWindObservationDisplay(
 					&windText,
 					report.Historical.Closest,
 					loc,
 					report.Historical.Requested,
+					d.WindUnit,
 				)
 			}
 		} else {
-			writeWindSummaryText(
+			writeWindSummaryDisplay(
 				&windText,
 				report,
 				loc,
+				d.WindUnit,
 			)
 		}
 		d.WindSummary = strings.TrimSpace(windText.String())
@@ -2576,10 +2673,10 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 				direction = "—"
 			}
 			if reading.WindKT > 0 {
-				windText = fmt.Sprintf("%.1f kt", reading.WindKT)
+				windText = formatWindSpeed(reading.WindKT, 1, d.WindUnit)
 			}
 			if reading.GustKT > 0 {
-				gustText = fmt.Sprintf("%.1f kt", reading.GustKT)
+				gustText = formatWindSpeed(reading.GustKT, 1, d.WindUnit)
 			}
 			age := report.ReportTime.Sub(reading.Time)
 			if age < 0 {
@@ -2716,7 +2813,7 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 				IsAuto:     isAuto,
 				IsSelected: isSelected,
 			}
-			item.Wind, item.ObservationAge = latestNearbyStationWind(item.Station)
+			item.Wind, item.ObservationAge = latestNearbyStationWind(item.Station, d.WindUnit)
 			currentPreview, currentPreviewErr := previewCurrentStationForPoint(candidate.Lat, candidate.Lon)
 			switch {
 			case currentPreviewErr != nil:
@@ -3085,7 +3182,7 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 		)
 	} else {
 		var b strings.Builder
-		writeBottomLineText(&b, report)
+		writeBottomLineText(&b, report, d.WindUnit)
 		for _, line := range strings.Split(strings.TrimSpace(b.String()), "\n") {
 			line = strings.TrimSpace(line)
 			if line != "" && line != "BOTTOM LINE" && !strings.HasPrefix(line, "---") {
@@ -4209,7 +4306,7 @@ var sailingHTMLTemplate = template.Must(template.New("sailing").Parse(`<!doctype
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <style>:root{--navy:#082b45;--blue:#126b91;--sea:#0b8793;--ink:#153242;--muted:#607886;--paper:#f5fafc;--card:#fff;--line:#d8e7ed;--flood:#087f8c;--ebb:#365f91;--slack:#756d64;--shadow:0 12px 34px rgba(8,43,69,.10)}*{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#dff3f8,#f7fbfc 32rem);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Avenir Next",Avenir,Helvetica,Arial,sans-serif;line-height:1.45}.shell{max-width:880px;margin:auto;padding:28px 18px 64px}.hero{color:#fff;padding:34px 30px 30px;border-radius:24px;min-height:360px;display:flex;flex-direction:column;justify-content:flex-end;background:
 linear-gradient(180deg,rgba(4,24,38,.06) 12%,rgba(4,24,38,.24) 48%,rgba(4,24,38,.86) 100%),
-url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text-shadow:0 2px 12px rgba(0,0,0,.45)}.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-weight:800;font-size:.76rem;opacity:.8}.photo-tag{margin-top:14px;font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;opacity:.72}h1{font-size:clamp(1.8rem,6vw,3.2rem);line-height:1.05;margin:.4rem 0 .6rem;letter-spacing:-.035em}.sub{opacity:.82}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}.full{grid-column:1/-1}h2{font-size:.82rem;letter-spacing:.13em;text-transform:uppercase;color:var(--blue);margin:0 0 16px}.bottom{font-size:1.13rem}.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.wind-card .metric{min-width:0}.wind-card .value{white-space:nowrap}@media(max-width:640px){.wind-card .metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}.metric{background:var(--paper);border-radius:15px;padding:14px}.label{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700}.value{font-size:1.55rem;font-weight:800;color:var(--navy)}.meta{color:var(--muted);font-size:.88rem;margin-top:12px}.station{font-weight:800;font-size:1.1rem;color:var(--navy)}.wind-distance-warning{margin-top:10px;padding:10px 12px;border:1px solid #e7c978;border-radius:12px;background:#fff8df;color:#654d08;font-size:.9rem}.wind-distance-warning strong{color:#4e3a00}.wind-summary{white-space:pre-line;margin-top:14px;padding:13px 14px;background:#eef7fa;border-left:4px solid var(--sea);border-radius:10px;color:var(--ink);font-size:.92rem}.event{display:grid;grid-template-columns:88px 12px 1fr;gap:12px;align-items:center;min-height:58px}.time{font-weight:800;color:var(--navy)}.dot{width:12px;height:12px;border-radius:50%;background:var(--slack);box-shadow:0 0 0 5px #edf3f5}.flood .dot{background:var(--flood)}.ebb .dot{background:var(--ebb)}.eventbody{border-left:2px solid var(--line);padding:8px 0 8px 18px}.eventlabel{font-weight:800}.eventdata{color:var(--muted);font-size:.9rem}.badge{display:inline-block;border-radius:999px;padding:5px 10px;background:#e9f6fb;color:var(--blue);font-size:.75rem;font-weight:800;margin-top:12px}.footer{text-align:center;color:var(--muted);font-size:.78rem;margin-top:22px}.hero .yogiism{margin:18px 0 0;max-width:720px;color:#fff;font-style:italic;font-size:.96rem;line-height:1.4;opacity:.96}.full-report{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:.88rem;line-height:1.55;background:#071f31;color:#e7f4f8;border-radius:14px;padding:18px;overflow-x:auto}.wind-readings{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}.wind-readings-header{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:8px}.wind-readings-title{font-weight:850;color:var(--navy)}.wind-reading-control{display:flex;align-items:flex-end;gap:7px;flex-wrap:wrap}.wind-reading-control label{display:flex;flex-direction:column;gap:3px;color:var(--muted);font-size:.72rem;font-weight:850;text-transform:uppercase;letter-spacing:.04em}.wind-reading-control select{min-width:76px;padding:6px 28px 6px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;font:inherit}.wind-reading-chart{margin:4px 0 12px;border:1px solid var(--line);border-radius:10px;background:#fff;padding:8px}.wind-reading-chart svg{display:block;width:100%;height:auto;min-height:260px;max-height:320px}.wind-chart-grid{stroke:#dce6e9;stroke-width:1}.wind-chart-axis{stroke:#8aa0a8;stroke-width:1}.wind-chart-wind{fill:none;stroke:#126b91;stroke-width:2.5;stroke-linejoin:round;stroke-linecap:round}.wind-chart-gust{fill:none;stroke:#a95a24;stroke-width:2;stroke-linejoin:round;stroke-linecap:round;stroke-dasharray:5 4}.wind-chart-dot-wind{fill:#126b91}.wind-chart-dot-gust{fill:#a95a24}.wind-chart-label{fill:#60747c;font-size:11px;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.wind-chart-legend{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin:0 0 6px;color:var(--muted);font-size:.78rem;font-weight:750}.wind-chart-key{display:inline-flex;align-items:center;gap:6px}.wind-chart-key-line{display:inline-block;width:22px;border-top:3px solid #126b91}.wind-chart-key-line.gust{border-top-color:#a95a24;border-top-style:dashed}.wind-chart-empty{padding:34px 12px;text-align:center;color:var(--muted);font-size:.85rem}.wind-readings-wrap{max-height:250px;overflow:auto;border:1px solid var(--line);border-radius:10px}.wind-readings-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.84rem}.wind-readings-table th,.wind-readings-table td{padding:7px 9px;border-top:1px solid var(--line);text-align:left;white-space:nowrap}.wind-readings-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc;color:var(--muted);font-size:.7rem;text-transform:uppercase;letter-spacing:.05em}.wind-readings-table tbody tr:first-child td{border-top:0}.card-action-row{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}#current-summary-card,.wind-card{min-width:0}.timeline-scope-note{margin:.15rem 0 1rem;color:var(--muted);font-size:.88rem}.current-events-integrated{margin:14px 0 4px;padding:10px 0 0;border-top:1px solid var(--line)}.current-events-head{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:8px}.current-events-head strong{color:var(--navy);font-size:.92rem}.current-events-head span{color:var(--muted);font-size:.78rem}.current-key-times{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:28px;row-gap:2px}.current-key-time{display:grid;grid-template-columns:76px minmax(0,1fr);gap:10px;align-items:baseline;padding:5px 0;border-bottom:1px solid #edf2f3;font-size:.86rem}.current-key-time-time{font-weight:800;color:var(--navy);white-space:nowrap}.current-key-time-label{color:var(--ink)}.current-key-time-label strong{font-weight:800}.current-key-time-meta{color:var(--muted);margin-left:6px;white-space:nowrap}@media(max-width:640px){.current-key-times{grid-template-columns:1fr}.current-key-time{grid-template-columns:72px minmax(0,1fr)}}.details-link-card{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap}.details-link-card h2{margin-bottom:.2rem}.details-link{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;white-space:nowrap}.details-note{color:var(--muted);font-size:.88rem;margin:-4px 0 14px}.current-chart-header{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap}.current-window-inline{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin:2px 0 10px;color:var(--muted);font-size:.86rem}.current-window-inline strong{color:var(--navy);font-size:.86rem}.current-window-inline span{white-space:nowrap}.current-chart-header h2{margin-bottom:.15rem}.current-date-label{color:var(--muted);font-weight:750;font-size:.9rem}.current-range-toolbar{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin:8px 0 10px;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:var(--paper)}.current-range-toolbar .current-date-nav{display:inline-flex;align-items:center;min-height:44px;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:8px 12px;background:#fff;color:var(--blue);font-size:.86rem;font-weight:850}.current-range-toolbar .current-date-nav.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-control-label{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:.75rem;font-weight:850}.current-control-label .current-date-picker{min-height:44px;font-size:1rem}@media(max-width:640px){.current-range-toolbar{align-items:stretch}.current-control-label{flex:1 1 140px}.current-range-toolbar .current-date-nav{justify-content:center;flex:1 1 135px}}.current-date-controls{display:flex;gap:7px;flex-wrap:wrap;align-items:center}.current-date-picker{border:1px solid var(--line);border-radius:999px;padding:6px 10px;background:#fff;color:var(--navy);font:inherit;font-size:.82rem;font-weight:750;min-height:34px}.current-date-picker:focus{outline:2px solid var(--blue);outline-offset:2px}.current-refreshing{opacity:.55;transition:opacity .15s ease}.current-date-controls a{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:7px 11px;background:#fff;color:var(--blue);font-size:.82rem;font-weight:850}.current-date-controls a:hover{background:var(--paper)}.current-date-controls a.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-planning{margin:16px 0 12px;padding:14px 16px;border:1px solid var(--line);border-radius:16px;background:#fff}.current-planning-head{display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:10px}.current-planning-head strong{color:var(--navy);font-size:1rem}.current-planning-head span{color:var(--muted);font-size:.82rem}.planning-preferences{display:flex;flex-direction:column;gap:10px;margin:8px 0 12px}.planning-preferences-row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;width:100%}.planning-preferences label{display:flex;gap:5px;align-items:center;color:var(--muted);font-size:.78rem;font-weight:850}.planning-preferences input{min-height:40px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--navy);font:inherit;font-size:1rem;padding:6px 8px}.planning-preferences input[type="number"]{width:76px}.planning-preferences b{color:var(--muted);font-size:.82rem}@media(max-width:640px){.planning-preferences label{flex:1 1 130px;justify-content:space-between}.planning-preferences input[type="time"]{min-width:110px}}.planning-help{margin:2px 0 12px;padding:10px 12px;border-radius:10px;background:#f7f9fa;color:var(--ink);font-size:.82rem;line-height:1.45}.planning-help strong{color:var(--navy)}.current-planning-days{display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:8px}.planning-day{border:1px solid var(--line);border-radius:12px;padding:10px;min-width:0}.planning-day.preferred{background:#eef8f3}.planning-day.caution{background:#fff8df;border-color:#e7c978}.planning-day.redflag{background:#fff0ed;border-color:#dfa297}.planning-date{font-size:.78rem;font-weight:850;color:var(--navy)}.planning-status{font-size:.92rem;font-weight:900;margin-top:2px}.preferred .planning-status{color:#176246}.caution .planning-status{color:#775900}.redflag .planning-status{color:#9a3328}.planning-detail{font-size:.78rem;line-height:1.35;color:var(--ink);margin-top:5px}.planning-disclaimer{color:var(--muted);font-size:.75rem;margin-top:9px}@media(max-width:640px){.current-planning-days{grid-template-columns:1fr 1fr}.planning-detail{font-size:.8rem}}.current-chart-wrap .event-point,.current-chart-wrap .event-point:hover{cursor:default!important;pointer-events:none}.current-chart-wrap{margin-top:16px}.current-chart-svg{display:block;width:100%;height:auto;background:#f8fbfc;border:1px solid var(--line);border-radius:16px}.grid-line{stroke:#d9e4e8;stroke-width:1}.v-grid-line{stroke:#e6eef1;stroke-width:1}.day-grid-line{stroke:#b7cbd4;stroke-width:1.4}.zero-line{stroke:#17384a;stroke-width:2}.axis-label{fill:#657d89;font-size:11px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.y-label{text-anchor:end}.x-label{text-anchor:middle}.axis-title{fill:#657d89;font-size:11px;text-anchor:middle}.tide-y-label{text-anchor:start}.tide-range-bar{opacity:1;stroke-width:3;stroke-linecap:round;fill:none}.tide-range-bar.typical{stroke:#4a6473}.tide-range-bar.elevated{stroke:#d5ad28}.tide-range-bar.large{stroke:#d9791f}.tide-range-bar.exceptional{stroke:#c94a3f}.tide-range-value{font-size:11px;font-weight:900;text-anchor:middle;paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round;fill:#17384a}.tide-range-toggle{display:flex;align-items:center;gap:7px;color:var(--ink);font-size:.84rem;font-weight:800}.tide-range-toggle input{margin:0}.tide-range-legend{display:flex;gap:10px;flex-wrap:wrap;align-items:center;color:var(--muted);font-size:.76rem}.tide-range-key{display:inline-flex;align-items:center;gap:5px}.tide-range-swatch{width:11px;height:11px;border-radius:3px;display:inline-block}.tide-range-swatch.typical{background:#4a6473}.tide-range-swatch.elevated{background:#d5ad28}.tide-range-swatch.large{background:#d9791f}.tide-range-swatch.exceptional{background:#c94a3f}.night-window{fill:#aebdc4;opacity:.78}.sail-window{fill:#f8fbfc;opacity:.96}.preferred-window{fill:#f0d46d;opacity:.34}.flood-area{fill:#6d8fd0;opacity:.86}.ebb-area{fill:#0b9d83;opacity:.90}.current-line{fill:none;stroke:#214b62;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}.event-point{stroke:#fff;stroke-width:1.5}.event-point.flood{fill:#5478bd}.event-point.ebb{fill:#078a75}.event-point.slack{fill:#756d64}.event-time{fill:#17384a;font-size:9px;font-weight:800;text-anchor:middle;paint-order:stroke;stroke:#fff;stroke-width:2.5px;stroke-linejoin:round}.event-time.flood{fill:#294f91}.event-time.ebb{fill:#066c5d}.event-time.slack{fill:#514b46}.now-line{stroke:#c63a2b;stroke-width:2.5}.now-label{fill:#c63a2b;font-size:11px;font-weight:800}.chart-explainer{color:var(--ink);font-size:.94rem;line-height:1.45;margin:2px 0 12px}.chart-note{color:var(--muted);font-size:.82rem;margin-top:9px}.candidate-table{width:100%;border-collapse:collapse;font-size:.86rem}.candidate-table th,.candidate-table td{padding:10px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}.candidate-table th{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}.candidate-table td.num,.candidate-table th.num{text-align:right;white-space:nowrap}.candidate-good td.status{font-weight:800}.candidate-bad{opacity:.82}.candidate-selected{background:rgba(20,120,100,.08)}.candidate-selected td:first-child{font-weight:800}.candidate-note{color:var(--muted);font-size:.82rem;margin:0 0 12px}.candidate-scroll{overflow-x:auto}.candidate-link{color:var(--blue);text-decoration:none;font-weight:800}.candidate-link:hover{text-decoration:underline}.candidate-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:0 0 12px}.nearest-link{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:7px 12px;color:var(--blue);font-weight:800;text-decoration:none;background:#fff}.nearest-link:hover{background:var(--paper)}.map-card{overflow:hidden}.map-intro{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px}.map-help{color:var(--muted);font-size:.9rem;max-width:600px}.map-wrap{border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#dfecef}.location-map{height:390px;width:100%}.map-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px}.map-coordinate{font-variant-numeric:tabular-nums;color:var(--muted);font-size:.9rem}.map-go{display:inline-block;border:0;border-radius:999px;padding:10px 16px;background:var(--blue);color:#fff;font-weight:850;text-decoration:none;cursor:pointer}.map-go[aria-disabled="true"]{opacity:.45;pointer-events:none}.map-search-area{border:0;cursor:pointer}.map-search-area[aria-disabled="true"]{opacity:.55;pointer-events:none}.map-search-area[hidden]{display:none}.map-search-status{color:var(--muted);font-size:.82rem}.map-reset{border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:800;cursor:pointer}.map-reset:disabled{opacity:.45;cursor:default}.map-navigation{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}.map-state-controls{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:10px}.map-current-toggle{display:inline-flex;align-items:center;gap:7px;color:var(--ink);font-weight:750;font-size:.88rem}.map-current-toggle input{margin:0}.map-nav-button{border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;cursor:pointer}.map-nav-button:disabled{opacity:.45;cursor:default}.map-layer-note{margin-top:8px;color:var(--muted);font-size:.8rem;line-height:1.4}.map-smoke-legend{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:8px;color:var(--muted);font-size:.78rem}.map-smoke-legend[hidden]{display:none}.map-smoke-legend span{display:inline-flex;align-items:center;gap:5px}.smoke-swatch{display:inline-block;width:18px;height:10px;border:1px solid rgba(70,70,70,.5);border-radius:2px}.smoke-swatch.light{background:rgba(180,180,180,.05)}.smoke-swatch.medium{background:rgba(210,145,55,.08)}.smoke-swatch.heavy{background:rgba(155,65,55,.12)}.map-smoke-note{font-style:italic}.map-symbol{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;margin-right:4px;font-size:27px;font-weight:950;line-height:1;vertical-align:-6px;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff,0 2px 3px rgba(0,0,0,.35)}
+url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text-shadow:0 2px 12px rgba(0,0,0,.45)}.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-weight:800;font-size:.76rem;opacity:.8}.photo-tag{margin-top:14px;font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;opacity:.72}h1{font-size:clamp(1.8rem,6vw,3.2rem);line-height:1.05;margin:.4rem 0 .6rem;letter-spacing:-.035em}.sub{opacity:.82}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}.full{grid-column:1/-1}h2{font-size:.82rem;letter-spacing:.13em;text-transform:uppercase;color:var(--blue);margin:0 0 16px}.bottom{font-size:1.13rem}.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.wind-card .metric{min-width:0}.wind-card .value{white-space:nowrap}@media(max-width:640px){.wind-card .metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}.metric{background:var(--paper);border-radius:15px;padding:14px}.label{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700}.value{font-size:1.55rem;font-weight:800;color:var(--navy)}.meta{color:var(--muted);font-size:.88rem;margin-top:12px}.station{font-weight:800;font-size:1.1rem;color:var(--navy)}.wind-distance-warning{margin-top:10px;padding:10px 12px;border:1px solid #e7c978;border-radius:12px;background:#fff8df;color:#654d08;font-size:.9rem}.wind-distance-warning strong{color:#4e3a00}.wind-summary{white-space:pre-line;margin-top:14px;padding:13px 14px;background:#eef7fa;border-left:4px solid var(--sea);border-radius:10px;color:var(--ink);font-size:.92rem}.event{display:grid;grid-template-columns:88px 12px 1fr;gap:12px;align-items:center;min-height:58px}.time{font-weight:800;color:var(--navy)}.dot{width:12px;height:12px;border-radius:50%;background:var(--slack);box-shadow:0 0 0 5px #edf3f5}.flood .dot{background:var(--flood)}.ebb .dot{background:var(--ebb)}.eventbody{border-left:2px solid var(--line);padding:8px 0 8px 18px}.eventlabel{font-weight:800}.eventdata{color:var(--muted);font-size:.9rem}.badge{display:inline-block;border-radius:999px;padding:5px 10px;background:#e9f6fb;color:var(--blue);font-size:.75rem;font-weight:800;margin-top:12px}.footer{text-align:center;color:var(--muted);font-size:.78rem;margin-top:22px}.hero .yogiism{margin:18px 0 0;max-width:720px;color:#fff;font-style:italic;font-size:.96rem;line-height:1.4;opacity:.96}.full-report{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:.88rem;line-height:1.55;background:#071f31;color:#e7f4f8;border-radius:14px;padding:18px;overflow-x:auto}.wind-readings{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}.wind-readings-header{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:8px}.wind-readings-title{font-weight:850;color:var(--navy)}.wind-reading-control{display:flex;align-items:flex-end;gap:7px;flex-wrap:wrap}.wind-reading-control label{display:flex;flex-direction:column;gap:3px;color:var(--muted);font-size:.72rem;font-weight:850;text-transform:uppercase;letter-spacing:.04em}.wind-reading-control select{min-width:76px;padding:6px 28px 6px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;font:inherit}.wind-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap}.wind-card-head h2{margin-bottom:16px}.wind-unit-control{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:.72rem;font-weight:850;text-transform:uppercase;letter-spacing:.04em}.wind-unit-control select{padding:6px 28px 6px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;font:inherit;color:var(--ink)}.wind-reading-chart{margin:4px 0 12px;border:1px solid var(--line);border-radius:10px;background:#fff;padding:8px}.wind-reading-chart svg{display:block;width:100%;height:auto;min-height:260px;max-height:320px}.wind-chart-grid{stroke:#dce6e9;stroke-width:1}.wind-chart-axis{stroke:#8aa0a8;stroke-width:1}.wind-chart-wind{fill:none;stroke:#126b91;stroke-width:2.5;stroke-linejoin:round;stroke-linecap:round}.wind-chart-gust{fill:none;stroke:#a95a24;stroke-width:2;stroke-linejoin:round;stroke-linecap:round;stroke-dasharray:5 4}.wind-chart-dot-wind{fill:#126b91}.wind-chart-dot-gust{fill:#a95a24}.wind-chart-label{fill:#60747c;font-size:11px;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.wind-chart-legend{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin:0 0 6px;color:var(--muted);font-size:.78rem;font-weight:750}.wind-chart-key{display:inline-flex;align-items:center;gap:6px}.wind-chart-key-line{display:inline-block;width:22px;border-top:3px solid #126b91}.wind-chart-key-line.gust{border-top-color:#a95a24;border-top-style:dashed}.wind-chart-empty{padding:34px 12px;text-align:center;color:var(--muted);font-size:.85rem}.wind-readings-wrap{max-height:250px;overflow:auto;border:1px solid var(--line);border-radius:10px}.wind-readings-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.84rem}.wind-readings-table th,.wind-readings-table td{padding:7px 9px;border-top:1px solid var(--line);text-align:left;white-space:nowrap}.wind-readings-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc;color:var(--muted);font-size:.7rem;text-transform:uppercase;letter-spacing:.05em}.wind-readings-table tbody tr:first-child td{border-top:0}.card-action-row{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}#current-summary-card,.wind-card{min-width:0}.timeline-scope-note{margin:.15rem 0 1rem;color:var(--muted);font-size:.88rem}.current-events-integrated{margin:14px 0 4px;padding:10px 0 0;border-top:1px solid var(--line)}.current-events-head{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:8px}.current-events-head strong{color:var(--navy);font-size:.92rem}.current-events-head span{color:var(--muted);font-size:.78rem}.current-key-times{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:28px;row-gap:2px}.current-key-time{display:grid;grid-template-columns:76px minmax(0,1fr);gap:10px;align-items:baseline;padding:5px 0;border-bottom:1px solid #edf2f3;font-size:.86rem}.current-key-time-time{font-weight:800;color:var(--navy);white-space:nowrap}.current-key-time-label{color:var(--ink)}.current-key-time-label strong{font-weight:800}.current-key-time-meta{color:var(--muted);margin-left:6px;white-space:nowrap}@media(max-width:640px){.current-key-times{grid-template-columns:1fr}.current-key-time{grid-template-columns:72px minmax(0,1fr)}}.details-link-card{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap}.details-link-card h2{margin-bottom:.2rem}.details-link{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;white-space:nowrap}.details-note{color:var(--muted);font-size:.88rem;margin:-4px 0 14px}.current-chart-header{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap}.current-window-inline{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin:2px 0 10px;color:var(--muted);font-size:.86rem}.current-window-inline strong{color:var(--navy);font-size:.86rem}.current-window-inline span{white-space:nowrap}.current-chart-header h2{margin-bottom:.15rem}.current-date-label{color:var(--muted);font-weight:750;font-size:.9rem}.current-range-toolbar{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin:8px 0 10px;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:var(--paper)}.current-range-toolbar .current-date-nav{display:inline-flex;align-items:center;min-height:44px;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:8px 12px;background:#fff;color:var(--blue);font-size:.86rem;font-weight:850}.current-range-toolbar .current-date-nav.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-control-label{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:.75rem;font-weight:850}.current-control-label .current-date-picker{min-height:44px;font-size:1rem}@media(max-width:640px){.current-range-toolbar{align-items:stretch}.current-control-label{flex:1 1 140px}.current-range-toolbar .current-date-nav{justify-content:center;flex:1 1 135px}}.current-date-controls{display:flex;gap:7px;flex-wrap:wrap;align-items:center}.current-date-picker{border:1px solid var(--line);border-radius:999px;padding:6px 10px;background:#fff;color:var(--navy);font:inherit;font-size:.82rem;font-weight:750;min-height:34px}.current-date-picker:focus{outline:2px solid var(--blue);outline-offset:2px}.current-refreshing{opacity:.55;transition:opacity .15s ease}.current-date-controls a{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:7px 11px;background:#fff;color:var(--blue);font-size:.82rem;font-weight:850}.current-date-controls a:hover{background:var(--paper)}.current-date-controls a.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-planning{margin:16px 0 12px;padding:14px 16px;border:1px solid var(--line);border-radius:16px;background:#fff}.current-planning-head{display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:10px}.current-planning-head strong{color:var(--navy);font-size:1rem}.current-planning-head span{color:var(--muted);font-size:.82rem}.planning-preferences{display:flex;flex-direction:column;gap:10px;margin:8px 0 12px}.planning-preferences-row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;width:100%}.planning-preferences label{display:flex;gap:5px;align-items:center;color:var(--muted);font-size:.78rem;font-weight:850}.planning-preferences input{min-height:40px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--navy);font:inherit;font-size:1rem;padding:6px 8px}.planning-preferences input[type="number"]{width:76px}.planning-preferences b{color:var(--muted);font-size:.82rem}@media(max-width:640px){.planning-preferences label{flex:1 1 130px;justify-content:space-between}.planning-preferences input[type="time"]{min-width:110px}}.planning-help{margin:2px 0 12px;padding:10px 12px;border-radius:10px;background:#f7f9fa;color:var(--ink);font-size:.82rem;line-height:1.45}.planning-help strong{color:var(--navy)}.current-planning-days{display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:8px}.planning-day{border:1px solid var(--line);border-radius:12px;padding:10px;min-width:0}.planning-day.preferred{background:#eef8f3}.planning-day.caution{background:#fff8df;border-color:#e7c978}.planning-day.redflag{background:#fff0ed;border-color:#dfa297}.planning-date{font-size:.78rem;font-weight:850;color:var(--navy)}.planning-status{font-size:.92rem;font-weight:900;margin-top:2px}.preferred .planning-status{color:#176246}.caution .planning-status{color:#775900}.redflag .planning-status{color:#9a3328}.planning-detail{font-size:.78rem;line-height:1.35;color:var(--ink);margin-top:5px}.planning-disclaimer{color:var(--muted);font-size:.75rem;margin-top:9px}@media(max-width:640px){.current-planning-days{grid-template-columns:1fr 1fr}.planning-detail{font-size:.8rem}}.current-chart-wrap .event-point,.current-chart-wrap .event-point:hover{cursor:default!important;pointer-events:none}.current-chart-wrap{margin-top:16px}.current-chart-svg{display:block;width:100%;height:auto;background:#f8fbfc;border:1px solid var(--line);border-radius:16px}.grid-line{stroke:#d9e4e8;stroke-width:1}.v-grid-line{stroke:#e6eef1;stroke-width:1}.day-grid-line{stroke:#b7cbd4;stroke-width:1.4}.zero-line{stroke:#17384a;stroke-width:2}.axis-label{fill:#657d89;font-size:11px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.y-label{text-anchor:end}.x-label{text-anchor:middle}.axis-title{fill:#657d89;font-size:11px;text-anchor:middle}.tide-y-label{text-anchor:start}.tide-range-bar{opacity:1;stroke-width:3;stroke-linecap:round;fill:none}.tide-range-bar.typical{stroke:#4a6473}.tide-range-bar.elevated{stroke:#d5ad28}.tide-range-bar.large{stroke:#d9791f}.tide-range-bar.exceptional{stroke:#c94a3f}.tide-range-value{font-size:11px;font-weight:900;text-anchor:middle;paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round;fill:#17384a}.tide-range-toggle{display:flex;align-items:center;gap:7px;color:var(--ink);font-size:.84rem;font-weight:800}.tide-range-toggle input{margin:0}.tide-range-legend{display:flex;gap:10px;flex-wrap:wrap;align-items:center;color:var(--muted);font-size:.76rem}.tide-range-key{display:inline-flex;align-items:center;gap:5px}.tide-range-swatch{width:11px;height:11px;border-radius:3px;display:inline-block}.tide-range-swatch.typical{background:#4a6473}.tide-range-swatch.elevated{background:#d5ad28}.tide-range-swatch.large{background:#d9791f}.tide-range-swatch.exceptional{background:#c94a3f}.night-window{fill:#aebdc4;opacity:.78}.sail-window{fill:#f8fbfc;opacity:.96}.preferred-window{fill:#f0d46d;opacity:.34}.flood-area{fill:#6d8fd0;opacity:.86}.ebb-area{fill:#0b9d83;opacity:.90}.current-line{fill:none;stroke:#214b62;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}.event-point{stroke:#fff;stroke-width:1.5}.event-point.flood{fill:#5478bd}.event-point.ebb{fill:#078a75}.event-point.slack{fill:#756d64}.event-time{fill:#17384a;font-size:9px;font-weight:800;text-anchor:middle;paint-order:stroke;stroke:#fff;stroke-width:2.5px;stroke-linejoin:round}.event-time.flood{fill:#294f91}.event-time.ebb{fill:#066c5d}.event-time.slack{fill:#514b46}.now-line{stroke:#c63a2b;stroke-width:2.5}.now-label{fill:#c63a2b;font-size:11px;font-weight:800}.chart-explainer{color:var(--ink);font-size:.94rem;line-height:1.45;margin:2px 0 12px}.chart-note{color:var(--muted);font-size:.82rem;margin-top:9px}.candidate-table{width:100%;border-collapse:collapse;font-size:.86rem}.candidate-table th,.candidate-table td{padding:10px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}.candidate-table th{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}.candidate-table td.num,.candidate-table th.num{text-align:right;white-space:nowrap}.candidate-good td.status{font-weight:800}.candidate-bad{opacity:.82}.candidate-selected{background:rgba(20,120,100,.08)}.candidate-selected td:first-child{font-weight:800}.candidate-note{color:var(--muted);font-size:.82rem;margin:0 0 12px}.candidate-scroll{overflow-x:auto}.candidate-link{color:var(--blue);text-decoration:none;font-weight:800}.candidate-link:hover{text-decoration:underline}.candidate-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:0 0 12px}.nearest-link{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:7px 12px;color:var(--blue);font-weight:800;text-decoration:none;background:#fff}.nearest-link:hover{background:var(--paper)}.map-card{overflow:hidden}.map-intro{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px}.map-help{color:var(--muted);font-size:.9rem;max-width:600px}.map-wrap{border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#dfecef}.location-map{height:390px;width:100%}.map-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px}.map-coordinate{font-variant-numeric:tabular-nums;color:var(--muted);font-size:.9rem}.map-go{display:inline-block;border:0;border-radius:999px;padding:10px 16px;background:var(--blue);color:#fff;font-weight:850;text-decoration:none;cursor:pointer}.map-go[aria-disabled="true"]{opacity:.45;pointer-events:none}.map-search-area{border:0;cursor:pointer}.map-search-area[aria-disabled="true"]{opacity:.55;pointer-events:none}.map-search-area[hidden]{display:none}.map-search-status{color:var(--muted);font-size:.82rem}.map-reset{border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:800;cursor:pointer}.map-reset:disabled{opacity:.45;cursor:default}.map-navigation{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}.map-state-controls{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:10px}.map-current-toggle{display:inline-flex;align-items:center;gap:7px;color:var(--ink);font-weight:750;font-size:.88rem}.map-current-toggle input{margin:0}.map-nav-button{border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;cursor:pointer}.map-nav-button:disabled{opacity:.45;cursor:default}.map-layer-note{margin-top:8px;color:var(--muted);font-size:.8rem;line-height:1.4}.map-smoke-legend{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:8px;color:var(--muted);font-size:.78rem}.map-smoke-legend[hidden]{display:none}.map-smoke-legend span{display:inline-flex;align-items:center;gap:5px}.smoke-swatch{display:inline-block;width:18px;height:10px;border:1px solid rgba(70,70,70,.5);border-radius:2px}.smoke-swatch.light{background:rgba(180,180,180,.05)}.smoke-swatch.medium{background:rgba(210,145,55,.08)}.smoke-swatch.heavy{background:rgba(155,65,55,.12)}.map-smoke-note{font-style:italic}.map-symbol{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;margin-right:4px;font-size:27px;font-weight:950;line-height:1;vertical-align:-6px;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff,0 2px 3px rgba(0,0,0,.35)}
 .map-symbol.request{color:#126b91}.map-symbol.wind{color:#2f855a}.map-symbol.current{color:#7d55a6}.map-symbol.wind-candidate{color:#4f6978}
 .map-leaflet-symbol{background:transparent;border:0}
 .location-map,
@@ -4325,7 +4422,7 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 <section id="bottom-line-card" class="card full bottom{{if .PlanningPeriodClass}} planning-{{.PlanningPeriodClass}}{{end}}"><h2>Bottom line</h2>{{if .PlanningPeriodCause}}<p><strong>{{.PlanningPeriodCause}}</strong></p>{{end}}{{if .PlanningPeriodDetail}}<p>{{.PlanningPeriodDetail}}</p>{{end}}{{range .BottomLine}}<p>{{.}}</p>{{else}}<p>Summary unavailable.</p>{{end}}</section>
 <section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map, enter coordinates, or use My location to choose a sailing location, then use Find stations near selected location. Panning only changes the view; to search somewhere else, move the selected ★ location first. Click a nearby wind station to pin its details and preview the associated currents station, then use the selection link in the map panel to commit the wind-station choice. Candidate stations and distances always refer to the selected location.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-navigation" aria-label="Map navigation"><button id="map-geolocate" class="map-nav-button" type="button" title="Use your device location as the selected location">◎ My location</button><button id="map-nav-selected" class="map-nav-button" type="button" title="Center map on selected location" {{if not .MapHasRequest}}disabled{{end}}>Center on selected location</button><button id="map-nav-wind" class="map-nav-button" type="button" title="Center map on selected wind station" {{if not .MapHasWind}}disabled{{end}}>Center on selected wind station</button><button id="map-nav-current" class="map-nav-button" type="button" title="Center map on selected currents station" {{if not .MapHasCurrent}}disabled{{end}}>Center on selected currents station</button></div><div class="map-state-controls" aria-label="Map selection controls"><label class="map-current-toggle"><input type="checkbox" id="map-show-currents" checked> Show selected currents station</label><label id="map-marine-zone-control" class="map-current-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">Show NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-current-toggle"><input type="checkbox" id="map-show-smoke"> <span>Show satellite smoke (NOAA)</span></label><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}" {{if not .MapHasRequest}}disabled{{end}}>Clear selected location</button></div><div class="map-coordinate-entry" aria-label="Enter exact location"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="number" step="any" min="-90" max="90" inputmode="decimal" placeholder="38.03542" {{if .MapHasRequest}}value="{{printf "%.5f" .MapRequestLat}}"{{end}}></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="number" step="any" min="-180" max="180" inputmode="decimal" placeholder="-121.88631" {{if .MapHasRequest}}value="{{printf "%.5f" .MapRequestLon}}"{{end}}></div><button id="map-use-coordinate" class="map-coordinate-use" type="button">Use location</button><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div class="map-controls"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Select a location to find stations</span><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div class="map-layer-note">Base maps: <strong>Street Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service; <strong>Satellite</strong> uses Esri World Imagery; <strong>Hybrid</strong> combines Esri imagery with place/boundary labels. NWS forecast-zone and NOAA smoke layers remain independent overlays. The nautical chart layer is for planning/reference and does not replace official navigation products.</div><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
 {{if .WindError}}<section class="card full error-card"><h2>Wind station selection unavailable</h2><p class="error-message">{{.WindError}}</p><p class="error-help">The page is still available so you can inspect the request and nearby station diagnostics. Try nearby coordinates or an explicit NDBC station ID.</p></section>{{end}}
-<section class="card full wind-card"><h2>Wind</h2>
+<section class="card full wind-card"><div class="wind-card-head"><h2>Wind</h2><label class="wind-unit-control" for="wind-unit-select">Wind speed<select id="wind-unit-select"><option value="kts" {{if eq .WindUnit "kts"}}selected{{end}}>Knots</option><option value="mph" {{if eq .WindUnit "mph"}}selected{{end}}>MPH</option></select></label></div>
 <div class="metrics">
 <div class="metric"><div class="label">Direction</div><div class="value">{{if .WindDirection}}{{.WindDirection}}{{else}}—{{end}}</div></div>
 <div class="metric"><div class="label">Wind</div><div class="value">{{if .WindSpeed}}{{.WindSpeed}}{{else}}—{{end}}</div></div>
@@ -5706,7 +5803,18 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 })();
 
 (function(){
+  var unitSelect = document.getElementById("wind-unit-select");
+  if (!unitSelect) return;
+  unitSelect.addEventListener("change", function() {
+    var target = new URL(window.location.href);
+    target.searchParams.set("wind_unit", unitSelect.value === "mph" ? "mph" : "kts");
+    window.location.href = target.toString();
+  });
+})();
+
+(function(){
   var countSelect = document.getElementById("wind-reading-count");
+  var unitSelect = document.getElementById("wind-unit-select");
   var tableBody = document.getElementById("wind-readings-body");
   var chart = document.getElementById("wind-reading-chart");
   var status = document.getElementById("wind-reading-status");
@@ -5753,6 +5861,7 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
   function renderWindChart(readings) {
     if (!chart) return;
 
+    var chartUnit = unitSelect && unitSelect.value === "mph" ? "mph" : "kt";
     var points = (Array.isArray(readings) ? readings : []).map(function(item) {
       return {
         time: String(item.time || ""),
@@ -5833,13 +5942,13 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
       if (Number.isFinite(item.wind)) {
         dots += '<circle class="wind-chart-dot-wind" cx="' + xFor(index).toFixed(1) +
           '" cy="' + yFor(item.wind).toFixed(1) + '" r="2.7"><title>' +
-          escapeHTML(item.time + " — wind " + item.wind.toFixed(1) + " kt") +
+          escapeHTML(item.time + " — wind " + item.wind.toFixed(1) + " " + chartUnit) +
           '</title></circle>';
       }
       if (Number.isFinite(item.gust)) {
         dots += '<circle class="wind-chart-dot-gust" cx="' + xFor(index).toFixed(1) +
           '" cy="' + yFor(item.gust).toFixed(1) + '" r="2.4"><title>' +
-          escapeHTML(item.time + " — gust " + item.gust.toFixed(1) + " kt") +
+          escapeHTML(item.time + " — gust " + item.gust.toFixed(1) + " " + chartUnit) +
           '</title></circle>';
       }
     });
@@ -5852,7 +5961,7 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
       '" x2="' + left + '" y2="' + (height-bottom) + '"></line>' +
       '<line class="wind-chart-axis" x1="' + left + '" y1="' + (height-bottom) +
       '" x2="' + (width-right) + '" y2="' + (height-bottom) + '"></line>' +
-      '<text class="wind-chart-label" x="10" y="' + (top+8) + '">kt</text>' +
+      '<text class="wind-chart-label" x="10" y="' + (top+8) + '">' + chartUnit + '</text>' +
       '<path class="wind-chart-wind" d="' + pathFor("wind") + '"></path>' +
       '<path class="wind-chart-gust" d="' + pathFor("gust") + '"></path>' +
       dots + xLabels + '</svg>';
@@ -5884,6 +5993,10 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
     var target = new URL("/wind-readings", window.location.origin);
     target.searchParams.set("station", station);
     target.searchParams.set("wind_readings", count);
+    target.searchParams.set(
+      "wind_unit",
+      unitSelect && unitSelect.value === "mph" ? "mph" : "kts"
+    );
 
     fetch(target.toString(), {headers:{"Accept":"application/json"}})
       .then(function(response) {
@@ -6162,7 +6275,7 @@ func buildCompactReport(report *SailingReport) *CompactReport {
 	result := &CompactReport{
 		Station:    report.Station,
 		ReportTime: report.ReportTime,
-		BottomLine: bottomLineLines(report),
+		BottomLine: bottomLineLines(report, parseWindUnit(report.RequestQuery)),
 	}
 
 	if stationMeta, err := fetchNDBCStation(report.Station); err == nil {
@@ -6294,12 +6407,12 @@ func writeCompactTextReport(
 
 	fmt.Fprintln(w, "BOTTOM LINE")
 	fmt.Fprintln(w, "--------------------------------")
-	writeBottomLineText(w, report)
+	writeBottomLineText(w, report, parseWindUnit(report.RequestQuery))
 
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "WIND")
 	fmt.Fprintln(w, "--------------------------------")
-	writeWindSummaryText(w, report, loc)
+	writeWindSummaryDisplay(w, report, loc, parseWindUnit(report.RequestQuery))
 
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "CURRENT")
@@ -6333,9 +6446,9 @@ func writeCompactCurrentText(w io.Writer, report *CurrentReport) {
 	}
 }
 
-func bottomLineLines(report *SailingReport) []string {
+func bottomLineLines(report *SailingReport, windUnit string) []string {
 	var b strings.Builder
-	writeBottomLineText(&b, report)
+	writeBottomLineText(&b, report, windUnit)
 
 	raw := strings.Split(strings.TrimSpace(b.String()), "\n")
 	lines := make([]string, 0, len(raw))
@@ -6372,7 +6485,15 @@ func writeTextReport(
 	loc *time.Location,
 ) {
 	if report.Historical != nil {
-		writeHistoricalWindText(w, report, loc)
+		var historicalWind strings.Builder
+		writeHistoricalWindText(&historicalWind, report, loc)
+		io.WriteString(
+			w,
+			convertWindTextUnits(
+				historicalWind.String(),
+				parseWindUnit(report.RequestQuery),
+			),
+		)
 
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "CURRENT")
@@ -6411,12 +6532,12 @@ func writeTextReport(
 
 	fmt.Fprintln(w, "BOTTOM LINE")
 	fmt.Fprintln(w, "--------------------------------")
-	writeBottomLineText(w, report)
+	writeBottomLineText(w, report, parseWindUnit(report.RequestQuery))
 
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "WIND")
 	fmt.Fprintln(w, "--------------------------------")
-	writeWindSummaryText(w, report, loc)
+	writeWindSummaryDisplay(w, report, loc, parseWindUnit(report.RequestQuery))
 
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "CURRENT")
@@ -6437,7 +6558,7 @@ func writeSharedWindDetailsText(
 	if report.Latest != nil {
 		fmt.Fprintf(w, "LATEST %s OBSERVATION\n", report.Station)
 		fmt.Fprintln(w, "--------------------------------")
-		printWindObservation(w, report.Latest, loc, report.ReportTime)
+		printWindObservationDisplay(w, report.Latest, loc, report.ReportTime, parseWindUnit(report.RequestQuery))
 	}
 
 	if len(report.Latest10) > 0 {
@@ -6449,11 +6570,19 @@ func writeSharedWindDetailsText(
 		for _, o := range report.Latest10 {
 			fmt.Fprintf(
 				w,
-				"%-9s %-3s %5.1f kt  %5.1f kt\n",
+				"%-9s %-3s %8s  %8s\n",
 				o.Time.In(loc).Format("3:04 PM"),
 				o.Direction,
-				o.WindKT,
-				o.GustKT,
+				formatWindSpeed(
+					o.WindKT,
+					1,
+					parseWindUnit(report.RequestQuery),
+				),
+				formatWindSpeed(
+					o.GustKT,
+					1,
+					parseWindUnit(report.RequestQuery),
+				),
 			)
 		}
 	}
@@ -6461,7 +6590,7 @@ func writeSharedWindDetailsText(
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "LAST 12 HOURS")
 	fmt.Fprintln(w, "--------------------------------")
-	printWindStatsText(w, report.Last12Hours, loc)
+	printWindStatsDisplay(w, report.Last12Hours, loc, parseWindUnit(report.RequestQuery))
 
 	for _, period := range report.Afternoon {
 		fmt.Fprintln(w)
@@ -6472,13 +6601,14 @@ func writeSharedWindDetailsText(
 			period.Date.In(loc).Format("Mon Jan 2, 2006"),
 		)
 		fmt.Fprintln(w, "--------------------------------")
-		printWindStatsText(w, period.Stats, loc)
+		printWindStatsDisplay(w, period.Stats, loc, parseWindUnit(report.RequestQuery))
 	}
 }
 
 func writeBottomLineText(
 	w io.Writer,
 	report *SailingReport,
+	windUnit string,
 ) {
 	if report == nil || report.Latest == nil {
 		fmt.Fprintln(w, "Insufficient data for a combined conditions summary.")
@@ -6494,11 +6624,24 @@ func writeBottomLineText(
 	}
 
 	if latest.GustKT > 0 {
-		fmt.Fprintf(w, "Latest wind at %s: %s %.0f kt, gusting %.0f kt%s.\n",
-			latest.Time.Format("3:04 PM"), latest.Direction, latest.WindKT, latest.GustKT, airTempText)
+		fmt.Fprintf(
+			w,
+			"Latest wind at %s: %s %s, gusting %s%s.\n",
+			latest.Time.Format("3:04 PM"),
+			latest.Direction,
+			formatWindSpeed(latest.WindKT, 0, windUnit),
+			formatWindSpeed(latest.GustKT, 0, windUnit),
+			airTempText,
+		)
 	} else {
-		fmt.Fprintf(w, "Latest wind at %s: %s %.0f kt%s.\n",
-			latest.Time.Format("3:04 PM"), latest.Direction, latest.WindKT, airTempText)
+		fmt.Fprintf(
+			w,
+			"Latest wind at %s: %s %s%s.\n",
+			latest.Time.Format("3:04 PM"),
+			latest.Direction,
+			formatWindSpeed(latest.WindKT, 0, windUnit),
+			airTempText,
+		)
 	}
 
 	if report.Current == nil || report.Current.Error != "" {
