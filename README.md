@@ -8,13 +8,13 @@ The project supports command-line use, plain-text and JSON reports, and a browse
 
 The service answers two practical questions: what the wind is doing now, and what the current is expected to do during the preferred planning window.
 
-Wind observations come from NOAA/NDBC. Marine forecasts and active weather alerts come from the National Weather Service. Current predictions come from NOAA CO-OPS. The service combines those sources into concise reports, nearby-station choices, marine forecasts, tidal-current charts, tidal-range context, and planning-oriented summaries.
+Wind observations come from NOAA/NDBC. Forecast-zone context, coastal marine forecasts where available, and active weather alerts come from the National Weather Service. Current predictions come from NOAA CO-OPS. NOAA HMS provides the optional satellite-smoke overlay. The service combines those sources into concise reports, nearby-station choices, forecast context, tidal-current charts, tidal-range context, and planning-oriented summaries.
 
 ## Browser workflow
 
 The map workflow is intentionally explicit.
 
-Click the map to set the **★ Selected location**, or enter an exact latitude and longitude and choose **Use location**. This supports users who already have coordinates from a GPS, chartplotter, chart, or other navigation source.
+Click the map to set the **★ Selected location**, enter an exact latitude and longitude and choose **Use location**, or use **◎ My location** with browser permission. All three methods feed the same selected-location state. Direct coordinates support users who already have a position from a GPS, chartplotter, chart, or other navigation source.
 
 Then use **Find stations near selected location** to retrieve nearby wind stations. Panning and zooming only change the view; they do not change the selected location. To search somewhere else, click the map again or enter different coordinates.
 
@@ -24,7 +24,7 @@ The map legend is intentionally not context-specific. It always defines **★ Se
 
 Clicking a nearby wind-station candidate opens a fixed information panel. The candidate is not committed until **Use this wind station** is selected. When a suitable currents prediction station is available within the automatic-selection distance limit, the panel previews that station. If no suitable currents station exists within the limit, the panel explicitly reports that no nearby currents prediction station is available.
 
-The map includes recenter controls for the selected location, selected wind station, and selected currents station. These controls preserve the user's current zoom level.
+The map includes recenter controls for the selected location, selected wind station, and selected currents station. These controls preserve the user's current zoom level. **◎ My location** sets and centers the selected location but does not automatically change the committed wind station.
 
 The **Nearby Wind Stations** table is constrained to a compact scrolling panel with a sticky header. It now shows each candidate's latest available wind direction, sustained wind, gust, observation age, and distance from the selected location. The initial server-rendered list and the dynamic **Find Stations** refresh use the same wind-enrichment behavior so the displayed columns do not appear and disappear depending on how the list was loaded.
 
@@ -48,13 +48,29 @@ The full-width browser Wind card includes a recent-observation history graph wit
 
 The same selected recent-observation set is carried into the full text report. For example, selecting 30 readings causes the text report's wind-detail section to show **LATEST 30 OBSERVATIONS**, keeping the browser graph/table and detailed report aligned.
 
-### Marine forecast
+### NWS forecast and forecast-zone context
 
-For live browser reports, the service uses the **selected location's** latitude/longitude to query the National Weather Service `/points` API. The NWS point lookup identifies the marine forecast zone containing that point. The service then retrieves that zone's official NWS coastal marine text forecast and shows the first four forecast periods in a full-width **Marine Forecast** card. When the selected location changes by map click or direct coordinate entry, the browser refreshes the forecast and updates the **Show marine forecast zone** checkbox and overlay for the newly selected point. When NWS publishes geometry for the zone, the toggle draws a subtle outlined and shaded polygon so the forecast and advisory coverage area is visible.
+For live browser reports, the service uses the **selected location's** latitude/longitude to query the National Weather Service `/points` API. The lookup identifies the NWS forecast zone containing that point. If no selected location exists on initial page load, the committed wind station coordinates may be used temporarily; once the user selects a location, that location becomes authoritative.
 
-The card also checks active NWS alerts affecting the wind-station point and highlights up to three distinct alert types. Forecast and alert retrieval is browser-only: historical reports, text/JSON output, Full Report Details, the station-browser page, and `/voice` do not make additional live NWS forecast requests.
+The selected point may resolve to a coastal marine zone such as `PZZ530` or to a normal public forecast zone such as `CAZ302` or `CAZ510`. The map control is therefore labeled **Show NWS forecast zone [zone]**, not “marine forecast zone.” When NWS supplies zone geometry, the optional overlay draws that forecast-zone boundary for geographic context. Changing the selected location refreshes the zone ID, checkbox label, and geometry without changing the committed wind station.
 
-If the NWS forecast is temporarily unavailable, the rest of the conditions page continues to render and the Marine Forecast card reports that the forecast is unavailable rather than failing the page.
+For a coastal marine zone, the service retrieves the official NWS coastal marine text product and shows the first four forecast periods in the full-width **NWS Forecast** card. For a non-marine forecast zone, the zone boundary remains useful, but the application does not pretend that a coastal marine forecast exists. Instead of exposing an HTTP 404, the card explains that no coastal marine text forecast is published for that NWS forecast zone.
+
+The card also checks active NWS alerts for the **selected point** and can show up to three distinct alert types. Alert wording is kept general because the selected point may be in a marine or non-marine forecast zone.
+
+Forecast and alert retrieval are browser-focused. Historical reports, text/JSON output, Full Report Details, the station-browser page, and `/voice` do not make additional live NWS forecast requests. NWS retrieval failures do not prevent the rest of the conditions page from rendering.
+
+### NOAA satellite smoke overlay
+
+The map includes an optional **Show satellite smoke (NOAA)** layer using NOAA Hazard Mapping System (HMS) smoke polygons. The layer is off by default and does not change selected location, station selection, map center, or forecast-zone state.
+
+The service uses NOAA's dated HMS KML archive and searches recent dates for the newest available analysis. The KML polygons are parsed into Leaflet geometry and classified as **light**, **medium**, or **heavy** smoke. The map status reports the analysis date, total polygon count, and how many polygons intersect the current map view so an apparently empty overlay can be distinguished from a loading failure.
+
+HMS smoke density is qualitative satellite analysis, **not AQI and not measured PM2.5 concentration**. Because NOAA polygons can overlap, the fills and outlines are intentionally very translucent so the basemap, station markers, and forecast-zone boundaries remain readable.
+
+### Browser presentation
+
+Browser pages display a random Yogi Berra quote loaded from `assets/yogiisms.txt`. On the main conditions page and `/welcome`, the quote appears at the bottom of the hero image. If the asset cannot be read, the page still renders normally without a quote. This feature is browser-only and does not affect report calculations or text/JSON output.
 
 ### Currents
 
@@ -92,7 +108,7 @@ For multi-day reports, the overall planning period uses the worst status present
 
 ### Service
 
-The application provides a command-line interface and HTTP service. Important endpoints include `/report`, `/wind-readings`, `/wind-stations`, `/health`, `/welcome`, and `/voice`.
+The application provides a command-line interface and HTTP service. Important endpoints include `/report`, `/wind-readings`, `/wind-stations`, `/marine-forecast`, `/smoke-overlay`, `/health`, `/welcome`, and `/voice`.
 
 `/wind-readings` is a lightweight browser-facing JSON endpoint for recent observations from the selected NDBC station. It supports the same 10/20/30/40/50 reading choices as the Wind card and lets the graph/table update without rebuilding the full current report page.
 
@@ -112,7 +128,8 @@ sailing-go/
 ├── go.mod
 ├── README.md
 └── assets/
-    └── hero.jpg
+    ├── hero.jpg
+    └── yogiisms.txt
 ```
 
 `main.go` contains application orchestration, the REST server, report rendering, embedded HTML/JavaScript, map interaction, and combined report formatting.
@@ -127,7 +144,9 @@ Build the complete package rather than compiling an individual `.go` file.
 
 Wind observations are retrieved from NOAA National Data Buoy Center `realtime2` products. Active station metadata is retrieved dynamically from the NDBC active-stations feed.
 
-Live browser marine forecasts use National Weather Service products. The selected location's coordinates are resolved through the NWS `/points` API to identify the applicable marine zone; the official zone forecast is then retrieved from the NWS marine coastal text-product directory. Active alerts are retrieved from the NWS alerts API for the selected point. If no location has yet been selected on the initial page load, the committed wind station is used as a temporary forecast anchor until the user chooses a location.
+Live browser forecast context uses National Weather Service products. The selected location's coordinates are resolved through the NWS `/points` API to identify the applicable **forecast zone**. For coastal marine zones, the official marine text forecast is retrieved from the NWS coastal marine text-product directory. For non-marine zones, the application retains the NWS zone context and geometry but does not claim that a marine text forecast exists. Active alerts are retrieved from the NWS alerts API for the selected point. If no location has yet been selected on initial page load, the committed wind station may be used as a temporary forecast anchor until the user chooses a location.
+
+Satellite-smoke polygons are retrieved from NOAA's Hazard Mapping System dated KML archive. They are qualitative light/medium/heavy smoke analysis rather than AQI or measured particulate concentration.
 
 Current predictions and current-station metadata are retrieved from NOAA CO-OPS Tides & Currents.
 
@@ -257,27 +276,29 @@ The project uses a three-part version number with this convention:
 - **minor** — a new feature or significant bug fix
 - **micro** — small UI polish or a minor refinement
 
-The current release is **1.4.0**.
+The current release is **1.5.0**.
 
-Release 1.4.0 adds a browser **Marine Forecast** card driven by the selected location. It retrieves the applicable National Weather Service forecast zone, shows the next four official forecast periods, surfaces active NWS alerts affecting the selected point, and can overlay the marine forecast-zone boundary on the Leaflet map to make the zone-wide scope visible. Moving the selected location refreshes the forecast and updates the marine-zone checkbox and overlay without requiring a full page reload. It also retains the random Yogi Berra quote on the hero image introduced after 1.3.0, along with the wind-history, selected-station air-temperature, direct-coordinate, nearby-station, map, current-planning, tidal-context, and experimental `/voice` capabilities.
+Release 1.5.0 adds the **◎ My location** map control, generalized **NWS Forecast** / **NWS forecast zone** handling for both marine and non-marine selected points, and the optional NOAA HMS satellite-smoke overlay. Browser geolocation, map clicks, and direct coordinates all feed the same authoritative selected-location state. Changing that location refreshes NWS forecast-zone context while leaving the committed wind station unchanged until the user explicitly selects another station. The smoke overlay is qualitative light/medium/heavy satellite analysis, is off by default, and uses deliberately light opacity so the sailing map remains readable.
+
+Release 1.4.0 introduced selected-location-driven NWS coastal marine forecast support, active NWS alerts, and forecast-zone geometry on the Leaflet map. It also retained the random Yogi Berra quote on the hero image introduced after 1.3.0, along with wind history, selected-station air temperature, direct-coordinate entry, nearby-station selection, current planning, tidal context, and the experimental `/voice` endpoint.
 
 Release 1.3.0 added the full-width recent-wind history graph, asynchronous 10/20/30/40/50 observation selection, shared recent-observation depth between the browser and full text report, a simplified current-report layout, compact **Key current times** inside the Tidal Current card, and relocation of the daylight/conditions window into that same current-analysis card.
 
 The Render service can continue building and deploying from the `main` branch. A Git tag marks the exact commit corresponding to a public release without changing the deployment workflow.
 
-For release `1.4.0`, after the final code and README changes are ready:
+For release `1.5.0`, after the final code and README changes are ready:
 
 ```sh
 git status
 git diff
 git add main.go README.md
-git commit -m "Release v1.4.0: add NWS marine forecast"
+git commit -m "Release v1.5.0: add geolocation and map context overlays"
 git push origin main
-git tag -a v1.4.0 -m "Release v1.4.0"
-git push origin v1.4.0
+git tag -a v1.5.0 -m "Release v1.5.0"
+git push origin v1.5.0
 git log --oneline --decorate -5
 ```
 
-The application displays `1.4.0`, while the corresponding Git tag uses the conventional `v1.4.0` form.
+The application displays `1.5.0`, while the corresponding Git tag uses the conventional `v1.5.0` form.
 
 For a later release, update only the static `appVersion` value in `main.go` during the final pre-commit regeneration, update this README when release notes or workflow documentation change, commit and push `main`, then create and push the matching annotated tag.
