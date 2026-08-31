@@ -8,7 +8,7 @@ The project supports command-line use, plain-text and JSON reports, and a browse
 
 The service answers two practical questions: what the wind is doing now, and what the current is expected to do during the preferred planning window.
 
-Wind observations come from NOAA/NDBC. Current predictions come from NOAA CO-OPS. The service combines those sources into concise reports, nearby-station choices, tidal-current charts, tidal-range context, and planning-oriented summaries.
+Wind observations come from NOAA/NDBC. Marine forecasts and active weather alerts come from the National Weather Service. Current predictions come from NOAA CO-OPS. The service combines those sources into concise reports, nearby-station choices, marine forecasts, tidal-current charts, tidal-range context, and planning-oriented summaries.
 
 ## Browser workflow
 
@@ -47,6 +47,14 @@ Nearby-station rows show compact live wind information such as `NW 10 kt G13` pl
 The full-width browser Wind card includes a recent-observation history graph with separate sustained-wind and gust lines. A **10 / 20 / 30 / 40 / 50** reading selector changes the history depth without reloading the page. The selector uses the `/wind-readings` JSON endpoint to refresh the graph, recent-readings table, and wind summary together from one NDBC fetch.
 
 The same selected recent-observation set is carried into the full text report. For example, selecting 30 readings causes the text report's wind-detail section to show **LATEST 30 OBSERVATIONS**, keeping the browser graph/table and detailed report aligned.
+
+### Marine forecast
+
+For live browser reports, the service uses the **selected location's** latitude/longitude to query the National Weather Service `/points` API. The NWS point lookup identifies the marine forecast zone containing that point. The service then retrieves that zone's official NWS coastal marine text forecast and shows the first four forecast periods in a full-width **Marine Forecast** card. When the selected location changes by map click or direct coordinate entry, the browser refreshes the forecast and updates the **Show marine forecast zone** checkbox and overlay for the newly selected point. When NWS publishes geometry for the zone, the toggle draws a subtle outlined and shaded polygon so the forecast and advisory coverage area is visible.
+
+The card also checks active NWS alerts affecting the wind-station point and highlights up to three distinct alert types. Forecast and alert retrieval is browser-only: historical reports, text/JSON output, Full Report Details, the station-browser page, and `/voice` do not make additional live NWS forecast requests.
+
+If the NWS forecast is temporarily unavailable, the rest of the conditions page continues to render and the Marine Forecast card reports that the forecast is unavailable rather than failing the page.
 
 ### Currents
 
@@ -118,6 +126,8 @@ Build the complete package rather than compiling an individual `.go` file.
 ## Data sources
 
 Wind observations are retrieved from NOAA National Data Buoy Center `realtime2` products. Active station metadata is retrieved dynamically from the NDBC active-stations feed.
+
+Live browser marine forecasts use National Weather Service products. The selected location's coordinates are resolved through the NWS `/points` API to identify the applicable marine zone; the official zone forecast is then retrieved from the NWS marine coastal text-product directory. Active alerts are retrieved from the NWS alerts API for the selected point. If no location has yet been selected on the initial page load, the committed wind station is used as a temporary forecast anchor until the user chooses a location.
 
 Current predictions and current-station metadata are retrieved from NOAA CO-OPS Tides & Currents.
 
@@ -247,25 +257,27 @@ The project uses a three-part version number with this convention:
 - **minor** — a new feature or significant bug fix
 - **micro** — small UI polish or a minor refinement
 
-The current release is **1.3.0**.
+The current release is **1.4.0**.
 
-Release 1.3.0 adds the full-width recent-wind history graph, asynchronous 10/20/30/40/50 observation selection, shared recent-observation depth between the browser and full text report, a simplified current-report layout, compact **Key current times** inside the Tidal Current card, and relocation of the daylight/conditions window into that same current-analysis card. It retains the selected-station air-temperature, direct-coordinate, nearby-station, map, planning, and experimental `/voice` capabilities from 1.2.0.
+Release 1.4.0 adds a browser **Marine Forecast** card driven by the selected location. It retrieves the applicable National Weather Service forecast zone, shows the next four official forecast periods, surfaces active NWS alerts affecting the selected point, and can overlay the marine forecast-zone boundary on the Leaflet map to make the zone-wide scope visible. Moving the selected location refreshes the forecast and updates the marine-zone checkbox and overlay without requiring a full page reload. It also retains the random Yogi Berra quote on the hero image introduced after 1.3.0, along with the wind-history, selected-station air-temperature, direct-coordinate, nearby-station, map, current-planning, tidal-context, and experimental `/voice` capabilities.
+
+Release 1.3.0 added the full-width recent-wind history graph, asynchronous 10/20/30/40/50 observation selection, shared recent-observation depth between the browser and full text report, a simplified current-report layout, compact **Key current times** inside the Tidal Current card, and relocation of the daylight/conditions window into that same current-analysis card.
 
 The Render service can continue building and deploying from the `main` branch. A Git tag marks the exact commit corresponding to a public release without changing the deployment workflow.
 
-For release `1.3.0`, after the final code and README changes are ready:
+For release `1.4.0`, after the final code and README changes are ready:
 
 ```sh
 git status
 git diff
 git add main.go README.md
-git commit -m "Release v1.3.0: add wind history and streamline current layout"
+git commit -m "Release v1.4.0: add NWS marine forecast"
 git push origin main
-git tag -a v1.3.0 -m "Release v1.3.0"
-git push origin v1.3.0
+git tag -a v1.4.0 -m "Release v1.4.0"
+git push origin v1.4.0
 git log --oneline --decorate -5
 ```
 
-The application displays `1.2.0`, while the corresponding Git tag uses the conventional `v1.2.0` form.
+The application displays `1.4.0`, while the corresponding Git tag uses the conventional `v1.4.0` form.
 
 For a later release, update only the static `appVersion` value in `main.go` during the final pre-commit regeneration, update this README when release notes or workflow documentation change, commit and push `main`, then create and push the matching annotated tag.

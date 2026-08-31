@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	appVersion                      = "1.3.0"
+	appVersion                      = "1.4.0"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -864,6 +864,56 @@ func runServer(
 		}
 	})
 
+	mux.HandleFunc("/marine-forecast", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		lat, lon, ok, err := parseOptionalLatLon(r.URL.Query())
+		if err != nil || !ok {
+			if err == nil {
+				err = fmt.Errorf("lat and lon are required")
+			}
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		zone, updated, periods, alerts, forecastErr :=
+			fetchMarineForecastForPoint(lat, lon, loc)
+
+		var geometry json.RawMessage
+		if zone != "" {
+			if encoded := fetchMarineZoneGeometry(zone); encoded != "" {
+				geometry = json.RawMessage(string(encoded))
+			}
+		}
+
+		payload := struct {
+			Zone     string                     `json:"zone"`
+			Updated  string                     `json:"updated,omitempty"`
+			Periods  []htmlMarineForecastPeriod `json:"periods,omitempty"`
+			Alerts   []string                   `json:"alerts,omitempty"`
+			Geometry json.RawMessage            `json:"geometry,omitempty"`
+			Error    string                     `json:"error,omitempty"`
+		}{
+			Zone:     zone,
+			Updated:  updated,
+			Periods:  periods,
+			Alerts:   alerts,
+			Geometry: geometry,
+		}
+		if forecastErr != nil {
+			payload.Error = forecastErr.Error()
+		}
+
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		if err := json.NewEncoder(w).Encode(payload); err != nil {
+			fmt.Println("marine-forecast JSON encoding error:", err)
+		}
+	})
+
 	mux.HandleFunc("/wind-stations", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1296,6 +1346,11 @@ var tideStationCache struct {
 	Items   []tidePredictionStation
 }
 
+type htmlMarineForecastPeriod struct {
+	Name     string `json:"name"`
+	Forecast string `json:"forecast"`
+}
+
 type htmlReportData struct {
 	AppVersion                                                    string
 	Title, Station, ReportTime                                    string
@@ -1356,7 +1411,289 @@ type htmlReportData struct {
 	CurrentChart                                                  template.HTML
 	BottomLine                                                    []string
 	FullText                                                      string
+	MarineForecastStation                                         string
+	MarineForecastZone                                            string
+	MarineForecastUpdated                                         string
+	MarineForecastPeriods                                         []htmlMarineForecastPeriod
+	MarineForecastAlerts                                          []string
+	MarineForecastError                                           string
+	MarineForecastGeometry                                        template.JS
 	Yogiism                                                       string
+}
+
+func fetchNWSJSON(endpoint string, target interface{}) error {
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set(
+		"User-Agent",
+		"pittsburg-saildata/"+appVersion+" (https://github.com/richard-mauri/pittsburg-saildata)",
+	)
+	req.Header.Set("Accept", "application/geo+json")
+
+	client := &http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("NWS returned HTTP %d", resp.StatusCode)
+	}
+
+	body, err := ioutil.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(body, target); err != nil {
+		return fmt.Errorf("decode NWS response: %w", err)
+	}
+	return nil
+}
+
+func marineZoneID(zoneURL string) string {
+	zoneURL = strings.TrimRight(strings.TrimSpace(zoneURL), "/")
+	if zoneURL == "" {
+		return ""
+	}
+	if index := strings.LastIndex(zoneURL, "/"); index >= 0 && index+1 < len(zoneURL) {
+		return strings.ToUpper(strings.TrimSpace(zoneURL[index+1:]))
+	}
+	return strings.ToUpper(zoneURL)
+}
+
+func fetchMarineZoneGeometry(zoneID string) template.JS {
+	zoneID = strings.ToUpper(strings.TrimSpace(zoneID))
+	if len(zoneID) != 6 {
+		return ""
+	}
+	for i, r := range zoneID {
+		if i < 3 {
+			if r < 'A' || r > 'Z' {
+				return ""
+			}
+		} else if r < '0' || r > '9' {
+			return ""
+		}
+	}
+
+	var payload struct {
+		Geometry json.RawMessage `json:"geometry"`
+	}
+	if err := fetchNWSJSON(
+		"https://api.weather.gov/zones/forecast/"+url.PathEscape(zoneID),
+		&payload,
+	); err != nil {
+		return ""
+	}
+	if len(payload.Geometry) == 0 || string(payload.Geometry) == "null" {
+		return ""
+	}
+
+	// Geometry comes directly from the NWS GeoJSON response. Re-marshal it so
+	// only syntactically valid JSON is passed to the browser template.
+	var geometry interface{}
+	if err := json.Unmarshal(payload.Geometry, &geometry); err != nil {
+		return ""
+	}
+	encoded, err := json.Marshal(geometry)
+	if err != nil {
+		return ""
+	}
+	return template.JS(encoded)
+}
+
+func fetchNWSText(endpoint string) (string, error) {
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set(
+		"User-Agent",
+		"pittsburg-saildata/"+appVersion+" (https://github.com/richard-mauri/pittsburg-saildata)",
+	)
+	req.Header.Set("Accept", "text/plain")
+
+	client := &http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("NWS returned HTTP %d", resp.StatusCode)
+	}
+
+	body, err := ioutil.ReadAll(io.LimitReader(resp.Body, 512<<10))
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+func parseMarineZoneForecastText(
+	body string,
+	zoneID string,
+	loc *time.Location,
+) (string, []htmlMarineForecastPeriod, error) {
+	zoneID = strings.ToUpper(strings.TrimSpace(zoneID))
+	lines := strings.Split(body, "\n")
+	inZone := false
+	updated := ""
+	periods := make([]htmlMarineForecastPeriod, 0, 4)
+
+	for _, rawLine := range lines {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+
+		if !inZone {
+			if strings.HasPrefix(strings.ToUpper(line), zoneID+"-") {
+				inZone = true
+			}
+			continue
+		}
+
+		if line == "$$" {
+			break
+		}
+
+		// Advisory headlines in the text product begin with three dots.
+		// Active alerts are retrieved separately from api.weather.gov.
+		if strings.HasPrefix(line, "...") {
+			continue
+		}
+
+		if strings.HasPrefix(line, ".") {
+			if split := strings.Index(line[1:], "..."); split >= 0 {
+				split++
+				name := strings.TrimSpace(line[1:split])
+				forecast := strings.TrimSpace(line[split+3:])
+				if name != "" {
+					if len(periods) == 4 {
+						break
+					}
+					periods = append(periods, htmlMarineForecastPeriod{
+						Name:     strings.Title(strings.ToLower(name)),
+						Forecast: forecast,
+					})
+					continue
+				}
+			}
+		}
+
+		if len(periods) > 0 {
+			last := &periods[len(periods)-1]
+			if last.Forecast == "" {
+				last.Forecast = line
+			} else {
+				last.Forecast += " " + line
+			}
+			continue
+		}
+
+		// Before the first period, the final ordinary line is the issuance time.
+		// Zone-description lines are overwritten until that issuance line arrives.
+		updated = line
+	}
+
+	if len(periods) == 0 {
+		return "", nil, fmt.Errorf("NWS marine text forecast returned no forecast periods")
+	}
+
+	// NWS marine text products use local-zone timestamps such as
+	// "429 AM PDT Mon Aug 31 2026". Keep the published string as-is; it is
+	// already concise and avoids inventing an offset from an abbreviation.
+	_ = loc
+	return updated, periods, nil
+}
+
+func fetchMarineForecastForPoint(
+	lat float64,
+	lon float64,
+	loc *time.Location,
+) (string, string, []htmlMarineForecastPeriod, []string, error) {
+	if lat < -90 || lat > 90 || lon < -180 || lon > 180 {
+		return "", "", nil, nil, fmt.Errorf("invalid forecast coordinates")
+	}
+
+	pointsURL := fmt.Sprintf(
+		"https://api.weather.gov/points/%.4f,%.4f",
+		lat,
+		lon,
+	)
+	var pointResponse struct {
+		Properties struct {
+			ForecastZone string `json:"forecastZone"`
+		} `json:"properties"`
+	}
+	if err := fetchNWSJSON(pointsURL, &pointResponse); err != nil {
+		return "", "", nil, nil, fmt.Errorf("NWS point lookup: %w", err)
+	}
+
+	zoneURL := strings.TrimRight(
+		strings.TrimSpace(pointResponse.Properties.ForecastZone),
+		"/",
+	)
+	zoneID := marineZoneID(zoneURL)
+	if zoneURL == "" || zoneID == "" {
+		return "", "", nil, nil, fmt.Errorf(
+			"NWS point lookup did not return a marine forecast zone",
+		)
+	}
+	if len(zoneID) < 2 {
+		return zoneID, "", nil, nil, fmt.Errorf("invalid NWS marine zone %q", zoneID)
+	}
+
+	// Coastal marine-zone text forecasts are published by NWS/TGFTP and are
+	// indexed by the first two letters of the zone ID, e.g. PZZ530 -> pz/pzz530.txt.
+	marineTextURL := fmt.Sprintf(
+		"https://tgftp.nws.noaa.gov/data/forecasts/marine/coastal/%s/%s.txt",
+		strings.ToLower(zoneID[:2]),
+		strings.ToLower(zoneID),
+	)
+	body, err := fetchNWSText(marineTextURL)
+	if err != nil {
+		return zoneID, "", nil, nil, fmt.Errorf("NWS marine text forecast: %w", err)
+	}
+	updated, periods, err := parseMarineZoneForecastText(body, zoneID, loc)
+	if err != nil {
+		return zoneID, "", nil, nil, err
+	}
+
+	alertsURL := fmt.Sprintf(
+		"https://api.weather.gov/alerts/active?point=%.4f,%.4f",
+		lat,
+		lon,
+	)
+	var alertsResponse struct {
+		Features []struct {
+			Properties struct {
+				Event string `json:"event"`
+			} `json:"properties"`
+		} `json:"features"`
+	}
+	alerts := make([]string, 0, 3)
+	if err := fetchNWSJSON(alertsURL, &alertsResponse); err == nil {
+		seen := make(map[string]bool)
+		for _, feature := range alertsResponse.Features {
+			event := strings.TrimSpace(feature.Properties.Event)
+			if event == "" || seen[event] {
+				continue
+			}
+			seen[event] = true
+			alerts = append(alerts, event)
+			if len(alerts) == 3 {
+				break
+			}
+		}
+	}
+
+	return zoneID, updated, periods, alerts, nil
 }
 
 func randomYogiism() string {
@@ -1896,6 +2233,42 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 		strings.TrimSpace(report.RequestQuery.Get("bottom_line")) != "1" {
 		if airTempF, ok := fetchNDBCAirTemperatureF(report.Station); ok {
 			d.WindAirTemp = fmt.Sprintf("%.0f°F", airTempF)
+		}
+	}
+
+	// The browser marine forecast follows the selected map location whenever
+	// lat/lon are present. If no location has been selected yet, fall back to the
+	// committed wind station so the initial page can still provide useful marine
+	// context. The browser refreshes this forecast and the zone overlay when the
+	// selected location changes.
+	if report.Historical == nil &&
+		strings.TrimSpace(report.RequestQuery.Get("bottom_line")) != "1" &&
+		strings.TrimSpace(report.RequestQuery.Get("details")) != "1" &&
+		strings.TrimSpace(report.RequestQuery.Get("stations")) != "1" &&
+		d.WindError == "" {
+		forecastLat, forecastLon, hasForecastPoint, _ :=
+			parseOptionalLatLon(report.RequestQuery)
+		if hasForecastPoint {
+			d.MarineForecastStation = "selected location"
+		} else if stationMeta, metaErr := fetchNDBCStation(report.Station); metaErr == nil {
+			forecastLat = stationMeta.Lat
+			forecastLon = stationMeta.Lon
+			hasForecastPoint = true
+			d.MarineForecastStation = report.Station
+		}
+		if hasForecastPoint {
+			zone, updated, periods, alerts, forecastErr :=
+				fetchMarineForecastForPoint(forecastLat, forecastLon, loc)
+			d.MarineForecastZone = zone
+			d.MarineForecastUpdated = updated
+			d.MarineForecastPeriods = periods
+			d.MarineForecastAlerts = alerts
+			if zone != "" {
+				d.MarineForecastGeometry = fetchMarineZoneGeometry(zone)
+			}
+			if forecastErr != nil {
+				d.MarineForecastError = forecastErr.Error()
+			}
 		}
 	}
 
@@ -3587,6 +3960,7 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 .map-overlay-control{background:rgba(255,255,255,.96);border:1px solid #9aa8ae;border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,.28);padding:7px 9px;color:#17394b;font-size:.82rem;font-weight:750}
 .map-overlay-control label{display:flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap}
 .map-overlay-control input{margin:0}
+.map-zone-tooltip{font-weight:800}
 .map-leaflet-symbol .marker-symbol{display:flex;align-items:center;justify-content:center;width:32px;height:32px;font-size:27px;font-weight:950;line-height:1;text-shadow:-2px -2px 0 #fff,0 -2px 0 #fff,2px -2px 0 #fff,-2px 0 0 #fff,2px 0 0 #fff,-2px 2px 0 #fff,0 2px 0 #fff,2px 2px 0 #fff,0 3px 4px rgba(0,0,0,.5)}
 .map-leaflet-symbol .marker-symbol.request{color:#126b91}.map-leaflet-symbol .marker-symbol.wind{color:#2f855a}.map-leaflet-symbol .marker-symbol.current{color:#7d55a6}.map-leaflet-symbol .marker-symbol.wind-candidate{color:#4f6978}
 
@@ -3643,10 +4017,22 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 
 .location-map-wrap{position:relative}
 .map-coordinate-entry{display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-top:10px}.map-coordinate-field{display:flex;flex-direction:column;gap:3px}.map-coordinate-field label{font-size:.72rem;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}.map-coordinate-field input{width:132px;padding:7px 9px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--ink);font:inherit}.map-coordinate-use{padding:8px 12px;border:1px solid #126b91;border-radius:9px;background:#126b91;color:#fff;font-weight:850;cursor:pointer}.map-coordinate-use:hover{filter:brightness(.97)}.map-coordinate-error{font-size:.8rem;color:#9b3027;min-height:1.2em}
-.map-station-list{margin-top:12px}.map-station-list-title{font-weight:850;color:var(--navy);margin:0 0 8px}.map-station-table-wrap{max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:14px;background:#fff}.map-station-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.86rem}.map-station-table th,.map-station-table td{padding:8px 10px;border-top:1px solid var(--line);text-align:left;vertical-align:top;background:#fff}.map-station-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc}.map-station-table th{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}.map-station-table tbody tr:first-child td{border-top:0}.map-station-table a{color:var(--blue);font-weight:800;text-decoration:none}.map-station-table a:hover{text-decoration:underline}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#2f855a}.map-dot.current{background:#7d55a6}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}.error-card{border-left:5px solid #b64735;background:#fff7f4}.error-card h2{color:#8f3025}.error-message{font-weight:650;line-height:1.5}.error-help{color:var(--muted);font-size:.9rem}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}.bottom.planning-preferred{background:#eff8f1;border-color:#b8d8c0}.bottom.planning-caution{background:#fff8e6;border-color:#e6c66a}.bottom.planning-redflag{background:#fff0ef;border-color:#e0a39d}.bottom .planning-period-status{margin:0 0 10px;font-weight:900;font-size:1.05rem}.bottom .planning-period-status.preferred{color:#176246}.bottom .planning-period-status.caution{color:#8a5a00}.bottom .planning-period-status.redflag{color:#9b3027}</style></head><body><main class="shell">
+.map-station-list{margin-top:12px}.map-station-list-title{font-weight:850;color:var(--navy);margin:0 0 8px}.map-station-table-wrap{max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:14px;background:#fff}.map-station-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.86rem}.map-station-table th,.map-station-table td{padding:8px 10px;border-top:1px solid var(--line);text-align:left;vertical-align:top;background:#fff}.map-station-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc}.map-station-table th{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}.map-station-table tbody tr:first-child td{border-top:0}.map-station-table a{color:var(--blue);font-weight:800;text-decoration:none}.map-station-table a:hover{text-decoration:underline}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#2f855a}.map-dot.current{background:#7d55a6}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}
+.marine-forecast-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap}
+.marine-forecast-zone{color:var(--muted);font-size:.84rem;font-weight:750}
+.marine-alerts{margin:8px 0 14px;display:flex;gap:7px;flex-wrap:wrap}
+.marine-alert{display:inline-block;border-radius:999px;padding:5px 9px;background:#fff0ef;border:1px solid #e0a39d;color:#9b3027;font-size:.78rem;font-weight:900}
+.marine-periods{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:12px}
+.marine-period{border:1px solid var(--line);border-radius:14px;padding:12px 14px;background:#fbfdfe}
+.marine-period strong{display:block;color:var(--navy);margin-bottom:4px}
+.marine-period p{margin:0;line-height:1.45}
+.marine-forecast-note{color:var(--muted);font-size:.82rem;margin:10px 0 0}
+.marine-forecast-error{color:var(--muted);font-size:.9rem}
+@media(max-width:640px){.marine-periods{grid-template-columns:1fr}}
+.error-card{border-left:5px solid #b64735;background:#fff7f4}.error-card h2{color:#8f3025}.error-message{font-weight:650;line-height:1.5}.error-help{color:var(--muted);font-size:.9rem}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}.bottom.planning-preferred{background:#eff8f1;border-color:#b8d8c0}.bottom.planning-caution{background:#fff8e6;border-color:#e6c66a}.bottom.planning-redflag{background:#fff0ef;border-color:#e0a39d}.bottom .planning-period-status{margin:0 0 10px;font-weight:900;font-size:1.05rem}.bottom .planning-period-status.preferred{color:#176246}.bottom .planning-period-status.caution{color:#8a5a00}.bottom .planning-period-status.redflag{color:#9b3027}</style></head><body><main class="shell">
 <section class="hero"><div class="eyebrow">Mauri's Wind & Current Conditions</div><h1>{{.Title}}</h1><div class="sub">{{.ReportTime}} · {{.Station}}</div>{{if .Historical}}<span class="badge">Historical · {{.RequestedTime}}</span>{{end}}{{if .Yogiism}}<div class="yogiism">“{{.Yogiism}}” — Yogi Berra</div>{{end}}</section><div class="grid">
 <section id="bottom-line-card" class="card full bottom{{if .PlanningPeriodClass}} planning-{{.PlanningPeriodClass}}{{end}}"><h2>Bottom line</h2>{{if .PlanningPeriodCause}}<p><strong>{{.PlanningPeriodCause}}</strong></p>{{end}}{{if .PlanningPeriodDetail}}<p>{{.PlanningPeriodDetail}}</p>{{end}}{{range .BottomLine}}<p>{{.}}</p>{{else}}<p>Summary unavailable.</p>{{end}}</section>
-<section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map to choose a sailing location, then use Find stations near selected location. Panning only changes the view; to search somewhere else, click the map to move the selected ★ location first. Click a nearby wind station to pin its details and preview the associated currents station, then use the selection link in the map panel to commit the wind-station choice. Candidate stations and distances always refer to the selected location.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-navigation" aria-label="Map navigation"><button id="map-nav-selected" class="map-nav-button" type="button" title="Center map on selected location" {{if not .MapHasRequest}}disabled{{end}}>Center on selected location</button><button id="map-nav-wind" class="map-nav-button" type="button" title="Center map on selected wind station" {{if not .MapHasWind}}disabled{{end}}>Center on selected wind station</button><button id="map-nav-current" class="map-nav-button" type="button" title="Center map on selected currents station" {{if not .MapHasCurrent}}disabled{{end}}>Center on selected currents station</button></div><div class="map-state-controls" aria-label="Map selection controls"><label class="map-current-toggle"><input type="checkbox" id="map-show-currents" checked> Show selected currents station</label><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}" {{if not .MapHasRequest}}disabled{{end}}>Clear selected location</button></div><div class="map-coordinate-entry" aria-label="Enter exact location"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="number" step="any" min="-90" max="90" inputmode="decimal" placeholder="38.03542" {{if .MapHasRequest}}value="{{printf "%.5f" .MapRequestLat}}"{{end}}></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="number" step="any" min="-180" max="180" inputmode="decimal" placeholder="-121.88631" {{if .MapHasRequest}}value="{{printf "%.5f" .MapRequestLon}}"{{end}}></div><button id="map-use-coordinate" class="map-coordinate-use" type="button">Use location</button><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div class="map-controls"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Select a location to find stations</span><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><div class="map-layer-note">Layer control: <strong>Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service. Chart layer is for planning/reference and does not replace official navigation products.</div><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
+<section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map to choose a sailing location, then use Find stations near selected location. Panning only changes the view; to search somewhere else, click the map to move the selected ★ location first. Click a nearby wind station to pin its details and preview the associated currents station, then use the selection link in the map panel to commit the wind-station choice. Candidate stations and distances always refer to the selected location.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-navigation" aria-label="Map navigation"><button id="map-nav-selected" class="map-nav-button" type="button" title="Center map on selected location" {{if not .MapHasRequest}}disabled{{end}}>Center on selected location</button><button id="map-nav-wind" class="map-nav-button" type="button" title="Center map on selected wind station" {{if not .MapHasWind}}disabled{{end}}>Center on selected wind station</button><button id="map-nav-current" class="map-nav-button" type="button" title="Center map on selected currents station" {{if not .MapHasCurrent}}disabled{{end}}>Center on selected currents station</button></div><div class="map-state-controls" aria-label="Map selection controls"><label class="map-current-toggle"><input type="checkbox" id="map-show-currents" checked> Show selected currents station</label><label id="map-marine-zone-control" class="map-current-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">Show marine forecast zone {{.MarineForecastZone}}</span></label><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}" {{if not .MapHasRequest}}disabled{{end}}>Clear selected location</button></div><div class="map-coordinate-entry" aria-label="Enter exact location"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="number" step="any" min="-90" max="90" inputmode="decimal" placeholder="38.03542" {{if .MapHasRequest}}value="{{printf "%.5f" .MapRequestLat}}"{{end}}></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="number" step="any" min="-180" max="180" inputmode="decimal" placeholder="-121.88631" {{if .MapHasRequest}}value="{{printf "%.5f" .MapRequestLon}}"{{end}}></div><button id="map-use-coordinate" class="map-coordinate-use" type="button">Use location</button><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div class="map-controls"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Select a location to find stations</span><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><div class="map-layer-note">Layer control: <strong>Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service. Chart layer is for planning/reference and does not replace official navigation products.</div><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
 {{if .WindError}}<section class="card full error-card"><h2>Wind station selection unavailable</h2><p class="error-message">{{.WindError}}</p><p class="error-help">The page is still available so you can inspect the request and nearby station diagnostics. Try nearby coordinates or an explicit NDBC station ID.</p></section>{{end}}
 <section class="card full wind-card"><h2>Wind</h2>
 <div class="metrics">
@@ -3668,13 +4054,20 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 </div>{{end}}
 </section>
 
+<section id="marine-forecast-card" class="card full marine-forecast-card" {{if not (or .MarineForecastPeriods .MarineForecastError)}}hidden{{end}}>
+<div class="marine-forecast-head"><div><h2 id="marine-forecast-title">Marine Forecast{{if .MarineForecastStation}} — near {{.MarineForecastStation}}{{end}}</h2><div id="marine-forecast-zone" class="marine-forecast-zone" {{if not .MarineForecastZone}}hidden{{end}}>National Weather Service marine zone {{.MarineForecastZone}}{{if .MarineForecastUpdated}} · Updated {{.MarineForecastUpdated}}{{end}}</div></div></div>
+<div id="marine-forecast-alerts" class="marine-alerts" aria-label="Active National Weather Service alerts" {{if not .MarineForecastAlerts}}hidden{{end}}>{{range .MarineForecastAlerts}}<span class="marine-alert">⚠ Marine-zone advisory — {{.}}</span>{{end}}</div>
+<div id="marine-forecast-periods" class="marine-periods" {{if not .MarineForecastPeriods}}hidden{{end}}>{{range .MarineForecastPeriods}}<div class="marine-period">{{if .Name}}<strong>{{.Name}}</strong>{{end}}{{if .Forecast}}<p>{{.Forecast}}</p>{{end}}</div>{{end}}</div>
+<p id="marine-forecast-note" class="marine-forecast-note" {{if not .MarineForecastPeriods}}hidden{{end}}>Official NWS marine-zone forecast selected from the selected location. Forecasts and marine-zone advisories apply to the broader zone, not specifically to that point; use the map overlay to see the zone extent. Conditions can vary within the zone.</p>
+<p id="marine-forecast-error" class="marine-forecast-error" {{if not .MarineForecastError}}hidden{{end}}>{{if .MarineForecastError}}Marine forecast temporarily unavailable: {{.MarineForecastError}}{{end}}</p>
+</section>
 
 <section id="tide-context-card" class="card full"><h2>Tidal &amp; Lunar Context{{if .CurrentDateLabel}} — {{.CurrentDateLabel}}{{end}}</h2>{{if .TideContextMoon}}<p><strong>{{.TideContextMoon}}</strong></p>{{end}}{{if .TideContextCycle}}<p>{{.TideContextCycle}}</p>{{end}}{{if .TideContextStation}}<div class="station">{{.TideContextStation}}</div>{{end}}{{if .TideContextStationMeta}}<div class="meta">{{.TideContextStationMeta}}</div>{{end}}{{if .TideContextRange}}<p><strong>Tidal range context:</strong> {{.TideContextRange}}</p>{{end}}{{if .TideContextComparison}}<p><strong>{{.TideContextComparison}}</strong></p>{{end}}{{if .TideContextNote}}<p class="note">{{.TideContextNote}} NOAA does not provide a universal “king tide” classification here; the 28-day range comparison provides the quantitative context across roughly one lunar cycle.</p>{{end}}</section>
 
 
 {{if .CurrentChart}}<section id="current-chart-card" class="card full"><div class="current-chart-header"><div><h2>Tidal Current</h2>{{if .CurrentRangeLabel}}<div class="current-date-label">{{.CurrentRangeLabel}}</div>{{end}}</div></div><div class="current-range-toolbar" aria-label="Current graph date controls"><a class="current-date-nav" href="{{.CurrentPrevURL}}" aria-label="Previous date range">← Previous range</a><label class="current-control-label"><span>Start date</span><input id="current-date-picker" class="current-date-picker" type="date" value="{{.CurrentDateISO}}" aria-label="Choose starting date"></label><label class="current-control-label"><span>Range</span><select id="current-days-picker" class="current-date-picker" aria-label="Number of days"><option value="1" {{if eq .CurrentDays 1}}selected{{end}}>1 day</option><option value="3" {{if eq .CurrentDays 3}}selected{{end}}>3 days</option><option value="7" {{if eq .CurrentDays 7}}selected{{end}}>7 days</option></select></label><a class="current-date-nav {{if .CurrentIsToday}}is-current{{end}}" href="{{.CurrentTodayURL}}">Today</a><a class="current-date-nav" href="{{.CurrentNextURL}}" aria-label="Next date range">Next range →</a></div>{{if .CurrentWindow}}<div class="current-window-inline"><strong>{{if .CurrentWindowMode}}{{.CurrentWindowMode}}{{else}}Conditions window{{end}}</strong><span>{{.CurrentWindow}}</span></div>{{end}}<div class="chart-explainer"><strong>This is current, not tide height.</strong> Above zero = flood; below zero = ebb; crossings = slack water.</div>{{if .TideRangeOverlayAvailable}}<div class="tide-range-legend"><label class="tide-range-toggle"><input id="show-tide-range-overlay" type="checkbox" checked> Show daily tidal range on right axis</label><span class="tide-range-key"><span class="tide-range-swatch typical"></span>{{if .TideRangeLegendTypical}}{{.TideRangeLegendTypical}}{{else}}Normal-cycle (&lt; +15%){{end}}</span><span class="tide-range-key"><span class="tide-range-swatch elevated"></span>{{if .TideRangeLegendElevated}}{{.TideRangeLegendElevated}}{{else}}Elevated (≥ +15%){{end}}</span><span class="tide-range-key"><span class="tide-range-swatch large"></span>{{if .TideRangeLegendLarge}}{{.TideRangeLegendLarge}}{{else}}Large (≥ +30%){{end}}</span><span class="tide-range-key"><span class="tide-range-swatch exceptional"></span>{{if .TideRangeLegendExceptional}}{{.TideRangeLegendExceptional}}{{else}}Exceptional (≥ +45%){{end}}</span></div>{{end}}<div class="current-chart-wrap">{{.CurrentChart}}</div><div class="chart-note">NOAA 6-minute harmonic current predictions. The current-speed axis stays at ±3.5 kt for date-to-date comparison and expands only when needed. Darker bands are night; light areas are daylight; warm bands mark the configured preferred planning period. When enabled, thin daily markers use a stable 0–10 ft right axis for predicted high-to-low tidal range, expanding only above 10 ft when needed; marker color is classified relative to the surrounding lunar-cycle median, where Normal-cycle means less than 15% above that median. {{if eq .CurrentDays 1}}Max flood, max ebb, and slack events are labeled with their times.{{else}}Small dots mark max flood, max ebb, and slack across the displayed range.{{end}} {{if .CurrentIsToday}}Red line marks report time when it falls inside the displayed range.{{end}}{{if gt .CurrentDays 1}} Day boundaries are emphasized for multi-day planning.{{end}}</div><div class="current-events-integrated"><div class="current-events-head"><strong>Key current times{{if .CurrentDateLabel}} — {{.CurrentDateLabel}}{{end}}</strong>{{if gt .CurrentDays 1}}<span>Selected start date only; graph covers {{.CurrentDays}} days.</span>{{end}}</div><div class="current-key-times">{{range .CurrentEvents}}<div class="current-key-time"><div class="current-key-time-time">{{.Time}}</div><div class="current-key-time-label"><strong>{{.Label}}</strong>{{if .Speed}}<span class="current-key-time-meta">{{.Speed}} · {{.Direction}}</span>{{end}}</div></div>{{else}}<p>No key current times in the conditions window.</p>{{end}}</div></div>{{if .CurrentPlanningHints}}<div class="current-planning"><div class="current-planning-head"><strong>Preferred-period planning hint{{if eq .CurrentDays 1}} — today / selected day{{end}}</strong><span>Current strength has separate caution and red-flag thresholds; the time buffer also warns about strong current just outside the preferred period.</span></div><div class="planning-preferences"><div class="planning-preferences-row"><label><span>Start</span><input id="planning-start" type="time" value="{{.PlanningStart}}" aria-label="Preferred period start"></label><label><span>End</span><input id="planning-end" type="time" value="{{.PlanningEnd}}" aria-label="Preferred period end"></label></div><div class="planning-preferences-row"><label><span>Ebb caution</span><input id="planning-caution-ebb" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningCautionEbb}}" aria-label="Ebb caution threshold in knots"><b>kt</b></label><label><span>Ebb red</span><input id="planning-max-ebb" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningMaxEbb}}" aria-label="Ebb red flag threshold in knots"><b>kt</b></label></div><div class="planning-preferences-row"><label><span>Flood caution</span><input id="planning-caution-flood" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningCautionFlood}}" aria-label="Flood caution threshold in knots"><b>kt</b></label><label><span>Flood red</span><input id="planning-max-flood" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningMaxFlood}}" aria-label="Flood red flag threshold in knots"><b>kt</b></label></div><div class="planning-preferences-row"><label><span>Caution time before/after period</span><input id="planning-buffer" type="number" min="0" max="360" step="15" value="{{.PlanningBuffer}}" aria-label="Caution time before or after preferred planning period in minutes"><b>min</b></label></div><div class="planning-preferences-row"><label><span>Currents station distance caution</span><input id="planning-current-distance-warning" type="number" min="0.1" max="{{.PlanningAutoCurrentLimit}}" step="0.1" value="{{.PlanningCurrentDistanceWarning}}" aria-label="Currents station distance caution threshold in nautical miles"><b>nmi</b></label></div></div><div class="planning-help"><strong>How these settings work:</strong> By default, ebb or flood below 2.0 kt is <strong>Preferred</strong>, 2.0 kt up to but not including 3.0 kt is <strong>Caution</strong>, and 3.0 kt or more during the preferred period is a <strong>Red flag</strong>. Ebb and flood thresholds can be adjusted independently. The caution time before/after period setting also warns when caution-level or stronger current occurs within that many minutes immediately before or after the preferred planning period; a threshold reached only there is reported as <strong>Caution</strong>. A currents station farther than the configured distance-caution threshold also makes the overall Bottom Line <strong>Caution</strong>, without changing the current-strength classification. Automatic current-station selection will not use a station beyond {{.PlanningAutoCurrentLimit}} nmi.</div><div class="current-planning-days">{{range .CurrentPlanningHints}}<div class="planning-day {{.Class}}"><div class="planning-date">{{.Date}}</div><div class="planning-status">{{if eq .Class "preferred"}}✓{{else if eq .Class "redflag"}}⚠{{else}}△{{end}} {{.Status}}</div><div class="planning-detail">{{.Detail}}</div></div>{{end}}</div><div class="planning-disclaimer">Current-based planning hint only; wind, swell, weather, traffic, and local effects still matter.</div></div>{{end}}</section>{{end}}
 <section id="full-report-card" class="card full details-link-card"><div><h2>Need the details?</h2><p class="details-note">Open the complete text-style report, including diagnostic and supporting information.</p></div><a class="details-link" href="{{.FullDetailsURL}}">View full report details →</a></section></div>
-<div class="footer"><strong>Mauri's Wind & Current Conditions</strong><br>NOAA/NDBC observations + NOAA CO-OPS current predictions · Conditions-planning aid, not a navigation system<br>Version {{.AppVersion}}</div></main><script>
+<div class="footer"><strong>Mauri's Wind & Current Conditions</strong><br>NOAA/NDBC observations + NWS marine forecasts + NOAA CO-OPS current predictions · Conditions-planning aid, not a navigation system<br>Version {{.AppVersion}}</div></main><script>
 (function(){
   var el = document.getElementById("sailing-location-map");
   if (!el || typeof L === "undefined") return;
@@ -3796,11 +4189,68 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
       mode: "",
       message: ""
     },
-    currentsOverlayVisible: true
+    currentsOverlayVisible: true,
+    marineZoneOverlayVisible: false
   };
 
   var sourcePoints = [];
   var candidateLayer = L.layerGroup().addTo(map);
+  var marineZoneLayer = null;
+
+  function setMarineZoneOverlay(zone, geometry) {
+    if (marineZoneLayer && map.hasLayer(marineZoneLayer)) {
+      map.removeLayer(marineZoneLayer);
+    }
+    marineZoneLayer = null;
+
+    var control = document.getElementById("map-marine-zone-control");
+    var checkbox = document.getElementById("map-show-marine-zone");
+    var label = document.getElementById("map-marine-zone-label");
+
+    zone = String(zone || "").trim().toUpperCase();
+    if (!zone || !geometry) {
+      if (control) control.hidden = true;
+      if (checkbox) checkbox.disabled = true;
+      if (label) label.textContent = "Show marine forecast zone";
+      return;
+    }
+
+    marineZoneLayer = L.geoJSON({
+      type: "Feature",
+      properties: {zone: zone},
+      geometry: geometry
+    }, {
+      style: function() {
+        return {
+          color: "#126b91",
+          weight: 2,
+          opacity: 0.85,
+          fillColor: "#126b91",
+          fillOpacity: 0.10,
+          interactive: false
+        };
+      }
+    });
+    marineZoneLayer.bindTooltip(
+      "NWS marine forecast zone " + zone,
+      {sticky:true, direction:"center", className:"map-zone-tooltip"}
+    );
+
+    if (control) control.hidden = false;
+    if (checkbox) {
+      checkbox.disabled = false;
+      checkbox.checked = !!mapState.marineZoneOverlayVisible;
+    }
+    if (label) label.textContent = "Show marine forecast zone " + zone;
+
+    if (mapState.marineZoneOverlayVisible) {
+      marineZoneLayer.addTo(map);
+    }
+  }
+
+  {{if .MarineForecastGeometry}}
+  setMarineZoneOverlay({{.MarineForecastZone}}, {{.MarineForecastGeometry}});
+  {{end}}
 
   // Compatibility accessors kept local to this script while the rest of the
   // map rendering code is migrated to mapState.
@@ -4136,6 +4586,20 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
     });
   }
 
+  var marineZoneCheckbox = document.getElementById("map-show-marine-zone");
+  if (marineZoneCheckbox) {
+    marineZoneCheckbox.checked = !!mapState.marineZoneOverlayVisible;
+    marineZoneCheckbox.addEventListener("change", function() {
+      mapState.marineZoneOverlayVisible = marineZoneCheckbox.checked;
+      if (!marineZoneLayer) return;
+      if (mapState.marineZoneOverlayVisible) {
+        if (!map.hasLayer(marineZoneLayer)) marineZoneLayer.addTo(map);
+      } else {
+        if (map.hasLayer(marineZoneLayer)) map.removeLayer(marineZoneLayer);
+      }
+    });
+  }
+
   updateRecenterControls();
 
   var findPoint = document.getElementById("map-find-point");
@@ -4186,6 +4650,126 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 
   renderSearchControls();
 
+  var marineForecastRequestSerial = 0;
+
+  function renderMarineForecast(payload) {
+    payload = payload || {};
+
+    var card = document.getElementById("marine-forecast-card");
+    var title = document.getElementById("marine-forecast-title");
+    var zoneLine = document.getElementById("marine-forecast-zone");
+    var alertsBox = document.getElementById("marine-forecast-alerts");
+    var periodsBox = document.getElementById("marine-forecast-periods");
+    var note = document.getElementById("marine-forecast-note");
+    var errorBox = document.getElementById("marine-forecast-error");
+
+    var zone = String(payload.zone || "").trim().toUpperCase();
+    var updated = String(payload.updated || "").trim();
+    var periods = Array.isArray(payload.periods) ? payload.periods : [];
+    var alerts = Array.isArray(payload.alerts) ? payload.alerts : [];
+    var error = String(payload.error || "").trim();
+
+    if (title) title.textContent = "Marine Forecast — selected location";
+
+    if (zoneLine) {
+      zoneLine.hidden = !zone;
+      zoneLine.textContent = zone
+        ? "National Weather Service marine zone " + zone +
+          (updated ? " · Updated " + updated : "")
+        : "";
+    }
+
+    if (alertsBox) {
+      alertsBox.hidden = alerts.length === 0;
+      alertsBox.innerHTML = alerts.map(function(alert) {
+        return '<span class="marine-alert">⚠ Marine-zone advisory — ' +
+          escapeHTML(alert) + "</span>";
+      }).join("");
+    }
+
+    if (periodsBox) {
+      periodsBox.hidden = periods.length === 0;
+      periodsBox.innerHTML = periods.map(function(period) {
+        var name = escapeHTML(period && period.name ? period.name : "");
+        var forecast = escapeHTML(period && period.forecast ? period.forecast : "");
+        return '<div class="marine-period">' +
+          (name ? "<strong>" + name + "</strong>" : "") +
+          (forecast ? "<p>" + forecast + "</p>" : "") +
+          "</div>";
+      }).join("");
+    }
+
+    if (note) note.hidden = periods.length === 0;
+
+    if (errorBox) {
+      errorBox.hidden = !error;
+      errorBox.textContent = error
+        ? "Marine forecast temporarily unavailable: " + error
+        : "";
+    }
+
+    if (card) card.hidden = !(periods.length || error);
+    setMarineZoneOverlay(zone, payload.geometry || null);
+  }
+
+  function refreshMarineForecastForSelectedLocation() {
+    if (!mapState.selectedLocation) return;
+
+    var serial = ++marineForecastRequestSerial;
+    var control = document.getElementById("map-marine-zone-control");
+    var checkbox = document.getElementById("map-show-marine-zone");
+    var label = document.getElementById("map-marine-zone-label");
+
+    if (control) control.hidden = false;
+    if (checkbox) checkbox.disabled = true;
+    if (label) label.textContent = "Finding marine forecast zone…";
+
+    var requestURL =
+      "/marine-forecast?lat=" +
+      encodeURIComponent(Number(mapState.selectedLocation.lat).toFixed(5)) +
+      "&lon=" +
+      encodeURIComponent(Number(mapState.selectedLocation.lon).toFixed(5));
+
+    fetch(requestURL, {
+      method: "GET",
+      headers: {"Accept": "application/json"},
+      cache: "no-store"
+    })
+      .then(function(response) {
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        return response.json();
+      })
+      .then(function(payload) {
+        if (serial !== marineForecastRequestSerial) return;
+        renderMarineForecast(payload);
+      })
+      .catch(function(err) {
+        if (serial !== marineForecastRequestSerial) return;
+        setMarineZoneOverlay("", null);
+
+        var card = document.getElementById("marine-forecast-card");
+        var title = document.getElementById("marine-forecast-title");
+        var periodsBox = document.getElementById("marine-forecast-periods");
+        var alertsBox = document.getElementById("marine-forecast-alerts");
+        var note = document.getElementById("marine-forecast-note");
+        var errorBox = document.getElementById("marine-forecast-error");
+        var zoneLine = document.getElementById("marine-forecast-zone");
+
+        if (title) title.textContent = "Marine Forecast — selected location";
+        if (zoneLine) zoneLine.hidden = true;
+        if (periodsBox) periodsBox.hidden = true;
+        if (alertsBox) alertsBox.hidden = true;
+        if (note) note.hidden = true;
+        if (errorBox) {
+          errorBox.hidden = false;
+          errorBox.textContent =
+            "Marine forecast temporarily unavailable: " +
+            (err && err.message ? err.message : "unknown error");
+        }
+        if (card) card.hidden = false;
+      });
+  }
+
   function selectSailingLocation(lat, lon, recenter) {
     lat = Number(lat);
     lon = Number(lon);
@@ -4225,6 +4809,7 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
     renderSearchControls();
     updateRecenterControls();
     renderWindMarkers();
+    refreshMarineForecastForSelectedLocation();
     return true;
   }
 
@@ -4503,6 +5088,10 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 
       mapState.selectedLocation = null;
       mapState.windCandidates = [];
+      marineForecastRequestSerial++;
+      setMarineZoneOverlay("", null);
+      var marineForecastCard = document.getElementById("marine-forecast-card");
+      if (marineForecastCard) marineForecastCard.hidden = true;
       setStationSearchState(false, "", "");
 
       if (selectedMarker) {
