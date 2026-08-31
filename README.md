@@ -44,11 +44,17 @@ When the selected NDBC station reports `ATMP`, the browser Wind card also shows 
 
 Nearby-station rows show compact live wind information such as `NW 10 kt G13` plus the age of that station's latest observation.
 
+The full-width browser Wind card includes a recent-observation history graph with separate sustained-wind and gust lines. A **10 / 20 / 30 / 40 / 50** reading selector changes the history depth without reloading the page. The selector uses the `/wind-readings` JSON endpoint to refresh the graph, recent-readings table, and wind summary together from one NDBC fetch.
+
+The same selected recent-observation set is carried into the full text report. For example, selecting 30 readings causes the text report's wind-detail section to show **LATEST 30 OBSERVATIONS**, keeping the browser graph/table and detailed report aligned.
+
 ### Currents
 
 NOAA CO-OPS current predictions provide flood, ebb, slack, current direction, prediction bin/depth, timelines, and current charts. The service automatically chooses a suitable current-prediction station and supports manual station/bin overrides. Automatic current-station selection is capped at **30 nautical miles** from the selected wind station; farther stations are treated as unavailable rather than presented as representative local current data. Explicit `current_station` overrides are not blocked by this automatic-selection limit.
 
 The HTML report supports one-, three-, and seven-day current views and planning hints for a preferred planning period. The current-speed chart uses a stable default scale of **±3.5 kt** so different dates can be compared visually; it expands only when displayed predictions exceed that range.
+
+The browser layout keeps current timing close to the graph. The former standalone **Current — [date]** summary card and separate Current Timeline card have been removed. The daylight/conditions window now appears directly in the **Tidal Current** card, and flood/ebb/slack milestones are presented there as a compact **Key current times** list. The separate **Tidal & Lunar Context** card remains available for lunar-cycle and tidal-range context.
 
 The current chart can overlay each day's predicted high-to-low tidal range on a separate right-side axis. That axis uses a stable default **0–10 ft** scale and expands only when needed. Each day is shown as a thin vertical marker centered in its day bucket rather than as a wide bar that could imply duration. The marker color is classified relative to the surrounding lunar-cycle median: **Normal-cycle** is less than 15% above the median, **Elevated** is at least 15% above, **Large** is at least 30% above, and **Exceptional** is at least 45% above. The numeric tidal-range value uses a consistent text color so the classification color is carried by the marker rather than the number.
 
@@ -78,7 +84,9 @@ For multi-day reports, the overall planning period uses the worst status present
 
 ### Service
 
-The application provides a command-line interface and HTTP service. Important endpoints include `/report`, `/wind-stations`, `/health`, `/welcome`, and `/voice`.
+The application provides a command-line interface and HTTP service. Important endpoints include `/report`, `/wind-readings`, `/wind-stations`, `/health`, `/welcome`, and `/voice`.
+
+`/wind-readings` is a lightweight browser-facing JSON endpoint for recent observations from the selected NDBC station. It supports the same 10/20/30/40/50 reading choices as the Wind card and lets the graph/table update without rebuilding the full current report page.
 
 `/report?format=html` returns the interactive browser report. Plain text and JSON are also supported.
 
@@ -239,22 +247,22 @@ The project uses a three-part version number with this convention:
 - **minor** — a new feature or significant bug fix
 - **micro** — small UI polish or a minor refinement
 
-The current release is **1.2.0**.
+The current release is **1.3.0**.
 
-Release 1.2.0 adds selected-station air temperature, richer and consistent nearby-station wind observations, direct latitude/longitude location entry, map/UI simplification, consistent marker tooltips, improved planning-cause wording, and the retained experimental `/voice` Bottom Line endpoint.
+Release 1.3.0 adds the full-width recent-wind history graph, asynchronous 10/20/30/40/50 observation selection, shared recent-observation depth between the browser and full text report, a simplified current-report layout, compact **Key current times** inside the Tidal Current card, and relocation of the daylight/conditions window into that same current-analysis card. It retains the selected-station air-temperature, direct-coordinate, nearby-station, map, planning, and experimental `/voice` capabilities from 1.2.0.
 
 The Render service can continue building and deploying from the `main` branch. A Git tag marks the exact commit corresponding to a public release without changing the deployment workflow.
 
-For release `1.2.0`, after the final code and README changes are ready:
+For release `1.3.0`, after the final code and README changes are ready:
 
 ```sh
 git status
 git diff
 git add main.go README.md
-git commit -m "Release v1.2.0: improve location and nearby wind reporting"
+git commit -m "Release v1.3.0: add wind history and streamline current layout"
 git push origin main
-git tag -a v1.2.0 -m "Release v1.2.0"
-git push origin v1.2.0
+git tag -a v1.3.0 -m "Release v1.3.0"
+git push origin v1.3.0
 git log --oneline --decorate -5
 ```
 
