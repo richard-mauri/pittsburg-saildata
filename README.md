@@ -292,13 +292,15 @@ The project uses a three-part version number with this convention:
 - **minor** — a new feature or significant bug fix
 - **micro** — small UI polish or a minor refinement
 
-The current release is **1.7.0**.
+The current release is **1.7.1**.
 
 The v87 refinement keeps release **1.6.0** and renames the generic **Map** basemap choice to **Street Map** for clearer distinction from Nautical Chart, Satellite, and Hybrid. This is a label-only UI change; internal `map_layer` behavior remains unchanged.
 
 The v86 refinement keeps release **1.6.0** and makes the NOAA HMS smoke styling basemap-aware. Street Map and Nautical Chart retain the subdued v83 smoke palette. Satellite and Hybrid use brighter yellow/amber/magenta smoke fills with stronger outlines so the smoke remains distinguishable over brown/green aerial imagery. Changing basemaps restyles any visible smoke layer in place and does not alter smoke data, selected location, stations, center, zoom, or NWS forecast-zone state.
 
-The v90 refinement keeps release **1.7.0** and makes the main Leaflet map vertically resizable. A drag handle directly below the map lets the user increase or decrease map height without changing center, zoom, selected location, wind/current stations, basemap, NWS forecast-zone state, or NOAA smoke state. Leaflet `invalidateSize()` is called during/after resizing so tiles and overlays redraw correctly. The handle also supports keyboard resizing with Up/Down arrows.
+Release 1.7.1 publishes the v90 map-resize refinement as a micro-version update. There are no additional behavior changes in v91 beyond the version bump and documentation alignment.
+
+The v90 refinement makes the main Leaflet map vertically resizable. A drag handle directly below the map lets the user increase or decrease map height without changing center, zoom, selected location, wind/current stations, basemap, NWS forecast-zone state, or NOAA smoke state. Leaflet `invalidateSize()` is called during/after resizing so tiles and overlays redraw correctly. The handle also supports keyboard resizing with Up/Down arrows.
 
 The v89 refinement keeps release **1.7.0** and fixes the remaining Bottom Line/voice path so the **Latest wind** sentence follows the selected `wind_unit`. Current-speed sentences in the same Bottom Line remain in knots. Compact JSON Bottom Line strings also honor the requested display unit, while their existing numeric `wind_kt` and `gust_kt` fields remain knot-based. The shared afternoon wind-statistics text is also made unit-aware for consistency.
 
@@ -316,19 +318,19 @@ Release 1.3.0 added the full-width recent-wind history graph, asynchronous 10/20
 
 The Render service can continue building and deploying from the `main` branch. A Git tag marks the exact commit corresponding to a public release without changing the deployment workflow.
 
-For release `1.7.0`, after the final code and README changes are ready:
+For release `1.7.1`, after the final code and README changes are ready:
 
 ```sh
 git status
 git diff
 git add main.go README.md
-git commit -m "Release v1.7.0: add wind speed unit control"
+git commit -m "Release v1.7.1: add resizable map"
 git push origin main
-git tag -a v1.7.0 -m "Release v1.7.0"
-git push origin v1.7.0
+git tag -a v1.7.1 -m "Release v1.7.1"
+git push origin v1.7.1
 git log --oneline --decorate -5
 ```
 
-The application displays `1.7.0`, while the corresponding Git tag uses the conventional `v1.7.0` form.
+The application displays `1.7.1`, while the corresponding Git tag uses the conventional `v1.7.1` form.
 
 For a later release, update only the static `appVersion` value in `main.go` during the final pre-commit regeneration, update this README when release notes or workflow documentation change, commit and push `main`, then create and push the matching annotated tag.
