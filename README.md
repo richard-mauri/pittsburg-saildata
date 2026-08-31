@@ -26,6 +26,8 @@ Clicking a nearby wind-station candidate opens a fixed information panel. The ca
 
 The map includes recenter controls for the selected location, selected wind station, and selected currents station. These controls preserve the user's current zoom level. **◎ My location** sets and centers the selected location but does not automatically change the committed wind station.
 
+The Leaflet base-layer selector offers **Street Map**, **Nautical Chart**, **Satellite**, and **Hybrid**. These are mutually exclusive background maps. NWS forecast-zone geometry and NOAA satellite smoke remain separate overlays, so either overlay can be shown on any basemap without changing selection or station state.
+
 The **Nearby Wind Stations** table is constrained to a compact scrolling panel with a sticky header. It now shows each candidate's latest available wind direction, sustained wind, gust, observation age, and distance from the selected location. The initial server-rendered list and the dynamic **Find Stations** refresh use the same wind-enrichment behavior so the displayed columns do not appear and disappear depending on how the list was loaded.
 
 Candidate map markers use the same Leaflet tooltip styling as the selected markers. The selected-location tooltip is simply **Selected location**.
@@ -66,7 +68,7 @@ The map includes an optional **Show satellite smoke (NOAA)** layer using NOAA Ha
 
 The service uses NOAA's dated HMS KML archive and searches recent dates for the newest available analysis. The KML polygons are parsed into Leaflet geometry and classified as **light**, **medium**, or **heavy** smoke. The map status reports the analysis date, total polygon count, and how many polygons intersect the current map view so an apparently empty overlay can be distinguished from a loading failure.
 
-HMS smoke density is qualitative satellite analysis, **not AQI and not measured PM2.5 concentration**. Because NOAA polygons can overlap, the fills and outlines are intentionally very translucent so the basemap, station markers, and forecast-zone boundaries remain readable.
+HMS smoke density is qualitative satellite analysis, **not AQI and not measured PM2.5 concentration**. Because NOAA polygons can overlap, the fills and outlines are intentionally very translucent so the basemap, station markers, and forecast-zone boundaries remain readable. On Satellite and Hybrid, the smoke palette changes automatically to higher-contrast yellow/amber/magenta styling with clearer outlines; Street Map and Nautical Chart retain the subdued palette.
 
 ### Browser presentation
 
@@ -276,7 +278,15 @@ The project uses a three-part version number with this convention:
 - **minor** — a new feature or significant bug fix
 - **micro** — small UI polish or a minor refinement
 
-The current release is **1.5.0**.
+The current release is **1.6.0**.
+
+The v87 refinement keeps release **1.6.0** and renames the generic **Map** basemap choice to **Street Map** for clearer distinction from Nautical Chart, Satellite, and Hybrid. This is a label-only UI change; internal `map_layer` behavior remains unchanged.
+
+The v86 refinement keeps release **1.6.0** and makes the NOAA HMS smoke styling basemap-aware. Street Map and Nautical Chart retain the subdued v83 smoke palette. Satellite and Hybrid use brighter yellow/amber/magenta smoke fills with stronger outlines so the smoke remains distinguishable over brown/green aerial imagery. Changing basemaps restyles any visible smoke layer in place and does not alter smoke data, selected location, stations, center, zoom, or NWS forecast-zone state.
+
+Release 1.6.0 expands the Leaflet basemap selector to four mutually exclusive choices: **Street Map** (OpenStreetMap), **Nautical Chart** (NOAA ENC-based Chart Display Service), **Satellite** (Esri World Imagery), and **Hybrid** (Esri imagery with reference labels). Changing the basemap preserves map center, zoom, selected location, selected wind/current stations, NWS forecast-zone state, and NOAA smoke-overlay state. The selected basemap is preserved in generated map URLs through the `map_layer` query parameter.
+
+Release 1.5.1 updates the browser product branding from **Mauri's Wind & Current Conditions** to **Mauri's Weather & Water Conditions** across the main report, welcome page, browser metadata, page titles, and footers. No forecast, wind, current, geolocation, smoke-overlay, or map-selection behavior changes in this release.
 
 Release 1.5.0 adds the **◎ My location** map control, generalized **NWS Forecast** / **NWS forecast zone** handling for both marine and non-marine selected points, and the optional NOAA HMS satellite-smoke overlay. Browser geolocation, map clicks, and direct coordinates all feed the same authoritative selected-location state. Changing that location refreshes NWS forecast-zone context while leaving the committed wind station unchanged until the user explicitly selects another station. The smoke overlay is qualitative light/medium/heavy satellite analysis, is off by default, and uses deliberately light opacity so the sailing map remains readable.
 
@@ -286,19 +296,19 @@ Release 1.3.0 added the full-width recent-wind history graph, asynchronous 10/20
 
 The Render service can continue building and deploying from the `main` branch. A Git tag marks the exact commit corresponding to a public release without changing the deployment workflow.
 
-For release `1.5.0`, after the final code and README changes are ready:
+For release `1.6.0`, after the final code and README changes are ready:
 
 ```sh
 git status
 git diff
 git add main.go README.md
-git commit -m "Release v1.5.0: add geolocation and map context overlays"
+git commit -m "Release v1.6.0: add satellite and hybrid basemaps"
 git push origin main
-git tag -a v1.5.0 -m "Release v1.5.0"
-git push origin v1.5.0
+git tag -a v1.6.0 -m "Release v1.6.0"
+git push origin v1.6.0
 git log --oneline --decorate -5
 ```
 
-The application displays `1.5.0`, while the corresponding Git tag uses the conventional `v1.5.0` form.
+The application displays `1.6.0`, while the corresponding Git tag uses the conventional `v1.6.0` form.
 
 For a later release, update only the static `appVersion` value in `main.go` during the final pre-commit regeneration, update this README when release notes or workflow documentation change, commit and push `main`, then create and push the matching annotated tag.

@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	appVersion                      = "1.5.0"
+	appVersion                      = "1.6.0"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -3983,18 +3983,18 @@ var welcomeHTMLTemplate = template.Must(template.New("welcome").Parse(`<!doctype
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="description" content="Mauri's Wind & Current Conditions — wind observations and predicted currents for supported waters, presented for sailors, paddlers, and other people on the water.">
-<meta property="og:title" content="Mauri's Wind & Current Conditions">
+<meta name="description" content="Mauri's Weather & Water Conditions — wind observations and predicted currents for supported waters, presented for sailors, paddlers, and other people on the water.">
+<meta property="og:title" content="Mauri's Weather & Water Conditions">
 <meta property="og:description" content="Pick where you're going. See nearby wind observations and predicted currents.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://pittsburg-saildata.onrender.com/welcome">
 <meta property="og:image" content="https://pittsburg-saildata.onrender.com/assets/hero.jpg">
 <meta property="og:image:alt" content="Sailing on the supported coastal and inland waters">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Mauri's Wind & Current Conditions">
+<meta name="twitter:title" content="Mauri's Weather & Water Conditions">
 <meta name="twitter:description" content="Pick where you're going. See nearby wind observations and predicted currents.">
 <meta name="twitter:image" content="https://pittsburg-saildata.onrender.com/assets/hero.jpg">
-<title>Mauri's Wind & Current Conditions — Welcome</title>
+<title>Mauri's Weather & Water Conditions — Welcome</title>
 <style>
 :root{--navy:#082b45;--blue:#126b91;--sea:#0b8793;--ink:#153242;--muted:#607886;--paper:#f5fafc;--card:#fff;--line:#d8e7ed;--shadow:0 12px 34px rgba(8,43,69,.10)}
 *{box-sizing:border-box}
@@ -4030,7 +4030,7 @@ h3{margin:1.2rem 0 .35rem;color:var(--navy)}
 <body>
 <main class="shell">
 <section class="hero">
-<div class="eyebrow">Mauri's Wind & Current Conditions</div>
+<div class="eyebrow">Mauri's Weather & Water Conditions</div>
 <h1>Pick where you're going. See the wind & current.</h1>
 <p>A free wind and current conditions tool for sailors, paddlers, and other people on the water, using nearby observations and predicted currents where supported.</p>
 <div class="cta-row">
@@ -4095,14 +4095,14 @@ h3{margin:1.2rem 0 .35rem;color:var(--navy)}
 </section>
 </div>
 
-<div class="footer">Mauri's Wind & Current Conditions · Conditions-planning utility, not a navigation system.</div>
+<div class="footer">Mauri's Weather & Water Conditions · Conditions-planning utility, not a navigation system.</div>
 </main>
 </body>
 </html>`))
 
 var sailingStationsHTMLTemplate = template.Must(template.New("stations").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Nearby Wind Stations — Mauri's Wind & Current Conditions</title>
+<title>Nearby Wind Stations — Mauri's Weather & Water Conditions</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <style>
@@ -4142,12 +4142,32 @@ a.station{color:var(--blue);font-weight:800;text-decoration:none}.badge{display:
     version:"1.3.0",
     attribution:"NOAA Office of Coast Survey"
   });
+  var satelliteLayer=L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",{
+    maxZoom:19,
+    attribution:"Tiles &copy; Esri"
+  });
+  var hybridImageryLayer=L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",{
+    maxZoom:19,
+    attribution:"Tiles &copy; Esri"
+  });
+  var hybridReferenceLayer=L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",{
+    maxZoom:19,
+    attribution:"Reference &copy; Esri",
+    pane:"overlayPane"
+  });
+  var hybridLayer=L.layerGroup([hybridImageryLayer,hybridReferenceLayer]);
   var mapLayerParam=new URL(window.location.href).searchParams.get("map_layer");
-  (mapLayerParam==="nautical"?nauticalLayer:streetLayer).addTo(map);
-  L.control.layers({"Map":streetLayer,"Nautical Chart":nauticalLayer},null,{collapsed:true,position:"topright"}).addTo(map);
+  var initialBaseLayer=streetLayer;
+  if(mapLayerParam==="nautical")initialBaseLayer=nauticalLayer;
+  else if(mapLayerParam==="satellite")initialBaseLayer=satelliteLayer;
+  else if(mapLayerParam==="hybrid")initialBaseLayer=hybridLayer;
+  initialBaseLayer.addTo(map);
+  L.control.layers({"Street Map":streetLayer,"Nautical Chart":nauticalLayer,"Satellite":satelliteLayer,"Hybrid":hybridLayer},null,{collapsed:true,position:"topright"}).addTo(map);
   map.on("baselayerchange",function(e){
     var target=new URL(window.location.href);
     if(e.layer===nauticalLayer)target.searchParams.set("map_layer","nautical");
+    else if(e.layer===satelliteLayer)target.searchParams.set("map_layer","satellite");
+    else if(e.layer===hybridLayer)target.searchParams.set("map_layer","hybrid");
     else target.searchParams.delete("map_layer");
     window.history.replaceState({},"",target.pathname+"?"+target.searchParams.toString()+target.hash);
   });
@@ -4168,23 +4188,23 @@ a.station{color:var(--blue);font-weight:800;text-decoration:none}.badge{display:
 
 var sailingDetailsHTMLTemplate = template.Must(template.New("details").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Full report details — Mauri's Wind & Current Conditions</title>
+<title>Full report details — Mauri's Weather & Water Conditions</title>
 <style>:root{--navy:#082b45;--blue:#126b91;--ink:#153242;--muted:#607886;--paper:#f5fafc;--card:#fff;--line:#d8e7ed}*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:1000px;margin:0 auto;padding:24px 16px 48px}a{color:var(--blue)}.back{display:inline-block;margin-bottom:18px;text-decoration:none;font-weight:800}.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px}h1{margin:0 0 6px;color:var(--navy);font-size:clamp(1.5rem,4vw,2.2rem)}.meta{color:var(--muted);margin-bottom:18px}.yogiism{text-align:center;color:var(--muted);font-style:italic;font-size:.9rem;margin:18px auto 0;max-width:760px}pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;font:14px/1.55 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}</style>
 </head><body><main><a class="back" href="javascript:history.back()">← Back to conditions</a><div class="card"><h1>Full report details</h1><div class="meta">{{.Title}}{{if .ReportTime}} · {{.ReportTime}}{{end}} · Version {{.AppVersion}}</div><pre>{{.FullText}}</pre></div>{{if .Yogiism}}<div class="yogiism">“{{.Yogiism}}” — Yogi Berra</div>{{end}}</main></body></html>`))
 
 var sailingHTMLTemplate = template.Must(template.New("sailing").Parse(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="description" content="Wind observations and predicted currents for supported waters, presented for people planning time on the water.">
-<meta property="og:title" content="Mauri's Wind & Current Conditions">
+<meta property="og:title" content="Mauri's Weather & Water Conditions">
 <meta property="og:description" content="Wind observations and predicted currents for supported waters, presented for people planning time on the water.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://pittsburg-saildata.onrender.com/">
 <meta property="og:image" content="https://pittsburg-saildata.onrender.com/assets/hero.jpg">
 <meta property="og:image:alt" content="Sailing on the supported coastal and inland waters">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Mauri's Wind & Current Conditions">
+<meta name="twitter:title" content="Mauri's Weather & Water Conditions">
 <meta name="twitter:description" content="Wind observations and predicted currents for supported waters, presented for people planning time on the water.">
 <meta name="twitter:image" content="https://pittsburg-saildata.onrender.com/assets/hero.jpg">
-<title>Mauri's Wind & Current Conditions — {{.Title}}</title>
+<title>Mauri's Weather & Water Conditions — {{.Title}}</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <style>:root{--navy:#082b45;--blue:#126b91;--sea:#0b8793;--ink:#153242;--muted:#607886;--paper:#f5fafc;--card:#fff;--line:#d8e7ed;--flood:#087f8c;--ebb:#365f91;--slack:#756d64;--shadow:0 12px 34px rgba(8,43,69,.10)}*{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#dff3f8,#f7fbfc 32rem);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Avenir Next",Avenir,Helvetica,Arial,sans-serif;line-height:1.45}.shell{max-width:880px;margin:auto;padding:28px 18px 64px}.hero{color:#fff;padding:34px 30px 30px;border-radius:24px;min-height:360px;display:flex;flex-direction:column;justify-content:flex-end;background:
@@ -4301,9 +4321,9 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 .marine-forecast-error{color:var(--muted);font-size:.9rem}
 @media(max-width:640px){.marine-periods{grid-template-columns:1fr}}
 .error-card{border-left:5px solid #b64735;background:#fff7f4}.error-card h2{color:#8f3025}.error-message{font-weight:650;line-height:1.5}.error-help{color:var(--muted);font-size:.9rem}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}.bottom.planning-preferred{background:#eff8f1;border-color:#b8d8c0}.bottom.planning-caution{background:#fff8e6;border-color:#e6c66a}.bottom.planning-redflag{background:#fff0ef;border-color:#e0a39d}.bottom .planning-period-status{margin:0 0 10px;font-weight:900;font-size:1.05rem}.bottom .planning-period-status.preferred{color:#176246}.bottom .planning-period-status.caution{color:#8a5a00}.bottom .planning-period-status.redflag{color:#9b3027}</style></head><body><main class="shell">
-<section class="hero"><div class="eyebrow">Mauri's Wind & Current Conditions</div><h1>{{.Title}}</h1><div class="sub">{{.ReportTime}} · {{.Station}}</div>{{if .Historical}}<span class="badge">Historical · {{.RequestedTime}}</span>{{end}}{{if .Yogiism}}<div class="yogiism">“{{.Yogiism}}” — Yogi Berra</div>{{end}}</section><div class="grid">
+<section class="hero"><div class="eyebrow">Mauri's Weather & Water Conditions</div><h1>{{.Title}}</h1><div class="sub">{{.ReportTime}} · {{.Station}}</div>{{if .Historical}}<span class="badge">Historical · {{.RequestedTime}}</span>{{end}}{{if .Yogiism}}<div class="yogiism">“{{.Yogiism}}” — Yogi Berra</div>{{end}}</section><div class="grid">
 <section id="bottom-line-card" class="card full bottom{{if .PlanningPeriodClass}} planning-{{.PlanningPeriodClass}}{{end}}"><h2>Bottom line</h2>{{if .PlanningPeriodCause}}<p><strong>{{.PlanningPeriodCause}}</strong></p>{{end}}{{if .PlanningPeriodDetail}}<p>{{.PlanningPeriodDetail}}</p>{{end}}{{range .BottomLine}}<p>{{.}}</p>{{else}}<p>Summary unavailable.</p>{{end}}</section>
-<section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map, enter coordinates, or use My location to choose a sailing location, then use Find stations near selected location. Panning only changes the view; to search somewhere else, move the selected ★ location first. Click a nearby wind station to pin its details and preview the associated currents station, then use the selection link in the map panel to commit the wind-station choice. Candidate stations and distances always refer to the selected location.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-navigation" aria-label="Map navigation"><button id="map-geolocate" class="map-nav-button" type="button" title="Use your device location as the selected location">◎ My location</button><button id="map-nav-selected" class="map-nav-button" type="button" title="Center map on selected location" {{if not .MapHasRequest}}disabled{{end}}>Center on selected location</button><button id="map-nav-wind" class="map-nav-button" type="button" title="Center map on selected wind station" {{if not .MapHasWind}}disabled{{end}}>Center on selected wind station</button><button id="map-nav-current" class="map-nav-button" type="button" title="Center map on selected currents station" {{if not .MapHasCurrent}}disabled{{end}}>Center on selected currents station</button></div><div class="map-state-controls" aria-label="Map selection controls"><label class="map-current-toggle"><input type="checkbox" id="map-show-currents" checked> Show selected currents station</label><label id="map-marine-zone-control" class="map-current-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">Show NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-current-toggle"><input type="checkbox" id="map-show-smoke"> <span>Show satellite smoke (NOAA)</span></label><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}" {{if not .MapHasRequest}}disabled{{end}}>Clear selected location</button></div><div class="map-coordinate-entry" aria-label="Enter exact location"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="number" step="any" min="-90" max="90" inputmode="decimal" placeholder="38.03542" {{if .MapHasRequest}}value="{{printf "%.5f" .MapRequestLat}}"{{end}}></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="number" step="any" min="-180" max="180" inputmode="decimal" placeholder="-121.88631" {{if .MapHasRequest}}value="{{printf "%.5f" .MapRequestLon}}"{{end}}></div><button id="map-use-coordinate" class="map-coordinate-use" type="button">Use location</button><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div class="map-controls"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Select a location to find stations</span><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div class="map-layer-note">Layer control: <strong>Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service. Chart layer is for planning/reference and does not replace official navigation products.</div><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
+<section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map, enter coordinates, or use My location to choose a sailing location, then use Find stations near selected location. Panning only changes the view; to search somewhere else, move the selected ★ location first. Click a nearby wind station to pin its details and preview the associated currents station, then use the selection link in the map panel to commit the wind-station choice. Candidate stations and distances always refer to the selected location.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-navigation" aria-label="Map navigation"><button id="map-geolocate" class="map-nav-button" type="button" title="Use your device location as the selected location">◎ My location</button><button id="map-nav-selected" class="map-nav-button" type="button" title="Center map on selected location" {{if not .MapHasRequest}}disabled{{end}}>Center on selected location</button><button id="map-nav-wind" class="map-nav-button" type="button" title="Center map on selected wind station" {{if not .MapHasWind}}disabled{{end}}>Center on selected wind station</button><button id="map-nav-current" class="map-nav-button" type="button" title="Center map on selected currents station" {{if not .MapHasCurrent}}disabled{{end}}>Center on selected currents station</button></div><div class="map-state-controls" aria-label="Map selection controls"><label class="map-current-toggle"><input type="checkbox" id="map-show-currents" checked> Show selected currents station</label><label id="map-marine-zone-control" class="map-current-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">Show NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-current-toggle"><input type="checkbox" id="map-show-smoke"> <span>Show satellite smoke (NOAA)</span></label><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}" {{if not .MapHasRequest}}disabled{{end}}>Clear selected location</button></div><div class="map-coordinate-entry" aria-label="Enter exact location"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="number" step="any" min="-90" max="90" inputmode="decimal" placeholder="38.03542" {{if .MapHasRequest}}value="{{printf "%.5f" .MapRequestLat}}"{{end}}></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="number" step="any" min="-180" max="180" inputmode="decimal" placeholder="-121.88631" {{if .MapHasRequest}}value="{{printf "%.5f" .MapRequestLon}}"{{end}}></div><button id="map-use-coordinate" class="map-coordinate-use" type="button">Use location</button><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div class="map-controls"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Select a location to find stations</span><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div class="map-layer-note">Base maps: <strong>Street Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service; <strong>Satellite</strong> uses Esri World Imagery; <strong>Hybrid</strong> combines Esri imagery with place/boundary labels. NWS forecast-zone and NOAA smoke layers remain independent overlays. The nautical chart layer is for planning/reference and does not replace official navigation products.</div><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
 {{if .WindError}}<section class="card full error-card"><h2>Wind station selection unavailable</h2><p class="error-message">{{.WindError}}</p><p class="error-help">The page is still available so you can inspect the request and nearby station diagnostics. Try nearby coordinates or an explicit NDBC station ID.</p></section>{{end}}
 <section class="card full wind-card"><h2>Wind</h2>
 <div class="metrics">
@@ -4338,7 +4358,7 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 
 {{if .CurrentChart}}<section id="current-chart-card" class="card full"><div class="current-chart-header"><div><h2>Tidal Current</h2>{{if .CurrentRangeLabel}}<div class="current-date-label">{{.CurrentRangeLabel}}</div>{{end}}</div></div><div class="current-range-toolbar" aria-label="Current graph date controls"><a class="current-date-nav" href="{{.CurrentPrevURL}}" aria-label="Previous date range">← Previous range</a><label class="current-control-label"><span>Start date</span><input id="current-date-picker" class="current-date-picker" type="date" value="{{.CurrentDateISO}}" aria-label="Choose starting date"></label><label class="current-control-label"><span>Range</span><select id="current-days-picker" class="current-date-picker" aria-label="Number of days"><option value="1" {{if eq .CurrentDays 1}}selected{{end}}>1 day</option><option value="3" {{if eq .CurrentDays 3}}selected{{end}}>3 days</option><option value="7" {{if eq .CurrentDays 7}}selected{{end}}>7 days</option></select></label><a class="current-date-nav {{if .CurrentIsToday}}is-current{{end}}" href="{{.CurrentTodayURL}}">Today</a><a class="current-date-nav" href="{{.CurrentNextURL}}" aria-label="Next date range">Next range →</a></div>{{if .CurrentWindow}}<div class="current-window-inline"><strong>{{if .CurrentWindowMode}}{{.CurrentWindowMode}}{{else}}Conditions window{{end}}</strong><span>{{.CurrentWindow}}</span></div>{{end}}<div class="chart-explainer"><strong>This is current, not tide height.</strong> Above zero = flood; below zero = ebb; crossings = slack water.</div>{{if .TideRangeOverlayAvailable}}<div class="tide-range-legend"><label class="tide-range-toggle"><input id="show-tide-range-overlay" type="checkbox" checked> Show daily tidal range on right axis</label><span class="tide-range-key"><span class="tide-range-swatch typical"></span>{{if .TideRangeLegendTypical}}{{.TideRangeLegendTypical}}{{else}}Normal-cycle (&lt; +15%){{end}}</span><span class="tide-range-key"><span class="tide-range-swatch elevated"></span>{{if .TideRangeLegendElevated}}{{.TideRangeLegendElevated}}{{else}}Elevated (≥ +15%){{end}}</span><span class="tide-range-key"><span class="tide-range-swatch large"></span>{{if .TideRangeLegendLarge}}{{.TideRangeLegendLarge}}{{else}}Large (≥ +30%){{end}}</span><span class="tide-range-key"><span class="tide-range-swatch exceptional"></span>{{if .TideRangeLegendExceptional}}{{.TideRangeLegendExceptional}}{{else}}Exceptional (≥ +45%){{end}}</span></div>{{end}}<div class="current-chart-wrap">{{.CurrentChart}}</div><div class="chart-note">NOAA 6-minute harmonic current predictions. The current-speed axis stays at ±3.5 kt for date-to-date comparison and expands only when needed. Darker bands are night; light areas are daylight; warm bands mark the configured preferred planning period. When enabled, thin daily markers use a stable 0–10 ft right axis for predicted high-to-low tidal range, expanding only above 10 ft when needed; marker color is classified relative to the surrounding lunar-cycle median, where Normal-cycle means less than 15% above that median. {{if eq .CurrentDays 1}}Max flood, max ebb, and slack events are labeled with their times.{{else}}Small dots mark max flood, max ebb, and slack across the displayed range.{{end}} {{if .CurrentIsToday}}Red line marks report time when it falls inside the displayed range.{{end}}{{if gt .CurrentDays 1}} Day boundaries are emphasized for multi-day planning.{{end}}</div><div class="current-events-integrated"><div class="current-events-head"><strong>Key current times{{if .CurrentDateLabel}} — {{.CurrentDateLabel}}{{end}}</strong>{{if gt .CurrentDays 1}}<span>Selected start date only; graph covers {{.CurrentDays}} days.</span>{{end}}</div><div class="current-key-times">{{range .CurrentEvents}}<div class="current-key-time"><div class="current-key-time-time">{{.Time}}</div><div class="current-key-time-label"><strong>{{.Label}}</strong>{{if .Speed}}<span class="current-key-time-meta">{{.Speed}} · {{.Direction}}</span>{{end}}</div></div>{{else}}<p>No key current times in the conditions window.</p>{{end}}</div></div>{{if .CurrentPlanningHints}}<div class="current-planning"><div class="current-planning-head"><strong>Preferred-period planning hint{{if eq .CurrentDays 1}} — today / selected day{{end}}</strong><span>Current strength has separate caution and red-flag thresholds; the time buffer also warns about strong current just outside the preferred period.</span></div><div class="planning-preferences"><div class="planning-preferences-row"><label><span>Start</span><input id="planning-start" type="time" value="{{.PlanningStart}}" aria-label="Preferred period start"></label><label><span>End</span><input id="planning-end" type="time" value="{{.PlanningEnd}}" aria-label="Preferred period end"></label></div><div class="planning-preferences-row"><label><span>Ebb caution</span><input id="planning-caution-ebb" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningCautionEbb}}" aria-label="Ebb caution threshold in knots"><b>kt</b></label><label><span>Ebb red</span><input id="planning-max-ebb" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningMaxEbb}}" aria-label="Ebb red flag threshold in knots"><b>kt</b></label></div><div class="planning-preferences-row"><label><span>Flood caution</span><input id="planning-caution-flood" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningCautionFlood}}" aria-label="Flood caution threshold in knots"><b>kt</b></label><label><span>Flood red</span><input id="planning-max-flood" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningMaxFlood}}" aria-label="Flood red flag threshold in knots"><b>kt</b></label></div><div class="planning-preferences-row"><label><span>Caution time before/after period</span><input id="planning-buffer" type="number" min="0" max="360" step="15" value="{{.PlanningBuffer}}" aria-label="Caution time before or after preferred planning period in minutes"><b>min</b></label></div><div class="planning-preferences-row"><label><span>Currents station distance caution</span><input id="planning-current-distance-warning" type="number" min="0.1" max="{{.PlanningAutoCurrentLimit}}" step="0.1" value="{{.PlanningCurrentDistanceWarning}}" aria-label="Currents station distance caution threshold in nautical miles"><b>nmi</b></label></div></div><div class="planning-help"><strong>How these settings work:</strong> By default, ebb or flood below 2.0 kt is <strong>Preferred</strong>, 2.0 kt up to but not including 3.0 kt is <strong>Caution</strong>, and 3.0 kt or more during the preferred period is a <strong>Red flag</strong>. Ebb and flood thresholds can be adjusted independently. The caution time before/after period setting also warns when caution-level or stronger current occurs within that many minutes immediately before or after the preferred planning period; a threshold reached only there is reported as <strong>Caution</strong>. A currents station farther than the configured distance-caution threshold also makes the overall Bottom Line <strong>Caution</strong>, without changing the current-strength classification. Automatic current-station selection will not use a station beyond {{.PlanningAutoCurrentLimit}} nmi.</div><div class="current-planning-days">{{range .CurrentPlanningHints}}<div class="planning-day {{.Class}}"><div class="planning-date">{{.Date}}</div><div class="planning-status">{{if eq .Class "preferred"}}✓{{else if eq .Class "redflag"}}⚠{{else}}△{{end}} {{.Status}}</div><div class="planning-detail">{{.Detail}}</div></div>{{end}}</div><div class="planning-disclaimer">Current-based planning hint only; wind, swell, weather, traffic, and local effects still matter.</div></div>{{end}}</section>{{end}}
 <section id="full-report-card" class="card full details-link-card"><div><h2>Need the details?</h2><p class="details-note">Open the complete text-style report, including diagnostic and supporting information.</p></div><a class="details-link" href="{{.FullDetailsURL}}">View full report details →</a></section></div>
-<div class="footer"><strong>Mauri's Wind & Current Conditions</strong><br>NOAA/NDBC observations + NWS forecast context + NOAA CO-OPS current predictions · Conditions-planning aid, not a navigation system<br>Version {{.AppVersion}}</div></main><script>
+<div class="footer"><strong>Mauri's Weather & Water Conditions</strong><br>NOAA/NDBC observations + NWS forecast context + NOAA CO-OPS current predictions · Conditions-planning aid, not a navigation system<br>Version {{.AppVersion}}</div></main><script>
 (function(){
   var el = document.getElementById("sailing-location-map");
   if (!el || typeof L === "undefined") return;
@@ -4370,14 +4390,46 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
     }
   );
 
+  var satelliteLayer = L.tileLayer(
+    "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    {
+      maxZoom: 19,
+      attribution: "Tiles &copy; Esri"
+    }
+  );
+
+  var hybridImageryLayer = L.tileLayer(
+    "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    {
+      maxZoom: 19,
+      attribution: "Tiles &copy; Esri"
+    }
+  );
+
+  var hybridReferenceLayer = L.tileLayer(
+    "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+    {
+      maxZoom: 19,
+      attribution: "Reference &copy; Esri",
+      pane: "overlayPane"
+    }
+  );
+
+  var hybridLayer = L.layerGroup([hybridImageryLayer, hybridReferenceLayer]);
+
   var mapLayerParam = new URL(window.location.href).searchParams.get("map_layer");
-  var activeBaseLayer = mapLayerParam === "nautical" ? nauticalLayer : streetLayer;
+  var activeBaseLayer = streetLayer;
+  if (mapLayerParam === "nautical") activeBaseLayer = nauticalLayer;
+  else if (mapLayerParam === "satellite") activeBaseLayer = satelliteLayer;
+  else if (mapLayerParam === "hybrid") activeBaseLayer = hybridLayer;
   activeBaseLayer.addTo(map);
 
   L.control.layers(
     {
-      "Map": streetLayer,
-      "Nautical Chart": nauticalLayer
+      "Street Map": streetLayer,
+      "Nautical Chart": nauticalLayer,
+      "Satellite": satelliteLayer,
+      "Hybrid": hybridLayer
     },
     null,
     {
@@ -4386,11 +4438,21 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
     }
   ).addTo(map);
 
-  var activeMapLayerName =
-    mapLayerParam === "nautical" ? "nautical" : "map";
+  var activeMapLayerName = "map";
+  if (mapLayerParam === "nautical") activeMapLayerName = "nautical";
+  else if (mapLayerParam === "satellite") activeMapLayerName = "satellite";
+  else if (mapLayerParam === "hybrid") activeMapLayerName = "hybrid";
 
   map.on("baselayerchange", function(e) {
-    activeMapLayerName = e.layer === nauticalLayer ? "nautical" : "map";
+    if (e.layer === nauticalLayer) activeMapLayerName = "nautical";
+    else if (e.layer === satelliteLayer) activeMapLayerName = "satellite";
+    else if (e.layer === hybridLayer) activeMapLayerName = "hybrid";
+    else activeMapLayerName = "map";
+
+    if (smokeLayer && map.hasLayer(smokeLayer)) {
+      smokeLayer.setStyle(smokeStyle);
+    }
+    updateSmokeLegendForBaseMap();
   });
 
   function updateRecenterControls() {
@@ -4530,6 +4592,18 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
     var density = feature && feature.properties
       ? String(feature.properties.density || "").toLowerCase()
       : "";
+    var imageryBase = activeMapLayerName === "satellite" || activeMapLayerName === "hybrid";
+
+    if (imageryBase) {
+      if (density === "heavy") {
+        return {color:"#ff4fa3",weight:1.5,opacity:.78,fillColor:"#ff2f92",fillOpacity:.18};
+      }
+      if (density === "medium") {
+        return {color:"#ffd24a",weight:1.4,opacity:.76,fillColor:"#ffb000",fillOpacity:.14};
+      }
+      return {color:"#fff3a6",weight:1.2,opacity:.72,fillColor:"#ffe766",fillOpacity:.10};
+    }
+
     if (density === "heavy") {
       return {color:"#8f3d36",weight:1,opacity:.34,fillColor:"#9b4137",fillOpacity:.12};
     }
@@ -4537,6 +4611,30 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
       return {color:"#b67825",weight:1,opacity:.30,fillColor:"#d29137",fillOpacity:.08};
     }
     return {color:"#7b8589",weight:1,opacity:.24,fillColor:"#aeb5b8",fillOpacity:.05};
+  }
+
+  function updateSmokeLegendForBaseMap() {
+    var imageryBase = activeMapLayerName === "satellite" || activeMapLayerName === "hybrid";
+    var light = document.querySelector(".smoke-swatch.light");
+    var medium = document.querySelector(".smoke-swatch.medium");
+    var heavy = document.querySelector(".smoke-swatch.heavy");
+    if (!light || !medium || !heavy) return;
+
+    if (imageryBase) {
+      light.style.background = "rgba(255,231,102,.28)";
+      light.style.borderColor = "rgba(255,243,166,.88)";
+      medium.style.background = "rgba(255,176,0,.30)";
+      medium.style.borderColor = "rgba(255,210,74,.90)";
+      heavy.style.background = "rgba(255,47,146,.32)";
+      heavy.style.borderColor = "rgba(255,79,163,.92)";
+    } else {
+      light.style.background = "rgba(174,181,184,.05)";
+      light.style.borderColor = "rgba(123,133,137,.24)";
+      medium.style.background = "rgba(210,145,55,.08)";
+      medium.style.borderColor = "rgba(182,120,37,.30)";
+      heavy.style.background = "rgba(155,65,55,.12)";
+      heavy.style.borderColor = "rgba(143,61,54,.34)";
+    }
   }
 
   function setSmokeStatus(message, isError) {
@@ -4550,7 +4648,10 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 
   function setSmokeLegendVisible(visible) {
     var legend = document.getElementById("map-smoke-legend");
-    if (legend) legend.hidden = !visible;
+    if (legend) {
+      legend.hidden = !visible;
+      if (visible) updateSmokeLegendForBaseMap();
+    }
   }
 
   function clearSmokeLayer() {
@@ -4695,6 +4796,10 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 
     if (activeMapLayerName === "nautical") {
       target.searchParams.set("map_layer", "nautical");
+    } else if (activeMapLayerName === "satellite") {
+      target.searchParams.set("map_layer", "satellite");
+    } else if (activeMapLayerName === "hybrid") {
+      target.searchParams.set("map_layer", "hybrid");
     } else {
       target.searchParams.delete("map_layer");
     }
