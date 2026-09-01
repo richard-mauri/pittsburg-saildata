@@ -76,6 +76,19 @@ The card also checks active NWS alerts for the **selected point** and can show u
 
 Forecast and alert retrieval are browser-focused. Historical reports, text/JSON output, Full Report Details, the station-browser page, and `/voice` do not make additional live NWS forecast requests. NWS retrieval failures do not prevent the rest of the conditions page from rendering.
 
+### Map Overlays control
+
+The main map groups visual overlays in a **Map Overlays** dropdown.
+
+Available overlays:
+
+- **NWS forecast zone** — selected-location forecast-zone geometry when available
+- **Satellite smoke (NOAA HMS)** — qualitative NOAA HMS light/medium/heavy smoke analysis
+- **Satellite Cloud Cover (NOAA/NESDIS)** — merged GOES-East/West GeoColor rendered dynamically from NOAA/NESDIS `Most_Recent_MERGEDGC` ImageServer for the current map viewport
+- **Weather radar (NWS NEXRAD via Iowa State IEM)** — current CONUS N0Q base-reflectivity mosaic using IEM's Web-Mercator `nexrad-n0q-900913` WMS layer; transparent where no precipitation echoes are present
+
+Satellite Cloud Cover and radar are off by default. Radar is sourced from NWS NEXRAD data through Iowa State IEM's current tiled mosaic service. They are visual map context only and do not affect report calculations, selected location, selected wind/current stations, NWS forecast lookup, smoke retrieval, current planning, or text/JSON output.
+
 ### NOAA satellite smoke overlay
 
 The map includes an optional **Show satellite smoke (NOAA)** layer using NOAA Hazard Mapping System (HMS) smoke polygons. The layer is off by default and does not change selected location, station selection, map center, or forecast-zone state.
@@ -292,11 +305,55 @@ The project uses a three-part version number with this convention:
 - **minor** — a new feature or significant bug fix
 - **micro** — small UI polish or a minor refinement
 
-The current release is **1.7.1**.
+The current release is **1.8.0**.
 
 The v87 refinement keeps release **1.6.0** and renames the generic **Map** basemap choice to **Street Map** for clearer distinction from Nautical Chart, Satellite, and Hybrid. This is a label-only UI change; internal `map_layer` behavior remains unchanged.
 
 The v86 refinement keeps release **1.6.0** and makes the NOAA HMS smoke styling basemap-aware. Street Map and Nautical Chart retain the subdued v83 smoke palette. Satellite and Hybrid use brighter yellow/amber/magenta smoke fills with stronger outlines so the smoke remains distinguishable over brown/green aerial imagery. Changing basemaps restyles any visible smoke layer in place and does not alter smoke data, selected location, stations, center, zoom, or NWS forecast-zone state.
+
+The v113 refinement keeps release **1.8.0** and reduces the **Latest Wind Readings** table viewport so it shows roughly three observation rows plus the sticky header. The remaining readings stay available through the table's internal scroll, keeping the Wind card compact while preserving the full selected history window. No wind data, graph, history selection, or report behavior changes.
+
+The v112 refinement keeps release **1.8.0** and declutters the **Choose Location** card by moving its basemap/provider and nautical-chart disclaimer to a compact **Map & Data Sources** reference card near the bottom of the page, immediately above **Need the details?**. The moved copy also updates the stale `visible-cloud` wording to **Satellite Cloud Cover**. No map provider, overlay, station-selection, or report behavior changes.
+
+The v111 refinement keeps release **1.8.0** and improves the HTML Bottom Line presentation. Instead of rendering the latest wind as a prose sentence, the Bottom Line now reuses the Wind card's compact **Direction / Wind / Gust / Air temp** metric tiles with a smaller **Latest observation** time caption. Only the HTML presentation changes: the existing prose Bottom Line remains intact for text, compact JSON, full-detail text, and voice output so those interfaces retain their established wording and compatibility.
+
+The v110 refinement keeps release **1.8.0** and improves the recent-wind graph interaction. The horizontal time axis now uses an adaptive set of roughly 4–6 labels across the selected history window instead of only first/middle/last. The graph also adds a direct inspection cursor: tap/click or drag across the plot to snap to the nearest actual observation and show its time, sustained wind, and gust in a compact readout above the chart. A vertical guide and temporary wind/gust markers identify the inspected observation only while using the cursor; the normal graph remains the clean no-dot solid-line presentation. Keyboard Left/Right and Home/End inspection is supported when the SVG has focus. No wind data or report calculations change.
+
+The v109 refinement keeps release **1.8.0** and removes the individual observation dots from the recent-wind graph. Sustained wind and gust remain continuous solid lines, while the readings table continues to provide the exact observation values. No wind data, history-window, report, or map behavior changes.
+
+The v108 refinement keeps release **1.8.0** and simplifies the recent-wind graph. The gust series is now a solid line rather than dashed, with a slightly thinner stroke than sustained wind. The legend uses the same solid treatment. No wind data, history-window, report, or map behavior changes.
+
+The v107 refinement keeps release **1.8.0**. NWS forecast zones now use a two-layer boundary so they remain visible on Satellite/Hybrid: a wide dark halo under a bright cyan line with only a faint interior tint. Street Map/Nautical retain a simpler blue boundary with a light halo. The cloud option is renamed **Satellite Cloud Cover (NOAA)** while keeping the same NOAA/NESDIS GeoColor backend. The Wind card history selector is now time based — **1h, 4h, 8h, 12h, 16h, 20h, 24h** — with **4h default**. `/wind-readings` now uses `wind_hours`, and Full Report Details carries the same window. The legacy `latest_10` JSON field name is retained for compatibility.
+
+The v106 refinement keeps release **1.8.0** and replaces the coarse nowCOAST visible-cloud WMS with NOAA/NESDIS **Most_Recent_MERGEDGC GeoColor** from the ArcGIS ImageServer. Instead of stretching fixed weather tiles, the browser requests `/exportImage` for the map's actual EPSG:3857 viewport and screen size, using bilinear interpolation and up to 2× device-pixel resolution. The returned image is overlaid on exactly the requested bounds and refreshed after pan/zoom, so NOAA performs the viewport rendering rather than Leaflet magnifying a coarse WMS mosaic. The old zoom-6 cloud cutoff is removed for evaluation. v106 also removes routine radar loading/success diagnostics; only genuine radar/cloud failures are shown. Radar source and v95 smoke styling are otherwise unchanged.
+
+The v105 refinement keeps release **1.8.0** and replaces the main map's expanded Leaflet basemap radio panel with a custom **Map Types** dropdown beside **Map Overlays**. Street Map, Nautical Chart, Satellite, and Hybrid remain mutually exclusive radio choices. The underlying basemap layers are unchanged; the new control drives the same layer objects, preserves `map_layer` in the browser URL, and reasserts active cloud/radar/smoke overlay stacking after every type change. The nearby-station map's compact Leaflet selector is unchanged. Radar, cloud, and smoke data/provider behavior is unchanged.
+
+The v104 refinement keeps release **1.8.0** and tightens the visible-cloud usefulness limit from zoom 8 to zoom 6. Testing showed the NOAA GOES visible mosaic was still too coarsely resampled at zoom 8 for local Bay Area use. v104 therefore treats the cloud overlay as a regional/synoptic layer: it automatically hides above zoom 6, displays a short zoom-out message, and restores automatically when returning to zoom 6 or lower. Radar and smoke behavior are unchanged.
+
+The v103 refinement keeps release **1.8.0** and limits the visible-cloud overlay to zoom level 6 or lower. NOAA GOES visible imagery is a large-area meteorological product rather than street-level imagery, so allowing Leaflet to continue displaying it at close zoom produced coarse gray/blocky resampling. v103 automatically removes the cloud layer above zoom 6, shows a short status message asking the user to zoom out, and restores the layer automatically when zooming back to 6 or lower. Radar and smoke behavior are unchanged.
+
+The v102 refinement keeps release **1.8.0** and fixes weather-overlay stacking across basemap changes. Cloud imagery now renders in a dedicated Leaflet pane at z-index 430 and radar in a dedicated pane at z-index 440, both above ordinary basemap tiles. Active cloud/radar layers are also explicitly brought to the front when enabled and after every `baselayerchange`, preventing Satellite/Hybrid/Nautical layers from covering them. Smoke/provider behavior is unchanged.
+
+The v101 refinement keeps release **1.8.0** and fixes the actual reason the new cloud and radar checkboxes were inert. The script constructed both Leaflet overlay objects near the basemap setup, but a later variable-initialization block then executed `cloudLayer = null` and `radarLayer = null`, destroying the references before the checkbox handlers ran. v101 declares each layer at construction time and removes the later destructive null initialization. This also allows the radar loading/success/error diagnostics added in v100 to execute. Radar provider, cloud provider, and v95 smoke styling are otherwise unchanged.
+
+The v100 refinement keeps release **1.8.0** and fixes the radar projection/layer mismatch. Leaflet's map is EPSG:3857/Web Mercator, so the IEM NEXRAD WMS now requests the Web-Mercator-specific layer `nexrad-n0q-900913` instead of `nexrad-n0q`. v100 also adds explicit radar diagnostics: enabling radar reports loading, successful tile count, or tile failures, so a transparent no-echo area can be distinguished from an actual service/rendering failure. Smoke and cloud behavior are unchanged.
+
+The v99 refinement keeps release **1.8.0** and replaces the unsuccessful IEM TMS radar integration with IEM's explicitly documented CONUS NEXRAD Base Reflectivity WMS endpoint, `https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q.cgi?`, using Web-Mercator layer `nexrad-n0q-900913`, PNG transparency, and WMS 1.1.1. Smoke and cloud behavior are unchanged.
+
+The v98 refinement keeps release **1.8.0** and changes only Leaflet's addressing mode for the Iowa State IEM radar tiles. IEM documents the service as TMS, so the radar `L.tileLayer` now sets `tms: true`, causing Leaflet to invert the Y tile coordinate instead of requesting the service as standard XYZ tiles. Smoke and cloud behavior are unchanged.
+
+The v97 refinement keeps release **1.8.0** and corrects the Iowa State IEM radar tile URL. The radar overlay now uses the documented current NEXRAD TMS path `https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q.cgi?`. The radar product remains the current nationwide NEXRAD base-reflectivity mosaic. Cloud and smoke behavior are unchanged.
+
+The v96 refinement keeps release **1.8.0** and changes only the radar transport. The unsuccessful browser-side NOAA nowCOAST WMS radar layer is replaced by Iowa State University's documented current NEXRAD N0Q Web-Mercator tile service, `https://mesonet.agron.iastate.edu/c/tile.py/1.0.0/nexrad-n0q/{z}/{x}/{y}.png`. The tiles are generated from NWS NEXRAD base-reflectivity data and are designed for standard slippy-map clients such as Leaflet. The v95 smoke fill and outline styling is unchanged.
+
+The v95 refinement keeps release **1.8.0** and restores stronger Satellite/Hybrid smoke fills after v94's separate outline layer made polygon interiors too faint. The dedicated outline layer remains unchanged, but light/medium/heavy imagery fills are raised to approximately 18% / 24% / 30% opacity so smoke density is visible inside each boundary without obscuring the basemap.
+
+The v94 refinement keeps release **1.8.0** and replaces the unsuccessful v92/v93 weather-overlay wiring with NOAA nowCOAST GeoServer WMS services. Visible clouds use `/geoserver/observations/satellite/ows` with `global_visible_imagery_mosaic`; radar uses `/geoserver/observations/weather_radar/ows` with `conus_base_reflectivity_mosaic`. Both use WMS 1.1.1. Radar is naturally transparent where no precipitation echoes exist. v94 also renders smoke boundaries in a separate top-layer GeoJSON outline so overlapping HMS fills cannot bury the border. Satellite/Hybrid use a thick cyan outline; Street Map/Nautical use a dark neutral outline.
+
+The v93 refinement keeps release **1.8.0** and corrects the new NOAA cloud/radar overlay definitions after v92 produced empty layers. Visible clouds now use NOAA nowCOAST's satellite imagery WMS visible-cloud layer `25`, and radar uses the nowCOAST weather-radar WMS endpoint with `conus_base_reflectivity_mosaic`. Satellite/Hybrid smoke polygons also gain a cool cyan outline so the warm yellow/amber/magenta fills remain distinct over brown/orange aerial imagery.
+
+Release 1.8.0 consolidates visual map layers under a **Map Overlays** dropdown. The NWS forecast-zone and NOAA HMS smoke toggles move into that menu, and two new off-by-default NOAA overlays are added: **Visible satellite clouds** from NOAA nowCOAST GOES visible imagery and **Weather radar** from NOAA/NWS nowCOAST base-reflectivity imagery. All overlays remain independent of the Street Map/Nautical Chart/Satellite/Hybrid basemap choice and do not change map selection, center, zoom, station, forecast, or report state.
 
 Release 1.7.1 publishes the v90 map-resize refinement as a micro-version update. There are no additional behavior changes in v91 beyond the version bump and documentation alignment.
 
@@ -318,19 +375,19 @@ Release 1.3.0 added the full-width recent-wind history graph, asynchronous 10/20
 
 The Render service can continue building and deploying from the `main` branch. A Git tag marks the exact commit corresponding to a public release without changing the deployment workflow.
 
-For release `1.7.1`, after the final code and README changes are ready:
+For release `1.8.0`, after the final code and README changes are ready:
 
 ```sh
 git status
 git diff
 git add main.go README.md
-git commit -m "Release v1.7.1: add resizable map"
+git commit -m "Release v1.8.0: add map overlay controls"
 git push origin main
-git tag -a v1.7.1 -m "Release v1.7.1"
-git push origin v1.7.1
+git tag -a v1.8.0 -m "Release v1.8.0"
+git push origin v1.8.0
 git log --oneline --decorate -5
 ```
 
-The application displays `1.7.1`, while the corresponding Git tag uses the conventional `v1.7.1` form.
+The application displays `1.8.0`, while the corresponding Git tag uses the conventional `v1.8.0` form.
 
 For a later release, update only the static `appVersion` value in `main.go` during the final pre-commit regeneration, update this README when release notes or workflow documentation change, commit and push `main`, then create and push the matching annotated tag.

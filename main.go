@@ -22,20 +22,20 @@ import (
 )
 
 const (
-	appVersion                      = "1.7.1"
+	appVersion                      = "1.8.0"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
 	maxAutoCurrentStationDistanceNM = 30.0
 	// Tidal-range context thresholds are relative to the surrounding lunar-cycle median.
-	elevatedTideRangePercent    = 15.0
-	largeTideRangePercent       = 30.0
-	exceptionalTideRangePercent = 45.0
-	defaultStartHour            = -1
-	defaultEndHour              = -1
-	defaultWindReadingCount     = 10
-	maxWindReadingCount         = 50
-	timeZoneName                = "America/Los_Angeles"
+	elevatedTideRangePercent      = 15.0
+	largeTideRangePercent         = 30.0
+	exceptionalTideRangePercent   = 45.0
+	defaultStartHour              = -1
+	defaultEndHour                = -1
+	defaultWindReadingHours       = 4
+	maxRecentWindObservationCount = 400
+	timeZoneName                  = "America/Los_Angeles"
 )
 
 type SailingReport struct {
@@ -332,20 +332,41 @@ func parsePlanningBuffer(q url.Values) int {
 	return parsed
 }
 
-func parseWindReadingCount(q url.Values) int {
-	value := strings.TrimSpace(q.Get("wind_readings"))
+func parseWindReadingHours(q url.Values) int {
+	value := strings.TrimSpace(q.Get("wind_hours"))
 	switch value {
+	case "1":
+		return 1
+	case "8":
+		return 8
+	case "12":
+		return 12
+	case "16":
+		return 16
 	case "20":
 		return 20
-	case "30":
-		return 30
-	case "40":
-		return 40
-	case "50":
-		return 50
+	case "24":
+		return 24
 	default:
-		return defaultWindReadingCount
+		return defaultWindReadingHours
 	}
+}
+
+func windObservationsForHours(observations []Observation, reference time.Time, loc *time.Location, hours int) []WindObservation {
+	if hours <= 0 {
+		hours = defaultWindReadingHours
+	}
+	items := makeWindObservationList(findLatestN(observations, maxRecentWindObservationCount), reference, loc)
+	cutoff := reference.Add(-time.Duration(hours) * time.Hour)
+	futureTolerance := reference.Add(5 * time.Minute)
+	result := make([]WindObservation, 0, len(items))
+	for _, item := range items {
+		if item.Time.Before(cutoff) || item.Time.After(futureTolerance) {
+			continue
+		}
+		result = append(result, item)
+	}
+	return result
 }
 
 const knotsToMPH = 1.15078
@@ -890,7 +911,7 @@ func runServer(
 			return
 		}
 
-		count := parseWindReadingCount(r.URL.Query())
+		hours := parseWindReadingHours(r.URL.Query())
 		windUnit := parseWindUnit(r.URL.Query())
 		observations, err := getWindStation(stationID)
 		if err != nil {
@@ -899,10 +920,11 @@ func runServer(
 		}
 
 		report := buildCurrentWindReport(stationID, observations, loc)
-		report.Latest10 = makeWindObservationList(
-			findLatestN(observations, count),
+		report.Latest10 = windObservationsForHours(
+			observations,
 			report.ReportTime,
 			loc,
+			hours,
 		)
 
 		type reading struct {
@@ -914,12 +936,14 @@ func runServer(
 		}
 		payload := struct {
 			Station  string    `json:"station"`
+			Hours    int       `json:"hours"`
 			Count    int       `json:"count"`
 			Summary  string    `json:"summary"`
 			Readings []reading `json:"readings"`
 		}{
 			Station: stationID,
-			Count:   count,
+			Hours:   hours,
+			Count:   len(report.Latest10),
 		}
 
 		var summary strings.Builder
@@ -1307,11 +1331,12 @@ func runServer(
 		}
 
 		if report.Historical == nil {
-			windReadingCount := parseWindReadingCount(r.URL.Query())
-			report.Latest10 = makeWindObservationList(
-				findLatestN(observations, windReadingCount),
+			windReadingHours := parseWindReadingHours(r.URL.Query())
+			report.Latest10 = windObservationsForHours(
+				observations,
 				report.ReportTime,
 				loc,
+				windReadingHours,
 			)
 		}
 
@@ -1483,7 +1508,7 @@ type htmlReportData struct {
 	WindSummary                                                   string
 	WindSelection                                                 string
 	WindDistanceWarning                                           string
-	WindReadingCount                                              int
+	WindReadingHours                                              int
 	WindUnit                                                      string
 	WindReadings                                                  []htmlWindReading
 	WindCandidates                                                []htmlWindCandidate
@@ -1534,6 +1559,7 @@ type htmlReportData struct {
 	PlanningCurrentDistanceWarning, PlanningAutoCurrentLimit      string
 	CurrentChart                                                  template.HTML
 	BottomLine                                                    []string
+	BottomLineNarrative                                           []string
 	FullText                                                      string
 	MarineForecastStation                                         string
 	MarineForecastZone                                            string
@@ -2663,7 +2689,7 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 		d.WindSummary = strings.TrimSpace(windText.String())
 	}
 
-	d.WindReadingCount = parseWindReadingCount(report.RequestQuery)
+	d.WindReadingHours = parseWindReadingHours(report.RequestQuery)
 	if report.Historical == nil {
 		for _, reading := range report.Latest10 {
 			windText := "—"
@@ -3176,6 +3202,7 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 			"Wind station selection is unavailable for the requested location.",
 			"Try nearby coordinates, an explicit NDBC station ID, or enable debug_wind=1 to inspect nearby candidates.",
 		)
+		d.BottomLineNarrative = append(d.BottomLineNarrative, d.BottomLine...)
 		d.FullText = fmt.Sprintf(
 			"WIND STATION SELECTION UNAVAILABLE\n--------------------------------\n%s",
 			d.WindError,
@@ -3187,6 +3214,9 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 			line = strings.TrimSpace(line)
 			if line != "" && line != "BOTTOM LINE" && !strings.HasPrefix(line, "---") {
 				d.BottomLine = append(d.BottomLine, line)
+				if !strings.HasPrefix(line, "Latest wind at ") {
+					d.BottomLineNarrative = append(d.BottomLineNarrative, line)
+				}
 			}
 		}
 		var full strings.Builder
@@ -4306,7 +4336,7 @@ var sailingHTMLTemplate = template.Must(template.New("sailing").Parse(`<!doctype
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <style>:root{--navy:#082b45;--blue:#126b91;--sea:#0b8793;--ink:#153242;--muted:#607886;--paper:#f5fafc;--card:#fff;--line:#d8e7ed;--flood:#087f8c;--ebb:#365f91;--slack:#756d64;--shadow:0 12px 34px rgba(8,43,69,.10)}*{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#dff3f8,#f7fbfc 32rem);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Avenir Next",Avenir,Helvetica,Arial,sans-serif;line-height:1.45}.shell{max-width:880px;margin:auto;padding:28px 18px 64px}.hero{color:#fff;padding:34px 30px 30px;border-radius:24px;min-height:360px;display:flex;flex-direction:column;justify-content:flex-end;background:
 linear-gradient(180deg,rgba(4,24,38,.06) 12%,rgba(4,24,38,.24) 48%,rgba(4,24,38,.86) 100%),
-url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text-shadow:0 2px 12px rgba(0,0,0,.45)}.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-weight:800;font-size:.76rem;opacity:.8}.photo-tag{margin-top:14px;font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;opacity:.72}h1{font-size:clamp(1.8rem,6vw,3.2rem);line-height:1.05;margin:.4rem 0 .6rem;letter-spacing:-.035em}.sub{opacity:.82}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}.full{grid-column:1/-1}h2{font-size:.82rem;letter-spacing:.13em;text-transform:uppercase;color:var(--blue);margin:0 0 16px}.bottom{font-size:1.13rem}.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.wind-card .metric{min-width:0}.wind-card .value{white-space:nowrap}@media(max-width:640px){.wind-card .metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}.metric{background:var(--paper);border-radius:15px;padding:14px}.label{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700}.value{font-size:1.55rem;font-weight:800;color:var(--navy)}.meta{color:var(--muted);font-size:.88rem;margin-top:12px}.station{font-weight:800;font-size:1.1rem;color:var(--navy)}.wind-distance-warning{margin-top:10px;padding:10px 12px;border:1px solid #e7c978;border-radius:12px;background:#fff8df;color:#654d08;font-size:.9rem}.wind-distance-warning strong{color:#4e3a00}.wind-summary{white-space:pre-line;margin-top:14px;padding:13px 14px;background:#eef7fa;border-left:4px solid var(--sea);border-radius:10px;color:var(--ink);font-size:.92rem}.event{display:grid;grid-template-columns:88px 12px 1fr;gap:12px;align-items:center;min-height:58px}.time{font-weight:800;color:var(--navy)}.dot{width:12px;height:12px;border-radius:50%;background:var(--slack);box-shadow:0 0 0 5px #edf3f5}.flood .dot{background:var(--flood)}.ebb .dot{background:var(--ebb)}.eventbody{border-left:2px solid var(--line);padding:8px 0 8px 18px}.eventlabel{font-weight:800}.eventdata{color:var(--muted);font-size:.9rem}.badge{display:inline-block;border-radius:999px;padding:5px 10px;background:#e9f6fb;color:var(--blue);font-size:.75rem;font-weight:800;margin-top:12px}.footer{text-align:center;color:var(--muted);font-size:.78rem;margin-top:22px}.hero .yogiism{margin:18px 0 0;max-width:720px;color:#fff;font-style:italic;font-size:.96rem;line-height:1.4;opacity:.96}.full-report{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:.88rem;line-height:1.55;background:#071f31;color:#e7f4f8;border-radius:14px;padding:18px;overflow-x:auto}.wind-readings{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}.wind-readings-header{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:8px}.wind-readings-title{font-weight:850;color:var(--navy)}.wind-reading-control{display:flex;align-items:flex-end;gap:7px;flex-wrap:wrap}.wind-reading-control label{display:flex;flex-direction:column;gap:3px;color:var(--muted);font-size:.72rem;font-weight:850;text-transform:uppercase;letter-spacing:.04em}.wind-reading-control select{min-width:76px;padding:6px 28px 6px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;font:inherit}.wind-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap}.wind-card-head h2{margin-bottom:16px}.wind-unit-control{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:.72rem;font-weight:850;text-transform:uppercase;letter-spacing:.04em}.wind-unit-control select{padding:6px 28px 6px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;font:inherit;color:var(--ink)}.wind-reading-chart{margin:4px 0 12px;border:1px solid var(--line);border-radius:10px;background:#fff;padding:8px}.wind-reading-chart svg{display:block;width:100%;height:auto;min-height:260px;max-height:320px}.wind-chart-grid{stroke:#dce6e9;stroke-width:1}.wind-chart-axis{stroke:#8aa0a8;stroke-width:1}.wind-chart-wind{fill:none;stroke:#126b91;stroke-width:2.5;stroke-linejoin:round;stroke-linecap:round}.wind-chart-gust{fill:none;stroke:#a95a24;stroke-width:2;stroke-linejoin:round;stroke-linecap:round;stroke-dasharray:5 4}.wind-chart-dot-wind{fill:#126b91}.wind-chart-dot-gust{fill:#a95a24}.wind-chart-label{fill:#60747c;font-size:11px;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.wind-chart-legend{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin:0 0 6px;color:var(--muted);font-size:.78rem;font-weight:750}.wind-chart-key{display:inline-flex;align-items:center;gap:6px}.wind-chart-key-line{display:inline-block;width:22px;border-top:3px solid #126b91}.wind-chart-key-line.gust{border-top-color:#a95a24;border-top-style:dashed}.wind-chart-empty{padding:34px 12px;text-align:center;color:var(--muted);font-size:.85rem}.wind-readings-wrap{max-height:250px;overflow:auto;border:1px solid var(--line);border-radius:10px}.wind-readings-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.84rem}.wind-readings-table th,.wind-readings-table td{padding:7px 9px;border-top:1px solid var(--line);text-align:left;white-space:nowrap}.wind-readings-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc;color:var(--muted);font-size:.7rem;text-transform:uppercase;letter-spacing:.05em}.wind-readings-table tbody tr:first-child td{border-top:0}.card-action-row{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}#current-summary-card,.wind-card{min-width:0}.timeline-scope-note{margin:.15rem 0 1rem;color:var(--muted);font-size:.88rem}.current-events-integrated{margin:14px 0 4px;padding:10px 0 0;border-top:1px solid var(--line)}.current-events-head{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:8px}.current-events-head strong{color:var(--navy);font-size:.92rem}.current-events-head span{color:var(--muted);font-size:.78rem}.current-key-times{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:28px;row-gap:2px}.current-key-time{display:grid;grid-template-columns:76px minmax(0,1fr);gap:10px;align-items:baseline;padding:5px 0;border-bottom:1px solid #edf2f3;font-size:.86rem}.current-key-time-time{font-weight:800;color:var(--navy);white-space:nowrap}.current-key-time-label{color:var(--ink)}.current-key-time-label strong{font-weight:800}.current-key-time-meta{color:var(--muted);margin-left:6px;white-space:nowrap}@media(max-width:640px){.current-key-times{grid-template-columns:1fr}.current-key-time{grid-template-columns:72px minmax(0,1fr)}}.details-link-card{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap}.details-link-card h2{margin-bottom:.2rem}.details-link{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;white-space:nowrap}.details-note{color:var(--muted);font-size:.88rem;margin:-4px 0 14px}.current-chart-header{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap}.current-window-inline{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin:2px 0 10px;color:var(--muted);font-size:.86rem}.current-window-inline strong{color:var(--navy);font-size:.86rem}.current-window-inline span{white-space:nowrap}.current-chart-header h2{margin-bottom:.15rem}.current-date-label{color:var(--muted);font-weight:750;font-size:.9rem}.current-range-toolbar{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin:8px 0 10px;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:var(--paper)}.current-range-toolbar .current-date-nav{display:inline-flex;align-items:center;min-height:44px;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:8px 12px;background:#fff;color:var(--blue);font-size:.86rem;font-weight:850}.current-range-toolbar .current-date-nav.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-control-label{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:.75rem;font-weight:850}.current-control-label .current-date-picker{min-height:44px;font-size:1rem}@media(max-width:640px){.current-range-toolbar{align-items:stretch}.current-control-label{flex:1 1 140px}.current-range-toolbar .current-date-nav{justify-content:center;flex:1 1 135px}}.current-date-controls{display:flex;gap:7px;flex-wrap:wrap;align-items:center}.current-date-picker{border:1px solid var(--line);border-radius:999px;padding:6px 10px;background:#fff;color:var(--navy);font:inherit;font-size:.82rem;font-weight:750;min-height:34px}.current-date-picker:focus{outline:2px solid var(--blue);outline-offset:2px}.current-refreshing{opacity:.55;transition:opacity .15s ease}.current-date-controls a{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:7px 11px;background:#fff;color:var(--blue);font-size:.82rem;font-weight:850}.current-date-controls a:hover{background:var(--paper)}.current-date-controls a.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-planning{margin:16px 0 12px;padding:14px 16px;border:1px solid var(--line);border-radius:16px;background:#fff}.current-planning-head{display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:10px}.current-planning-head strong{color:var(--navy);font-size:1rem}.current-planning-head span{color:var(--muted);font-size:.82rem}.planning-preferences{display:flex;flex-direction:column;gap:10px;margin:8px 0 12px}.planning-preferences-row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;width:100%}.planning-preferences label{display:flex;gap:5px;align-items:center;color:var(--muted);font-size:.78rem;font-weight:850}.planning-preferences input{min-height:40px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--navy);font:inherit;font-size:1rem;padding:6px 8px}.planning-preferences input[type="number"]{width:76px}.planning-preferences b{color:var(--muted);font-size:.82rem}@media(max-width:640px){.planning-preferences label{flex:1 1 130px;justify-content:space-between}.planning-preferences input[type="time"]{min-width:110px}}.planning-help{margin:2px 0 12px;padding:10px 12px;border-radius:10px;background:#f7f9fa;color:var(--ink);font-size:.82rem;line-height:1.45}.planning-help strong{color:var(--navy)}.current-planning-days{display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:8px}.planning-day{border:1px solid var(--line);border-radius:12px;padding:10px;min-width:0}.planning-day.preferred{background:#eef8f3}.planning-day.caution{background:#fff8df;border-color:#e7c978}.planning-day.redflag{background:#fff0ed;border-color:#dfa297}.planning-date{font-size:.78rem;font-weight:850;color:var(--navy)}.planning-status{font-size:.92rem;font-weight:900;margin-top:2px}.preferred .planning-status{color:#176246}.caution .planning-status{color:#775900}.redflag .planning-status{color:#9a3328}.planning-detail{font-size:.78rem;line-height:1.35;color:var(--ink);margin-top:5px}.planning-disclaimer{color:var(--muted);font-size:.75rem;margin-top:9px}@media(max-width:640px){.current-planning-days{grid-template-columns:1fr 1fr}.planning-detail{font-size:.8rem}}.current-chart-wrap .event-point,.current-chart-wrap .event-point:hover{cursor:default!important;pointer-events:none}.current-chart-wrap{margin-top:16px}.current-chart-svg{display:block;width:100%;height:auto;background:#f8fbfc;border:1px solid var(--line);border-radius:16px}.grid-line{stroke:#d9e4e8;stroke-width:1}.v-grid-line{stroke:#e6eef1;stroke-width:1}.day-grid-line{stroke:#b7cbd4;stroke-width:1.4}.zero-line{stroke:#17384a;stroke-width:2}.axis-label{fill:#657d89;font-size:11px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.y-label{text-anchor:end}.x-label{text-anchor:middle}.axis-title{fill:#657d89;font-size:11px;text-anchor:middle}.tide-y-label{text-anchor:start}.tide-range-bar{opacity:1;stroke-width:3;stroke-linecap:round;fill:none}.tide-range-bar.typical{stroke:#4a6473}.tide-range-bar.elevated{stroke:#d5ad28}.tide-range-bar.large{stroke:#d9791f}.tide-range-bar.exceptional{stroke:#c94a3f}.tide-range-value{font-size:11px;font-weight:900;text-anchor:middle;paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round;fill:#17384a}.tide-range-toggle{display:flex;align-items:center;gap:7px;color:var(--ink);font-size:.84rem;font-weight:800}.tide-range-toggle input{margin:0}.tide-range-legend{display:flex;gap:10px;flex-wrap:wrap;align-items:center;color:var(--muted);font-size:.76rem}.tide-range-key{display:inline-flex;align-items:center;gap:5px}.tide-range-swatch{width:11px;height:11px;border-radius:3px;display:inline-block}.tide-range-swatch.typical{background:#4a6473}.tide-range-swatch.elevated{background:#d5ad28}.tide-range-swatch.large{background:#d9791f}.tide-range-swatch.exceptional{background:#c94a3f}.night-window{fill:#aebdc4;opacity:.78}.sail-window{fill:#f8fbfc;opacity:.96}.preferred-window{fill:#f0d46d;opacity:.34}.flood-area{fill:#6d8fd0;opacity:.86}.ebb-area{fill:#0b9d83;opacity:.90}.current-line{fill:none;stroke:#214b62;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}.event-point{stroke:#fff;stroke-width:1.5}.event-point.flood{fill:#5478bd}.event-point.ebb{fill:#078a75}.event-point.slack{fill:#756d64}.event-time{fill:#17384a;font-size:9px;font-weight:800;text-anchor:middle;paint-order:stroke;stroke:#fff;stroke-width:2.5px;stroke-linejoin:round}.event-time.flood{fill:#294f91}.event-time.ebb{fill:#066c5d}.event-time.slack{fill:#514b46}.now-line{stroke:#c63a2b;stroke-width:2.5}.now-label{fill:#c63a2b;font-size:11px;font-weight:800}.chart-explainer{color:var(--ink);font-size:.94rem;line-height:1.45;margin:2px 0 12px}.chart-note{color:var(--muted);font-size:.82rem;margin-top:9px}.candidate-table{width:100%;border-collapse:collapse;font-size:.86rem}.candidate-table th,.candidate-table td{padding:10px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}.candidate-table th{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}.candidate-table td.num,.candidate-table th.num{text-align:right;white-space:nowrap}.candidate-good td.status{font-weight:800}.candidate-bad{opacity:.82}.candidate-selected{background:rgba(20,120,100,.08)}.candidate-selected td:first-child{font-weight:800}.candidate-note{color:var(--muted);font-size:.82rem;margin:0 0 12px}.candidate-scroll{overflow-x:auto}.candidate-link{color:var(--blue);text-decoration:none;font-weight:800}.candidate-link:hover{text-decoration:underline}.candidate-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:0 0 12px}.nearest-link{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:7px 12px;color:var(--blue);font-weight:800;text-decoration:none;background:#fff}.nearest-link:hover{background:var(--paper)}.map-card{overflow:hidden}.map-intro{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px}.map-help{color:var(--muted);font-size:.9rem;max-width:600px}.map-wrap{border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#dfecef}.location-map{height:390px;width:100%}.map-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px}.map-coordinate{font-variant-numeric:tabular-nums;color:var(--muted);font-size:.9rem}.map-go{display:inline-block;border:0;border-radius:999px;padding:10px 16px;background:var(--blue);color:#fff;font-weight:850;text-decoration:none;cursor:pointer}.map-go[aria-disabled="true"]{opacity:.45;pointer-events:none}.map-search-area{border:0;cursor:pointer}.map-search-area[aria-disabled="true"]{opacity:.55;pointer-events:none}.map-search-area[hidden]{display:none}.map-search-status{color:var(--muted);font-size:.82rem}.map-reset{border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:800;cursor:pointer}.map-reset:disabled{opacity:.45;cursor:default}.map-navigation{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}.map-state-controls{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:10px}.map-current-toggle{display:inline-flex;align-items:center;gap:7px;color:var(--ink);font-weight:750;font-size:.88rem}.map-current-toggle input{margin:0}.map-nav-button{border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;cursor:pointer}.map-nav-button:disabled{opacity:.45;cursor:default}.map-layer-note{margin-top:8px;color:var(--muted);font-size:.8rem;line-height:1.4}.map-smoke-legend{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:8px;color:var(--muted);font-size:.78rem}.map-smoke-legend[hidden]{display:none}.map-smoke-legend span{display:inline-flex;align-items:center;gap:5px}.smoke-swatch{display:inline-block;width:18px;height:10px;border:1px solid rgba(70,70,70,.5);border-radius:2px}.smoke-swatch.light{background:rgba(180,180,180,.05)}.smoke-swatch.medium{background:rgba(210,145,55,.08)}.smoke-swatch.heavy{background:rgba(155,65,55,.12)}.map-smoke-note{font-style:italic}.map-symbol{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;margin-right:4px;font-size:27px;font-weight:950;line-height:1;vertical-align:-6px;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff,0 2px 3px rgba(0,0,0,.35)}
+url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text-shadow:0 2px 12px rgba(0,0,0,.45)}.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-weight:800;font-size:.76rem;opacity:.8}.photo-tag{margin-top:14px;font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;opacity:.72}h1{font-size:clamp(1.8rem,6vw,3.2rem);line-height:1.05;margin:.4rem 0 .6rem;letter-spacing:-.035em}.sub{opacity:.82}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}.full{grid-column:1/-1}h2{font-size:.82rem;letter-spacing:.13em;text-transform:uppercase;color:var(--blue);margin:0 0 16px}.bottom{font-size:1.13rem}.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.wind-card .metric{min-width:0}.wind-card .value{white-space:nowrap}@media(max-width:640px){.wind-card .metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}.metric{background:var(--paper);border-radius:15px;padding:14px}.label{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700}.value{font-size:1.55rem;font-weight:800;color:var(--navy)}.meta{color:var(--muted);font-size:.88rem;margin-top:12px}.station{font-weight:800;font-size:1.1rem;color:var(--navy)}.wind-distance-warning{margin-top:10px;padding:10px 12px;border:1px solid #e7c978;border-radius:12px;background:#fff8df;color:#654d08;font-size:.9rem}.wind-distance-warning strong{color:#4e3a00}.wind-summary{white-space:pre-line;margin-top:14px;padding:13px 14px;background:#eef7fa;border-left:4px solid var(--sea);border-radius:10px;color:var(--ink);font-size:.92rem}.event{display:grid;grid-template-columns:88px 12px 1fr;gap:12px;align-items:center;min-height:58px}.time{font-weight:800;color:var(--navy)}.dot{width:12px;height:12px;border-radius:50%;background:var(--slack);box-shadow:0 0 0 5px #edf3f5}.flood .dot{background:var(--flood)}.ebb .dot{background:var(--ebb)}.eventbody{border-left:2px solid var(--line);padding:8px 0 8px 18px}.eventlabel{font-weight:800}.eventdata{color:var(--muted);font-size:.9rem}.badge{display:inline-block;border-radius:999px;padding:5px 10px;background:#e9f6fb;color:var(--blue);font-size:.75rem;font-weight:800;margin-top:12px}.footer{text-align:center;color:var(--muted);font-size:.78rem;margin-top:22px}.hero .yogiism{margin:18px 0 0;max-width:720px;color:#fff;font-style:italic;font-size:.96rem;line-height:1.4;opacity:.96}.full-report{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:.88rem;line-height:1.55;background:#071f31;color:#e7f4f8;border-radius:14px;padding:18px;overflow-x:auto}.wind-readings{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}.wind-readings-header{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:8px}.wind-readings-title{font-weight:850;color:var(--navy)}.wind-reading-control{display:flex;align-items:flex-end;gap:7px;flex-wrap:wrap}.wind-reading-control label{display:flex;flex-direction:column;gap:3px;color:var(--muted);font-size:.72rem;font-weight:850;text-transform:uppercase;letter-spacing:.04em}.wind-reading-control select{min-width:76px;padding:6px 28px 6px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;font:inherit}.wind-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap}.wind-card-head h2{margin-bottom:16px}.wind-unit-control{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:.72rem;font-weight:850;text-transform:uppercase;letter-spacing:.04em}.wind-unit-control select{padding:6px 28px 6px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;font:inherit;color:var(--ink)}.wind-reading-chart{margin:4px 0 12px;border:1px solid var(--line);border-radius:10px;background:#fff;padding:8px}.wind-reading-chart svg{display:block;width:100%;height:auto;min-height:260px;max-height:320px}.wind-chart-grid{stroke:#dce6e9;stroke-width:1}.wind-chart-axis{stroke:#8aa0a8;stroke-width:1}.wind-chart-wind{fill:none;stroke:#126b91;stroke-width:2.5;stroke-linejoin:round;stroke-linecap:round}.wind-chart-gust{fill:none;stroke:#a95a24;stroke-width:1.7;stroke-linejoin:round;stroke-linecap:round}.wind-chart-label{fill:#60747c;font-size:11px;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.wind-chart-legend{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin:0 0 6px;color:var(--muted);font-size:.78rem;font-weight:750}.wind-chart-key{display:inline-flex;align-items:center;gap:6px}.wind-chart-key-line{display:inline-block;width:22px;border-top:3px solid #126b91}.wind-chart-key-line.gust{border-top-color:#a95a24;border-top-width:2px;border-top-style:solid}.wind-chart-empty{padding:34px 12px;text-align:center;color:var(--muted);font-size:.85rem}.wind-chart-cursor{stroke:#263b46;stroke-width:1.4;pointer-events:none}.wind-chart-cursor-dot{fill:#fff;stroke-width:2;pointer-events:none}.wind-chart-cursor-dot.wind{stroke:#126b91}.wind-chart-cursor-dot.gust{stroke:#a95a24}.wind-chart-hit{fill:transparent;cursor:crosshair;touch-action:none}.wind-chart-readout{margin:-2px 0 8px;color:var(--ink);font-size:.82rem;font-weight:750;min-height:1.2em}.wind-readings-wrap{max-height:132px;overflow:auto;border:1px solid var(--line);border-radius:10px}.wind-readings-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.84rem}.wind-readings-table th,.wind-readings-table td{padding:7px 9px;border-top:1px solid var(--line);text-align:left;white-space:nowrap}.wind-readings-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc;color:var(--muted);font-size:.7rem;text-transform:uppercase;letter-spacing:.05em}.wind-readings-table tbody tr:first-child td{border-top:0}.card-action-row{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}#current-summary-card,.wind-card{min-width:0}.timeline-scope-note{margin:.15rem 0 1rem;color:var(--muted);font-size:.88rem}.current-events-integrated{margin:14px 0 4px;padding:10px 0 0;border-top:1px solid var(--line)}.current-events-head{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:8px}.current-events-head strong{color:var(--navy);font-size:.92rem}.current-events-head span{color:var(--muted);font-size:.78rem}.current-key-times{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:28px;row-gap:2px}.current-key-time{display:grid;grid-template-columns:76px minmax(0,1fr);gap:10px;align-items:baseline;padding:5px 0;border-bottom:1px solid #edf2f3;font-size:.86rem}.current-key-time-time{font-weight:800;color:var(--navy);white-space:nowrap}.current-key-time-label{color:var(--ink)}.current-key-time-label strong{font-weight:800}.current-key-time-meta{color:var(--muted);margin-left:6px;white-space:nowrap}@media(max-width:640px){.current-key-times{grid-template-columns:1fr}.current-key-time{grid-template-columns:72px minmax(0,1fr)}}.details-link-card{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap}.details-link-card h2{margin-bottom:.2rem}.details-link{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;white-space:nowrap}.details-note{color:var(--muted);font-size:.88rem;margin:-4px 0 14px}.current-chart-header{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap}.current-window-inline{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin:2px 0 10px;color:var(--muted);font-size:.86rem}.current-window-inline strong{color:var(--navy);font-size:.86rem}.current-window-inline span{white-space:nowrap}.current-chart-header h2{margin-bottom:.15rem}.current-date-label{color:var(--muted);font-weight:750;font-size:.9rem}.current-range-toolbar{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin:8px 0 10px;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:var(--paper)}.current-range-toolbar .current-date-nav{display:inline-flex;align-items:center;min-height:44px;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:8px 12px;background:#fff;color:var(--blue);font-size:.86rem;font-weight:850}.current-range-toolbar .current-date-nav.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-control-label{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:.75rem;font-weight:850}.current-control-label .current-date-picker{min-height:44px;font-size:1rem}@media(max-width:640px){.current-range-toolbar{align-items:stretch}.current-control-label{flex:1 1 140px}.current-range-toolbar .current-date-nav{justify-content:center;flex:1 1 135px}}.current-date-controls{display:flex;gap:7px;flex-wrap:wrap;align-items:center}.current-date-picker{border:1px solid var(--line);border-radius:999px;padding:6px 10px;background:#fff;color:var(--navy);font:inherit;font-size:.82rem;font-weight:750;min-height:34px}.current-date-picker:focus{outline:2px solid var(--blue);outline-offset:2px}.current-refreshing{opacity:.55;transition:opacity .15s ease}.current-date-controls a{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:7px 11px;background:#fff;color:var(--blue);font-size:.82rem;font-weight:850}.current-date-controls a:hover{background:var(--paper)}.current-date-controls a.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-planning{margin:16px 0 12px;padding:14px 16px;border:1px solid var(--line);border-radius:16px;background:#fff}.current-planning-head{display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:10px}.current-planning-head strong{color:var(--navy);font-size:1rem}.current-planning-head span{color:var(--muted);font-size:.82rem}.planning-preferences{display:flex;flex-direction:column;gap:10px;margin:8px 0 12px}.planning-preferences-row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;width:100%}.planning-preferences label{display:flex;gap:5px;align-items:center;color:var(--muted);font-size:.78rem;font-weight:850}.planning-preferences input{min-height:40px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--navy);font:inherit;font-size:1rem;padding:6px 8px}.planning-preferences input[type="number"]{width:76px}.planning-preferences b{color:var(--muted);font-size:.82rem}@media(max-width:640px){.planning-preferences label{flex:1 1 130px;justify-content:space-between}.planning-preferences input[type="time"]{min-width:110px}}.planning-help{margin:2px 0 12px;padding:10px 12px;border-radius:10px;background:#f7f9fa;color:var(--ink);font-size:.82rem;line-height:1.45}.planning-help strong{color:var(--navy)}.current-planning-days{display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:8px}.planning-day{border:1px solid var(--line);border-radius:12px;padding:10px;min-width:0}.planning-day.preferred{background:#eef8f3}.planning-day.caution{background:#fff8df;border-color:#e7c978}.planning-day.redflag{background:#fff0ed;border-color:#dfa297}.planning-date{font-size:.78rem;font-weight:850;color:var(--navy)}.planning-status{font-size:.92rem;font-weight:900;margin-top:2px}.preferred .planning-status{color:#176246}.caution .planning-status{color:#775900}.redflag .planning-status{color:#9a3328}.planning-detail{font-size:.78rem;line-height:1.35;color:var(--ink);margin-top:5px}.planning-disclaimer{color:var(--muted);font-size:.75rem;margin-top:9px}@media(max-width:640px){.current-planning-days{grid-template-columns:1fr 1fr}.planning-detail{font-size:.8rem}}.current-chart-wrap .event-point,.current-chart-wrap .event-point:hover{cursor:default!important;pointer-events:none}.current-chart-wrap{margin-top:16px}.current-chart-svg{display:block;width:100%;height:auto;background:#f8fbfc;border:1px solid var(--line);border-radius:16px}.grid-line{stroke:#d9e4e8;stroke-width:1}.v-grid-line{stroke:#e6eef1;stroke-width:1}.day-grid-line{stroke:#b7cbd4;stroke-width:1.4}.zero-line{stroke:#17384a;stroke-width:2}.axis-label{fill:#657d89;font-size:11px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.y-label{text-anchor:end}.x-label{text-anchor:middle}.axis-title{fill:#657d89;font-size:11px;text-anchor:middle}.tide-y-label{text-anchor:start}.tide-range-bar{opacity:1;stroke-width:3;stroke-linecap:round;fill:none}.tide-range-bar.typical{stroke:#4a6473}.tide-range-bar.elevated{stroke:#d5ad28}.tide-range-bar.large{stroke:#d9791f}.tide-range-bar.exceptional{stroke:#c94a3f}.tide-range-value{font-size:11px;font-weight:900;text-anchor:middle;paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round;fill:#17384a}.tide-range-toggle{display:flex;align-items:center;gap:7px;color:var(--ink);font-size:.84rem;font-weight:800}.tide-range-toggle input{margin:0}.tide-range-legend{display:flex;gap:10px;flex-wrap:wrap;align-items:center;color:var(--muted);font-size:.76rem}.tide-range-key{display:inline-flex;align-items:center;gap:5px}.tide-range-swatch{width:11px;height:11px;border-radius:3px;display:inline-block}.tide-range-swatch.typical{background:#4a6473}.tide-range-swatch.elevated{background:#d5ad28}.tide-range-swatch.large{background:#d9791f}.tide-range-swatch.exceptional{background:#c94a3f}.night-window{fill:#aebdc4;opacity:.78}.sail-window{fill:#f8fbfc;opacity:.96}.preferred-window{fill:#f0d46d;opacity:.34}.flood-area{fill:#6d8fd0;opacity:.86}.ebb-area{fill:#0b9d83;opacity:.90}.current-line{fill:none;stroke:#214b62;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}.event-point{stroke:#fff;stroke-width:1.5}.event-point.flood{fill:#5478bd}.event-point.ebb{fill:#078a75}.event-point.slack{fill:#756d64}.event-time{fill:#17384a;font-size:9px;font-weight:800;text-anchor:middle;paint-order:stroke;stroke:#fff;stroke-width:2.5px;stroke-linejoin:round}.event-time.flood{fill:#294f91}.event-time.ebb{fill:#066c5d}.event-time.slack{fill:#514b46}.now-line{stroke:#c63a2b;stroke-width:2.5}.now-label{fill:#c63a2b;font-size:11px;font-weight:800}.chart-explainer{color:var(--ink);font-size:.94rem;line-height:1.45;margin:2px 0 12px}.chart-note{color:var(--muted);font-size:.82rem;margin-top:9px}.candidate-table{width:100%;border-collapse:collapse;font-size:.86rem}.candidate-table th,.candidate-table td{padding:10px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}.candidate-table th{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}.candidate-table td.num,.candidate-table th.num{text-align:right;white-space:nowrap}.candidate-good td.status{font-weight:800}.candidate-bad{opacity:.82}.candidate-selected{background:rgba(20,120,100,.08)}.candidate-selected td:first-child{font-weight:800}.candidate-note{color:var(--muted);font-size:.82rem;margin:0 0 12px}.candidate-scroll{overflow-x:auto}.candidate-link{color:var(--blue);text-decoration:none;font-weight:800}.candidate-link:hover{text-decoration:underline}.candidate-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:0 0 12px}.nearest-link{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:7px 12px;color:var(--blue);font-weight:800;text-decoration:none;background:#fff}.nearest-link:hover{background:var(--paper)}.map-card{overflow:hidden}.map-intro{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px}.map-help{color:var(--muted);font-size:.9rem;max-width:600px}.map-wrap{border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#dfecef}.location-map{height:390px;width:100%}.map-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px}.map-coordinate{font-variant-numeric:tabular-nums;color:var(--muted);font-size:.9rem}.map-go{display:inline-block;border:0;border-radius:999px;padding:10px 16px;background:var(--blue);color:#fff;font-weight:850;text-decoration:none;cursor:pointer}.map-go[aria-disabled="true"]{opacity:.45;pointer-events:none}.map-search-area{border:0;cursor:pointer}.map-search-area[aria-disabled="true"]{opacity:.55;pointer-events:none}.map-search-area[hidden]{display:none}.map-search-status{color:var(--muted);font-size:.82rem}.map-reset{border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:800;cursor:pointer}.map-reset:disabled{opacity:.45;cursor:default}.map-navigation{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}.map-state-controls{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:10px}.map-current-toggle{display:inline-flex;align-items:center;gap:7px;color:var(--ink);font-weight:750;font-size:.88rem}.map-current-toggle input{margin:0}.map-overlays-menu{position:relative}.map-overlays-menu summary{list-style:none;cursor:pointer;border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;font-size:.88rem}.map-overlays-menu summary::-webkit-details-marker{display:none}.map-overlays-menu summary::after{content:" ▾";font-size:.78em}.map-overlays-menu[open] summary::after{content:" ▴"}.map-overlays-panel{position:absolute;z-index:700;top:calc(100% + 6px);left:0;min-width:270px;max-width:min(360px,88vw);padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:#fff;box-shadow:0 10px 28px rgba(7,31,49,.18);display:flex;flex-direction:column;gap:10px}.map-overlay-toggle{display:flex;align-items:flex-start;gap:8px;color:var(--ink);font-weight:750;font-size:.88rem;line-height:1.3}.map-overlay-toggle input{margin-top:2px}.map-overlay-note{color:var(--muted);font-size:.76rem;line-height:1.35;padding-top:2px;border-top:1px solid var(--line)}.map-nav-button{border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;cursor:pointer}.map-nav-button:disabled{opacity:.45;cursor:default}.map-layer-note{margin-top:8px;color:var(--muted);font-size:.8rem;line-height:1.4}.map-smoke-legend{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:8px;color:var(--muted);font-size:.78rem}.map-smoke-legend[hidden]{display:none}.map-smoke-legend span{display:inline-flex;align-items:center;gap:5px}.smoke-swatch{display:inline-block;width:18px;height:10px;border:1px solid rgba(70,70,70,.5);border-radius:2px}.smoke-swatch.light{background:rgba(180,180,180,.05)}.smoke-swatch.medium{background:rgba(210,145,55,.08)}.smoke-swatch.heavy{background:rgba(155,65,55,.12)}.map-smoke-note{font-style:italic}.map-symbol{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;margin-right:4px;font-size:27px;font-weight:950;line-height:1;vertical-align:-6px;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff,0 2px 3px rgba(0,0,0,.35)}
 .map-symbol.request{color:#126b91}.map-symbol.wind{color:#2f855a}.map-symbol.current{color:#7d55a6}.map-symbol.wind-candidate{color:#4f6978}
 .map-leaflet-symbol{background:transparent;border:0}
 .location-map,
@@ -4423,10 +4453,10 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 .marine-forecast-note{color:var(--muted);font-size:.82rem;margin:10px 0 0}
 .marine-forecast-error{color:var(--muted);font-size:.9rem}
 @media(max-width:640px){.marine-periods{grid-template-columns:1fr}}
-.error-card{border-left:5px solid #b64735;background:#fff7f4}.error-card h2{color:#8f3025}.error-message{font-weight:650;line-height:1.5}.error-help{color:var(--muted);font-size:.9rem}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}.bottom.planning-preferred{background:#eff8f1;border-color:#b8d8c0}.bottom.planning-caution{background:#fff8e6;border-color:#e6c66a}.bottom.planning-redflag{background:#fff0ef;border-color:#e0a39d}.bottom .planning-period-status{margin:0 0 10px;font-weight:900;font-size:1.05rem}.bottom .planning-period-status.preferred{color:#176246}.bottom .planning-period-status.caution{color:#8a5a00}.bottom .planning-period-status.redflag{color:#9b3027}</style></head><body><main class="shell">
+.error-card{border-left:5px solid #b64735;background:#fff7f4}.error-card h2{color:#8f3025}.error-message{font-weight:650;line-height:1.5}.error-help{color:var(--muted);font-size:.9rem}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}.bottom.planning-preferred{background:#eff8f1;border-color:#b8d8c0}.bottom.planning-caution{background:#fff8e6;border-color:#e6c66a}.bottom.planning-redflag{background:#fff0ef;border-color:#e0a39d}.bottom .planning-period-status{margin:0 0 10px;font-weight:900;font-size:1.05rem}.bottom .planning-period-status.preferred{color:#176246}.bottom .planning-period-status.caution{color:#8a5a00}.bottom .planning-period-status.redflag{color:#9b3027}.bottom-wind-summary{margin:10px 0 14px}.bottom-wind-summary .metrics{margin-bottom:7px}.bottom-wind-observed{margin:0;color:var(--muted);font-size:.82rem}.map-sources-card h2{margin-bottom:7px}.map-sources-note{margin:0;color:var(--muted);font-size:.84rem;line-height:1.5}</style></head><body><main class="shell">
 <section class="hero"><div class="eyebrow">Mauri's Weather & Water Conditions</div><h1>{{.Title}}</h1><div class="sub">{{.ReportTime}} · {{.Station}}</div>{{if .Historical}}<span class="badge">Historical · {{.RequestedTime}}</span>{{end}}{{if .Yogiism}}<div class="yogiism">“{{.Yogiism}}” — Yogi Berra</div>{{end}}</section><div class="grid">
-<section id="bottom-line-card" class="card full bottom{{if .PlanningPeriodClass}} planning-{{.PlanningPeriodClass}}{{end}}"><h2>Bottom line</h2>{{if .PlanningPeriodCause}}<p><strong>{{.PlanningPeriodCause}}</strong></p>{{end}}{{if .PlanningPeriodDetail}}<p>{{.PlanningPeriodDetail}}</p>{{end}}{{range .BottomLine}}<p>{{.}}</p>{{else}}<p>Summary unavailable.</p>{{end}}</section>
-<section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map, enter coordinates, or use My location to choose a sailing location, then use Find stations near selected location. Panning only changes the view; to search somewhere else, move the selected ★ location first. Click a nearby wind station to pin its details and preview the associated currents station, then use the selection link in the map panel to commit the wind-station choice. Candidate stations and distances always refer to the selected location.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-resize-handle" class="map-resize-handle" role="separator" aria-label="Resize map vertically" aria-orientation="horizontal" aria-valuemin="260" aria-valuemax="900" aria-valuenow="390" aria-grabbed="false" tabindex="0" title="Drag up or down to resize map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-navigation" aria-label="Map navigation"><button id="map-geolocate" class="map-nav-button" type="button" title="Use your device location as the selected location">◎ My location</button><button id="map-nav-selected" class="map-nav-button" type="button" title="Center map on selected location" {{if not .MapHasRequest}}disabled{{end}}>Center on selected location</button><button id="map-nav-wind" class="map-nav-button" type="button" title="Center map on selected wind station" {{if not .MapHasWind}}disabled{{end}}>Center on selected wind station</button><button id="map-nav-current" class="map-nav-button" type="button" title="Center map on selected currents station" {{if not .MapHasCurrent}}disabled{{end}}>Center on selected currents station</button></div><div class="map-state-controls" aria-label="Map selection controls"><label class="map-current-toggle"><input type="checkbox" id="map-show-currents" checked> Show selected currents station</label><label id="map-marine-zone-control" class="map-current-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">Show NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-current-toggle"><input type="checkbox" id="map-show-smoke"> <span>Show satellite smoke (NOAA)</span></label><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}" {{if not .MapHasRequest}}disabled{{end}}>Clear selected location</button></div><div class="map-coordinate-entry" aria-label="Enter exact location"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="number" step="any" min="-90" max="90" inputmode="decimal" placeholder="38.03542" {{if .MapHasRequest}}value="{{printf "%.5f" .MapRequestLat}}"{{end}}></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="number" step="any" min="-180" max="180" inputmode="decimal" placeholder="-121.88631" {{if .MapHasRequest}}value="{{printf "%.5f" .MapRequestLon}}"{{end}}></div><button id="map-use-coordinate" class="map-coordinate-use" type="button">Use location</button><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div class="map-controls"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Select a location to find stations</span><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div class="map-layer-note">Drag the handle directly below the map to make the map taller or shorter. Keyboard users can focus the handle and use ↑/↓ (Shift for larger steps).</div><div class="map-layer-note">Base maps: <strong>Street Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service; <strong>Satellite</strong> uses Esri World Imagery; <strong>Hybrid</strong> combines Esri imagery with place/boundary labels. NWS forecast-zone and NOAA smoke layers remain independent overlays. The nautical chart layer is for planning/reference and does not replace official navigation products.</div><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
+<section id="bottom-line-card" class="card full bottom{{if .PlanningPeriodClass}} planning-{{.PlanningPeriodClass}}{{end}}"><h2>Bottom line</h2>{{if .PlanningPeriodCause}}<p><strong>{{.PlanningPeriodCause}}</strong></p>{{end}}{{if .PlanningPeriodDetail}}<p>{{.PlanningPeriodDetail}}</p>{{end}}{{if not .WindError}}<div class="bottom-wind-summary" aria-label="Latest wind observation"><div class="metrics"><div class="metric"><div class="label">Direction</div><div class="value">{{if .WindDirection}}{{.WindDirection}}{{else}}—{{end}}</div></div><div class="metric"><div class="label">Wind</div><div class="value">{{if .WindSpeed}}{{.WindSpeed}}{{else}}—{{end}}</div></div><div class="metric"><div class="label">Gust</div><div class="value">{{if .WindGust}}{{.WindGust}}{{else}}—{{end}}</div></div><div class="metric"><div class="label">Air temp</div><div class="value">{{if .WindAirTemp}}{{.WindAirTemp}}{{else}}—{{end}}</div></div></div><p class="bottom-wind-observed"><strong>Latest observation:</strong> {{if .WindObserved}}{{.WindObserved}}{{else}}unavailable{{end}}</p></div>{{end}}{{range .BottomLineNarrative}}<p>{{.}}</p>{{else}}{{if .WindError}}<p>Summary unavailable.</p>{{end}}{{end}}</section>
+<section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map, enter coordinates, or use My location to choose a sailing location, then use Find stations near selected location. Panning only changes the view; to search somewhere else, move the selected ★ location first. Click a nearby wind station to pin its details and preview the associated currents station, then use the selection link in the map panel to commit the wind-station choice. Candidate stations and distances always refer to the selected location.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-resize-handle" class="map-resize-handle" role="separator" aria-label="Resize map vertically" aria-orientation="horizontal" aria-valuemin="260" aria-valuemax="900" aria-valuenow="390" aria-grabbed="false" tabindex="0" title="Drag up or down to resize map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-navigation" aria-label="Map navigation"><button id="map-geolocate" class="map-nav-button" type="button" title="Use your device location as the selected location">◎ My location</button><button id="map-nav-selected" class="map-nav-button" type="button" title="Center map on selected location" {{if not .MapHasRequest}}disabled{{end}}>Center on selected location</button><button id="map-nav-wind" class="map-nav-button" type="button" title="Center map on selected wind station" {{if not .MapHasWind}}disabled{{end}}>Center on selected wind station</button><button id="map-nav-current" class="map-nav-button" type="button" title="Center map on selected currents station" {{if not .MapHasCurrent}}disabled{{end}}>Center on selected currents station</button></div><div class="map-state-controls" aria-label="Map selection controls"><label class="map-current-toggle"><input type="checkbox" id="map-show-currents" checked> Show selected currents station</label><details id="map-types-menu" class="map-overlays-menu"><summary>Map Types</summary><div class="map-overlays-panel"><label class="map-overlay-toggle"><input type="radio" name="map-type" value="map"> <span>Street Map</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="nautical"> <span>Nautical Chart</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="satellite"> <span>Satellite</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="hybrid"> <span>Hybrid</span></label></div></details><details id="map-overlays-menu" class="map-overlays-menu"><summary>Map Overlays</summary><div class="map-overlays-panel"><label id="map-marine-zone-control" class="map-overlay-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-smoke"> <span>Satellite smoke (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-clouds"> <span>Satellite Cloud Cover (NOAA)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-radar"> <span>Weather radar (NOAA/NWS)</span></label><div class="map-overlay-note">Satellite Cloud Cover uses NOAA/NESDIS GOES imagery rendered for the current map view; daylight areas appear natural-color-like and nighttime areas use infrared imagery. Radar uses Iowa State IEM's Web-Mercator CONUS NEXRAD N0Q WMS layer; a clear/transparent radar layer can simply mean no precipitation echoes are present.</div></div></details><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}" {{if not .MapHasRequest}}disabled{{end}}>Clear selected location</button></div><div class="map-coordinate-entry" aria-label="Enter exact location"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="number" step="any" min="-90" max="90" inputmode="decimal" placeholder="38.03542" {{if .MapHasRequest}}value="{{printf "%.5f" .MapRequestLat}}"{{end}}></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="number" step="any" min="-180" max="180" inputmode="decimal" placeholder="-121.88631" {{if .MapHasRequest}}value="{{printf "%.5f" .MapRequestLon}}"{{end}}></div><button id="map-use-coordinate" class="map-coordinate-use" type="button">Use location</button><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div class="map-controls"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Select a location to find stations</span><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-weather-overlay-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div class="map-layer-note">Drag the handle directly below the map to make the map taller or shorter. Keyboard users can focus the handle and use ↑/↓ (Shift for larger steps).</div><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
 {{if .WindError}}<section class="card full error-card"><h2>Wind station selection unavailable</h2><p class="error-message">{{.WindError}}</p><p class="error-help">The page is still available so you can inspect the request and nearby station diagnostics. Try nearby coordinates or an explicit NDBC station ID.</p></section>{{end}}
 <section class="card full wind-card"><div class="wind-card-head"><h2>Wind</h2><label class="wind-unit-control" for="wind-unit-select">Wind speed<select id="wind-unit-select"><option value="kts" {{if eq .WindUnit "kts"}}selected{{end}}>Knots</option><option value="mph" {{if eq .WindUnit "mph"}}selected{{end}}>MPH</option></select></label></div>
 <div class="metrics">
@@ -4441,7 +4471,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 {{if .WindSummary}}<div class="wind-summary">{{.WindSummary}}</div>{{end}}
 {{if .WindReadings}}<div class="wind-readings">
 <div class="wind-readings-header"><div class="wind-readings-title">Latest wind readings</div>
-<div class="wind-reading-control"><label for="wind-reading-count">Readings<select id="wind-reading-count" data-station="{{.Station}}"><option value="10" {{if eq .WindReadingCount 10}}selected{{end}}>10</option><option value="20" {{if eq .WindReadingCount 20}}selected{{end}}>20</option><option value="30" {{if eq .WindReadingCount 30}}selected{{end}}>30</option><option value="40" {{if eq .WindReadingCount 40}}selected{{end}}>40</option><option value="50" {{if eq .WindReadingCount 50}}selected{{end}}>50</option></select></label><span id="wind-reading-status" class="meta" aria-live="polite"></span></div></div>
+<div class="wind-reading-control"><label for="wind-reading-hours">History<select id="wind-reading-hours" data-station="{{.Station}}"><option value="1" {{if eq .WindReadingHours 1}}selected{{end}}>1h</option><option value="4" {{if eq .WindReadingHours 4}}selected{{end}}>4h</option><option value="8" {{if eq .WindReadingHours 8}}selected{{end}}>8h</option><option value="12" {{if eq .WindReadingHours 12}}selected{{end}}>12h</option><option value="16" {{if eq .WindReadingHours 16}}selected{{end}}>16h</option><option value="20" {{if eq .WindReadingHours 20}}selected{{end}}>20h</option><option value="24" {{if eq .WindReadingHours 24}}selected{{end}}>24h</option></select></label><span id="wind-reading-status" class="meta" aria-live="polite"></span></div></div>
 <div class="wind-chart-legend" aria-hidden="true"><span class="wind-chart-key"><span class="wind-chart-key-line"></span>Sustained</span><span class="wind-chart-key"><span class="wind-chart-key-line gust"></span>Gust</span></div>
 <div id="wind-reading-chart" class="wind-reading-chart" role="img" aria-label="Recent sustained wind and gust history"></div>
 <div class="wind-readings-wrap"><table class="wind-readings-table"><thead><tr><th>Time</th><th>Dir</th><th>Wind</th><th>Gust</th><th>Age</th></tr></thead><tbody id="wind-readings-body">{{range .WindReadings}}<tr><td>{{.Time}}</td><td>{{.Direction}}</td><td>{{.Wind}}</td><td>{{.Gust}}</td><td>{{.Age}}</td></tr>{{end}}</tbody></table></div>
@@ -4460,6 +4490,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 
 
 {{if .CurrentChart}}<section id="current-chart-card" class="card full"><div class="current-chart-header"><div><h2>Tidal Current</h2>{{if .CurrentRangeLabel}}<div class="current-date-label">{{.CurrentRangeLabel}}</div>{{end}}</div></div><div class="current-range-toolbar" aria-label="Current graph date controls"><a class="current-date-nav" href="{{.CurrentPrevURL}}" aria-label="Previous date range">← Previous range</a><label class="current-control-label"><span>Start date</span><input id="current-date-picker" class="current-date-picker" type="date" value="{{.CurrentDateISO}}" aria-label="Choose starting date"></label><label class="current-control-label"><span>Range</span><select id="current-days-picker" class="current-date-picker" aria-label="Number of days"><option value="1" {{if eq .CurrentDays 1}}selected{{end}}>1 day</option><option value="3" {{if eq .CurrentDays 3}}selected{{end}}>3 days</option><option value="7" {{if eq .CurrentDays 7}}selected{{end}}>7 days</option></select></label><a class="current-date-nav {{if .CurrentIsToday}}is-current{{end}}" href="{{.CurrentTodayURL}}">Today</a><a class="current-date-nav" href="{{.CurrentNextURL}}" aria-label="Next date range">Next range →</a></div>{{if .CurrentWindow}}<div class="current-window-inline"><strong>{{if .CurrentWindowMode}}{{.CurrentWindowMode}}{{else}}Conditions window{{end}}</strong><span>{{.CurrentWindow}}</span></div>{{end}}<div class="chart-explainer"><strong>This is current, not tide height.</strong> Above zero = flood; below zero = ebb; crossings = slack water.</div>{{if .TideRangeOverlayAvailable}}<div class="tide-range-legend"><label class="tide-range-toggle"><input id="show-tide-range-overlay" type="checkbox" checked> Show daily tidal range on right axis</label><span class="tide-range-key"><span class="tide-range-swatch typical"></span>{{if .TideRangeLegendTypical}}{{.TideRangeLegendTypical}}{{else}}Normal-cycle (&lt; +15%){{end}}</span><span class="tide-range-key"><span class="tide-range-swatch elevated"></span>{{if .TideRangeLegendElevated}}{{.TideRangeLegendElevated}}{{else}}Elevated (≥ +15%){{end}}</span><span class="tide-range-key"><span class="tide-range-swatch large"></span>{{if .TideRangeLegendLarge}}{{.TideRangeLegendLarge}}{{else}}Large (≥ +30%){{end}}</span><span class="tide-range-key"><span class="tide-range-swatch exceptional"></span>{{if .TideRangeLegendExceptional}}{{.TideRangeLegendExceptional}}{{else}}Exceptional (≥ +45%){{end}}</span></div>{{end}}<div class="current-chart-wrap">{{.CurrentChart}}</div><div class="chart-note">NOAA 6-minute harmonic current predictions. The current-speed axis stays at ±3.5 kt for date-to-date comparison and expands only when needed. Darker bands are night; light areas are daylight; warm bands mark the configured preferred planning period. When enabled, thin daily markers use a stable 0–10 ft right axis for predicted high-to-low tidal range, expanding only above 10 ft when needed; marker color is classified relative to the surrounding lunar-cycle median, where Normal-cycle means less than 15% above that median. {{if eq .CurrentDays 1}}Max flood, max ebb, and slack events are labeled with their times.{{else}}Small dots mark max flood, max ebb, and slack across the displayed range.{{end}} {{if .CurrentIsToday}}Red line marks report time when it falls inside the displayed range.{{end}}{{if gt .CurrentDays 1}} Day boundaries are emphasized for multi-day planning.{{end}}</div><div class="current-events-integrated"><div class="current-events-head"><strong>Key current times{{if .CurrentDateLabel}} — {{.CurrentDateLabel}}{{end}}</strong>{{if gt .CurrentDays 1}}<span>Selected start date only; graph covers {{.CurrentDays}} days.</span>{{end}}</div><div class="current-key-times">{{range .CurrentEvents}}<div class="current-key-time"><div class="current-key-time-time">{{.Time}}</div><div class="current-key-time-label"><strong>{{.Label}}</strong>{{if .Speed}}<span class="current-key-time-meta">{{.Speed}} · {{.Direction}}</span>{{end}}</div></div>{{else}}<p>No key current times in the conditions window.</p>{{end}}</div></div>{{if .CurrentPlanningHints}}<div class="current-planning"><div class="current-planning-head"><strong>Preferred-period planning hint{{if eq .CurrentDays 1}} — today / selected day{{end}}</strong><span>Current strength has separate caution and red-flag thresholds; the time buffer also warns about strong current just outside the preferred period.</span></div><div class="planning-preferences"><div class="planning-preferences-row"><label><span>Start</span><input id="planning-start" type="time" value="{{.PlanningStart}}" aria-label="Preferred period start"></label><label><span>End</span><input id="planning-end" type="time" value="{{.PlanningEnd}}" aria-label="Preferred period end"></label></div><div class="planning-preferences-row"><label><span>Ebb caution</span><input id="planning-caution-ebb" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningCautionEbb}}" aria-label="Ebb caution threshold in knots"><b>kt</b></label><label><span>Ebb red</span><input id="planning-max-ebb" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningMaxEbb}}" aria-label="Ebb red flag threshold in knots"><b>kt</b></label></div><div class="planning-preferences-row"><label><span>Flood caution</span><input id="planning-caution-flood" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningCautionFlood}}" aria-label="Flood caution threshold in knots"><b>kt</b></label><label><span>Flood red</span><input id="planning-max-flood" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningMaxFlood}}" aria-label="Flood red flag threshold in knots"><b>kt</b></label></div><div class="planning-preferences-row"><label><span>Caution time before/after period</span><input id="planning-buffer" type="number" min="0" max="360" step="15" value="{{.PlanningBuffer}}" aria-label="Caution time before or after preferred planning period in minutes"><b>min</b></label></div><div class="planning-preferences-row"><label><span>Currents station distance caution</span><input id="planning-current-distance-warning" type="number" min="0.1" max="{{.PlanningAutoCurrentLimit}}" step="0.1" value="{{.PlanningCurrentDistanceWarning}}" aria-label="Currents station distance caution threshold in nautical miles"><b>nmi</b></label></div></div><div class="planning-help"><strong>How these settings work:</strong> By default, ebb or flood below 2.0 kt is <strong>Preferred</strong>, 2.0 kt up to but not including 3.0 kt is <strong>Caution</strong>, and 3.0 kt or more during the preferred period is a <strong>Red flag</strong>. Ebb and flood thresholds can be adjusted independently. The caution time before/after period setting also warns when caution-level or stronger current occurs within that many minutes immediately before or after the preferred planning period; a threshold reached only there is reported as <strong>Caution</strong>. A currents station farther than the configured distance-caution threshold also makes the overall Bottom Line <strong>Caution</strong>, without changing the current-strength classification. Automatic current-station selection will not use a station beyond {{.PlanningAutoCurrentLimit}} nmi.</div><div class="current-planning-days">{{range .CurrentPlanningHints}}<div class="planning-day {{.Class}}"><div class="planning-date">{{.Date}}</div><div class="planning-status">{{if eq .Class "preferred"}}✓{{else if eq .Class "redflag"}}⚠{{else}}△{{end}} {{.Status}}</div><div class="planning-detail">{{.Detail}}</div></div>{{end}}</div><div class="planning-disclaimer">Current-based planning hint only; wind, swell, weather, traffic, and local effects still matter.</div></div>{{end}}</section>{{end}}
+<section class="card full map-sources-card"><h2>Map &amp; Data Sources</h2><p class="map-sources-note">Base maps: <strong>Street Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service; <strong>Satellite</strong> uses Esri World Imagery; <strong>Hybrid</strong> combines Esri imagery with place/boundary labels. NWS forecast-zone, NOAA smoke, <strong>Satellite Cloud Cover</strong>, and radar layers remain independent overlays. The nautical chart layer is for planning/reference and does not replace official navigation products.</p></section>
 <section id="full-report-card" class="card full details-link-card"><div><h2>Need the details?</h2><p class="details-note">Open the complete text-style report, including diagnostic and supporting information.</p></div><a class="details-link" href="{{.FullDetailsURL}}">View full report details →</a></section></div>
 <div class="footer"><strong>Mauri's Weather & Water Conditions</strong><br>NOAA/NDBC observations + NWS forecast context + NOAA CO-OPS current predictions · Conditions-planning aid, not a navigation system<br>Version {{.AppVersion}}</div></main><script>
 (function(){
@@ -4476,6 +4507,25 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   var initialZoom = Number(pageURL.searchParams.get("map_zoom"));
   if (!Number.isFinite(initialZoom) || initialZoom < 3 || initialZoom > 18) initialZoom = 10;
   var map = L.map(el, {scrollWheelZoom:true}).setView([centerLat, centerLon], initialZoom);
+  map.createPane("cloudOverlayPane");
+  map.getPane("cloudOverlayPane").style.zIndex = 430;
+  map.getPane("cloudOverlayPane").style.pointerEvents = "none";
+
+  map.createPane("radarOverlayPane");
+  map.getPane("radarOverlayPane").style.zIndex = 440;
+  map.getPane("radarOverlayPane").style.pointerEvents = "none";
+
+  map.createPane("forecastZoneHaloPane");
+  map.getPane("forecastZoneHaloPane").style.zIndex = 455;
+  map.getPane("forecastZoneHaloPane").style.pointerEvents = "none";
+
+  map.createPane("forecastZonePane");
+  map.getPane("forecastZonePane").style.zIndex = 460;
+  map.getPane("forecastZonePane").style.pointerEvents = "none";
+
+  map.createPane("smokeOutlinePane");
+  map.getPane("smokeOutlinePane").style.zIndex = 470;
+  map.getPane("smokeOutlinePane").style.pointerEvents = "none";
 
   var resizeHandle = document.getElementById("map-resize-handle");
   if (resizeHandle) {
@@ -4605,35 +4655,237 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   else if (mapLayerParam === "hybrid") activeBaseLayer = hybridLayer;
   activeBaseLayer.addTo(map);
 
-  L.control.layers(
-    {
-      "Street Map": streetLayer,
-      "Nautical Chart": nauticalLayer,
-      "Satellite": satelliteLayer,
-      "Hybrid": hybridLayer
-    },
-    null,
-    {
-      collapsed: false,
-      position: "topright"
-    }
-  ).addTo(map);
-
   var activeMapLayerName = "map";
   if (mapLayerParam === "nautical") activeMapLayerName = "nautical";
   else if (mapLayerParam === "satellite") activeMapLayerName = "satellite";
   else if (mapLayerParam === "hybrid") activeMapLayerName = "hybrid";
 
-  map.on("baselayerchange", function(e) {
-    if (e.layer === nauticalLayer) activeMapLayerName = "nautical";
-    else if (e.layer === satelliteLayer) activeMapLayerName = "satellite";
-    else if (e.layer === hybridLayer) activeMapLayerName = "hybrid";
-    else activeMapLayerName = "map";
+  function setBaseMapLayer(name) {
+    name = String(name || "map").toLowerCase();
 
+    var targetLayer = streetLayer;
+    if (name === "nautical") targetLayer = nauticalLayer;
+    else if (name === "satellite") targetLayer = satelliteLayer;
+    else if (name === "hybrid") targetLayer = hybridLayer;
+    else name = "map";
+
+    [streetLayer, nauticalLayer, satelliteLayer, hybridLayer].forEach(function(layer) {
+      if (layer !== targetLayer && map.hasLayer(layer)) map.removeLayer(layer);
+    });
+    if (!map.hasLayer(targetLayer)) targetLayer.addTo(map);
+
+    activeMapLayerName = name;
+
+    var targetURL = new URL(window.location.href);
+    if (name === "map") targetURL.searchParams.delete("map_layer");
+    else targetURL.searchParams.set("map_layer", name);
+    window.history.replaceState({}, "", targetURL.toString());
+
+    document.querySelectorAll('input[name="map-type"]').forEach(function(input) {
+      input.checked = input.value === activeMapLayerName;
+    });
+
+    if (cloudLayer && mapState.cloudOverlayVisible && map.hasLayer(cloudLayer)) {
+      cloudLayer.bringToFront();
+    }
+    if (radarLayer && mapState.radarOverlayVisible && map.hasLayer(radarLayer)) {
+      radarLayer.bringToFront();
+    }
+    if (marineZoneHaloLayer && map.hasLayer(marineZoneHaloLayer)) {
+      marineZoneHaloLayer.setStyle(marineZoneHaloStyle);
+      marineZoneHaloLayer.bringToFront();
+    }
+    if (marineZoneLayer && map.hasLayer(marineZoneLayer)) {
+      marineZoneLayer.setStyle(marineZoneStyle);
+      marineZoneLayer.bringToFront();
+    }
     if (smokeLayer && map.hasLayer(smokeLayer)) {
       smokeLayer.setStyle(smokeStyle);
     }
+    if (smokeOutlineLayer && map.hasLayer(smokeOutlineLayer)) {
+      smokeOutlineLayer.setStyle(smokeOutlineStyle);
+      smokeOutlineLayer.bringToFront();
+    }
     updateSmokeLegendForBaseMap();
+  }
+
+  // These overlay objects must remain live for the checkbox handlers below.
+  // Do not reinitialize cloudLayer or radarLayer to null later in this script.
+  var cloudLayer = null;
+  var cloudRequestSerial = 0;
+  var cloudRefreshTimer = null;
+  var cloudImageServiceURL =
+    "https://satellitemaps.nesdis.noaa.gov/arcgis/rest/services/Most_Recent_MERGEDGC/ImageServer/exportImage";
+
+  var radarLayer = L.tileLayer.wms(
+    "https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q.cgi?",
+    {
+      layers: "nexrad-n0q-900913",
+      format: "image/png",
+      transparent: true,
+      version: "1.1.1",
+      opacity: 0.72,
+      pane: "radarOverlayPane",
+      attribution: "NWS NEXRAD radar via Iowa State IEM"
+    }
+  );
+
+  function setWeatherOverlayStatus(message, isError) {
+    var status = document.getElementById("map-weather-overlay-status");
+    if (!status) return;
+    message = String(message || "").trim();
+    status.hidden = !message;
+    status.textContent = message;
+    status.style.color = isError ? "#9a352f" : "";
+  }
+
+  function refreshWeatherOverlayStatus() {
+    if (!mapState.cloudOverlayVisible && !mapState.radarOverlayVisible) {
+      setWeatherOverlayStatus("", false);
+    }
+  }
+
+  function cloudExportURL(bounds) {
+    var sw = map.options.crs.project(bounds.getSouthWest());
+    var ne = map.options.crs.project(bounds.getNorthEast());
+    var mapSize = map.getSize();
+    var pixelRatio = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+    var width = Math.max(256, Math.min(2400, Math.round(mapSize.x * pixelRatio)));
+    var height = Math.max(256, Math.min(1800, Math.round(mapSize.y * pixelRatio)));
+
+    var params = new URLSearchParams();
+    params.set("f", "image");
+    params.set("bbox", [sw.x, sw.y, ne.x, ne.y].join(","));
+    params.set("bboxSR", "3857");
+    params.set("imageSR", "3857");
+    params.set("size", width + "," + height);
+    params.set("format", "png32");
+    params.set("interpolation", "RSP_BilinearInterpolation");
+    params.set("adjustAspectRatio", "false");
+
+    return cloudImageServiceURL + "?" + params.toString();
+  }
+
+  function refreshCloudOverlay() {
+    if (!mapState.cloudOverlayVisible) return;
+
+    var bounds = map.getBounds();
+    var requestSerial = ++cloudRequestSerial;
+    var url = cloudExportURL(bounds);
+    var testImage = new Image();
+
+    testImage.onload = function() {
+      if (!mapState.cloudOverlayVisible || requestSerial !== cloudRequestSerial) return;
+
+      var nextLayer = L.imageOverlay(url, bounds, {
+        opacity: 0.72,
+        pane: "cloudOverlayPane",
+        interactive: false,
+        attribution: "NOAA/NESDIS GOES GeoColor"
+      });
+
+      nextLayer.once("load", function() {
+        if (!mapState.cloudOverlayVisible || requestSerial !== cloudRequestSerial) {
+          if (map.hasLayer(nextLayer)) map.removeLayer(nextLayer);
+          return;
+        }
+        var previousLayer = cloudLayer;
+        cloudLayer = nextLayer;
+        cloudLayer.bringToFront();
+        if (previousLayer && previousLayer !== cloudLayer && map.hasLayer(previousLayer)) {
+          map.removeLayer(previousLayer);
+        }
+        if (!mapState.radarOverlayVisible) setWeatherOverlayStatus("", false);
+      });
+
+      nextLayer.once("error", function() {
+        if (requestSerial === cloudRequestSerial && mapState.cloudOverlayVisible) {
+          setWeatherOverlayStatus(
+            "NOAA/NESDIS GeoColor satellite imagery could not be displayed.",
+            true
+          );
+        }
+      });
+
+      nextLayer.addTo(map);
+      nextLayer.bringToFront();
+      if (radarLayer && mapState.radarOverlayVisible && map.hasLayer(radarLayer)) {
+        radarLayer.bringToFront();
+      }
+    };
+
+    testImage.onerror = function() {
+      if (requestSerial === cloudRequestSerial && mapState.cloudOverlayVisible) {
+        setWeatherOverlayStatus(
+          "NOAA/NESDIS GeoColor satellite imagery could not be loaded.",
+          true
+        );
+      }
+    };
+
+    testImage.src = url;
+  }
+
+  function scheduleCloudRefresh() {
+    if (!mapState.cloudOverlayVisible) return;
+    if (cloudRefreshTimer) window.clearTimeout(cloudRefreshTimer);
+    cloudRefreshTimer = window.setTimeout(function() {
+      cloudRefreshTimer = null;
+      refreshCloudOverlay();
+    }, 180);
+  }
+
+  function setCloudOverlayVisible(visible) {
+    mapState.cloudOverlayVisible = !!visible;
+
+    if (!mapState.cloudOverlayVisible) {
+      cloudRequestSerial++;
+      if (cloudRefreshTimer) {
+        window.clearTimeout(cloudRefreshTimer);
+        cloudRefreshTimer = null;
+      }
+      if (cloudLayer && map.hasLayer(cloudLayer)) map.removeLayer(cloudLayer);
+      cloudLayer = null;
+      refreshWeatherOverlayStatus();
+      return;
+    }
+
+    refreshCloudOverlay();
+  }
+
+  function setRadarOverlayVisible(visible) {
+    mapState.radarOverlayVisible = !!visible;
+    if (!radarLayer) return;
+    if (mapState.radarOverlayVisible) {
+      radarTilesLoaded = 0;
+      radarTileErrors = 0;
+      if (!map.hasLayer(radarLayer)) radarLayer.addTo(map);
+      radarLayer.bringToFront();
+      radarLayer.redraw();
+    } else if (map.hasLayer(radarLayer)) {
+      map.removeLayer(radarLayer);
+      refreshWeatherOverlayStatus();
+    }
+  }
+
+  radarLayer.on("tileload", function() {
+    radarTilesLoaded++;
+  });
+
+  radarLayer.on("tileerror", function() {
+    radarTileErrors++;
+  });
+
+  radarLayer.on("load", function() {
+    if (!mapState.radarOverlayVisible) return;
+    if (radarTilesLoaded === 0 && radarTileErrors > 0) {
+      setWeatherOverlayStatus(
+        "Weather radar could not be loaded from Iowa State IEM.",
+        true
+      );
+    } else if (!mapState.cloudOverlayVisible) {
+      setWeatherOverlayStatus("", false);
+    }
   });
 
   function updateRecenterControls() {
@@ -4706,19 +4958,38 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     currentsOverlayVisible: true,
     marineZoneOverlayVisible: false,
     smokeOverlayVisible: false,
-    smokeOverlayLoaded: false
+    smokeOverlayLoaded: false,
+    cloudOverlayVisible: false,
+    radarOverlayVisible: false
   };
 
   var sourcePoints = [];
   var candidateLayer = L.layerGroup().addTo(map);
   var marineZoneLayer = null;
+  var marineZoneHaloLayer = null;
   var smokeLayer = null;
+  var smokeOutlineLayer = null;
+  var radarTilesLoaded = 0;
+  var radarTileErrors = 0;
+
+  function marineZoneStyle() {
+    var imageryBase = activeMapLayerName === "satellite" || activeMapLayerName === "hybrid";
+    if (imageryBase) {
+      return {pane:"forecastZonePane",color:"#63e6ff",weight:3.4,opacity:1,fillColor:"#63e6ff",fillOpacity:.055,interactive:false,lineJoin:"round"};
+    }
+    return {pane:"forecastZonePane",color:"#126b91",weight:2.7,opacity:.98,fillColor:"#126b91",fillOpacity:.08,interactive:false,lineJoin:"round"};
+  }
+
+  function marineZoneHaloStyle() {
+    var imageryBase = activeMapLayerName === "satellite" || activeMapLayerName === "hybrid";
+    return {pane:"forecastZoneHaloPane",color:imageryBase ? "#071b24" : "#ffffff",weight:imageryBase ? 7.2 : 5.2,opacity:imageryBase ? .96 : .88,fill:false,interactive:false,lineJoin:"round"};
+  }
 
   function setMarineZoneOverlay(zone, geometry) {
-    if (marineZoneLayer && map.hasLayer(marineZoneLayer)) {
-      map.removeLayer(marineZoneLayer);
-    }
+    if (marineZoneLayer && map.hasLayer(marineZoneLayer)) map.removeLayer(marineZoneLayer);
+    if (marineZoneHaloLayer && map.hasLayer(marineZoneHaloLayer)) map.removeLayer(marineZoneHaloLayer);
     marineZoneLayer = null;
+    marineZoneHaloLayer = null;
 
     var control = document.getElementById("map-marine-zone-control");
     var checkbox = document.getElementById("map-show-marine-zone");
@@ -4732,26 +5003,10 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       return;
     }
 
-    marineZoneLayer = L.geoJSON({
-      type: "Feature",
-      properties: {zone: zone},
-      geometry: geometry
-    }, {
-      style: function() {
-        return {
-          color: "#126b91",
-          weight: 2,
-          opacity: 0.85,
-          fillColor: "#126b91",
-          fillOpacity: 0.10,
-          interactive: false
-        };
-      }
-    });
-    marineZoneLayer.bindTooltip(
-      "NWS forecast zone " + zone,
-      {sticky:true, direction:"center", className:"map-zone-tooltip"}
-    );
+    var zoneFeature = {type:"Feature",properties:{zone:zone},geometry:geometry};
+    marineZoneHaloLayer = L.geoJSON(zoneFeature, {style:marineZoneHaloStyle,interactive:false,pane:"forecastZoneHaloPane"});
+    marineZoneLayer = L.geoJSON(zoneFeature, {style:marineZoneStyle,interactive:false,pane:"forecastZonePane"});
+    marineZoneLayer.bindTooltip("NWS forecast zone " + zone, {sticky:true,direction:"center",className:"map-zone-tooltip"});
 
     if (control) control.hidden = false;
     if (checkbox) {
@@ -4761,7 +5016,10 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     if (label) label.textContent = "Show NWS forecast zone " + zone;
 
     if (mapState.marineZoneOverlayVisible) {
+      marineZoneHaloLayer.addTo(map);
       marineZoneLayer.addTo(map);
+      marineZoneHaloLayer.bringToFront();
+      marineZoneLayer.bringToFront();
     }
   }
 
@@ -4777,12 +5035,12 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 
     if (imageryBase) {
       if (density === "heavy") {
-        return {color:"#ff4fa3",weight:1.5,opacity:.78,fillColor:"#ff2f92",fillOpacity:.18};
+        return {color:"#ff2f92",weight:.8,opacity:.42,fillColor:"#ff2f92",fillOpacity:.30};
       }
       if (density === "medium") {
-        return {color:"#ffd24a",weight:1.4,opacity:.76,fillColor:"#ffb000",fillOpacity:.14};
+        return {color:"#ffb000",weight:.8,opacity:.40,fillColor:"#ffb000",fillOpacity:.24};
       }
-      return {color:"#fff3a6",weight:1.2,opacity:.72,fillColor:"#ffe766",fillOpacity:.10};
+      return {color:"#ffe766",weight:.7,opacity:.38,fillColor:"#ffe766",fillOpacity:.18};
     }
 
     if (density === "heavy") {
@@ -4794,6 +5052,30 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     return {color:"#7b8589",weight:1,opacity:.24,fillColor:"#aeb5b8",fillOpacity:.05};
   }
 
+  function smokeOutlineStyle() {
+    var imageryBase = activeMapLayerName === "satellite" || activeMapLayerName === "hybrid";
+    if (imageryBase) {
+      return {
+        pane: "smokeOutlinePane",
+        color: "#53e7ff",
+        weight: 3.4,
+        opacity: .98,
+        fill: false,
+        interactive: false,
+        lineJoin: "round"
+      };
+    }
+    return {
+      pane: "smokeOutlinePane",
+      color: "#20343d",
+      weight: 2.0,
+      opacity: .78,
+      fill: false,
+      interactive: false,
+      lineJoin: "round"
+    };
+  }
+
   function updateSmokeLegendForBaseMap() {
     var imageryBase = activeMapLayerName === "satellite" || activeMapLayerName === "hybrid";
     var light = document.querySelector(".smoke-swatch.light");
@@ -4802,12 +5084,12 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     if (!light || !medium || !heavy) return;
 
     if (imageryBase) {
-      light.style.background = "rgba(255,231,102,.28)";
-      light.style.borderColor = "rgba(255,243,166,.88)";
-      medium.style.background = "rgba(255,176,0,.30)";
-      medium.style.borderColor = "rgba(255,210,74,.90)";
-      heavy.style.background = "rgba(255,47,146,.32)";
-      heavy.style.borderColor = "rgba(255,79,163,.92)";
+      light.style.background = "rgba(255,231,102,.38)";
+      light.style.borderColor = "rgba(83,231,255,.98)";
+      medium.style.background = "rgba(255,176,0,.42)";
+      medium.style.borderColor = "rgba(83,231,255,.98)";
+      heavy.style.background = "rgba(255,47,146,.46)";
+      heavy.style.borderColor = "rgba(83,231,255,.98)";
     } else {
       light.style.background = "rgba(174,181,184,.05)";
       light.style.borderColor = "rgba(123,133,137,.24)";
@@ -4839,7 +5121,11 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     if (smokeLayer && map.hasLayer(smokeLayer)) {
       map.removeLayer(smokeLayer);
     }
+    if (smokeOutlineLayer && map.hasLayer(smokeOutlineLayer)) {
+      map.removeLayer(smokeOutlineLayer);
+    }
     smokeLayer = null;
+    smokeOutlineLayer = null;
     mapState.smokeOverlayLoaded = false;
     setSmokeLegendVisible(false);
   }
@@ -4850,6 +5136,10 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 
     if (smokeLayer && mapState.smokeOverlayLoaded) {
       if (!map.hasLayer(smokeLayer)) smokeLayer.addTo(map);
+      if (smokeOutlineLayer && !map.hasLayer(smokeOutlineLayer)) {
+        smokeOutlineLayer.addTo(map);
+        smokeOutlineLayer.bringToFront();
+      }
       setSmokeLegendVisible(true);
       return;
     }
@@ -4884,10 +5174,17 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
           style: smokeStyle,
           interactive: false
         });
+        smokeOutlineLayer = L.geoJSON(geojson, {
+          style: smokeOutlineStyle,
+          interactive: false,
+          pane: "smokeOutlinePane"
+        });
         mapState.smokeOverlayLoaded = true;
 
         if (mapState.smokeOverlayVisible) {
           smokeLayer.addTo(map);
+          smokeOutlineLayer.addTo(map);
+          smokeOutlineLayer.bringToFront();
           setSmokeLegendVisible(true);
         }
 
@@ -5263,11 +5560,15 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     marineZoneCheckbox.checked = !!mapState.marineZoneOverlayVisible;
     marineZoneCheckbox.addEventListener("change", function() {
       mapState.marineZoneOverlayVisible = marineZoneCheckbox.checked;
-      if (!marineZoneLayer) return;
+      if (!marineZoneLayer || !marineZoneHaloLayer) return;
       if (mapState.marineZoneOverlayVisible) {
+        if (!map.hasLayer(marineZoneHaloLayer)) marineZoneHaloLayer.addTo(map);
         if (!map.hasLayer(marineZoneLayer)) marineZoneLayer.addTo(map);
+        marineZoneHaloLayer.bringToFront();
+        marineZoneLayer.bringToFront();
       } else {
         if (map.hasLayer(marineZoneLayer)) map.removeLayer(marineZoneLayer);
+        if (map.hasLayer(marineZoneHaloLayer)) map.removeLayer(marineZoneHaloLayer);
       }
     });
   }
@@ -5280,14 +5581,39 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       if (mapState.smokeOverlayVisible) {
         loadSmokeOverlay();
       } else {
-        if (smokeLayer && map.hasLayer(smokeLayer)) map.removeLayer(smokeLayer);
-        setSmokeLegendVisible(false);
+        clearSmokeLayer();
         setSmokeStatus("", false);
       }
     });
   }
 
+  var mapTypeInputs = document.querySelectorAll('input[name="map-type"]');
+  mapTypeInputs.forEach(function(input) {
+    input.checked = input.value === activeMapLayerName;
+    input.addEventListener("change", function() {
+      if (input.checked) setBaseMapLayer(input.value);
+    });
+  });
+
+  var cloudCheckbox = document.getElementById("map-show-clouds");
+  if (cloudCheckbox) {
+    cloudCheckbox.checked = !!mapState.cloudOverlayVisible;
+    cloudCheckbox.addEventListener("change", function() {
+      setCloudOverlayVisible(!!cloudCheckbox.checked);
+    });
+  }
+
+  var radarCheckbox = document.getElementById("map-show-radar");
+  if (radarCheckbox) {
+    radarCheckbox.checked = !!mapState.radarOverlayVisible;
+    radarCheckbox.addEventListener("change", function() {
+      setRadarOverlayVisible(!!radarCheckbox.checked);
+    });
+  }
+
   map.on("moveend", function() {
+    if (mapState.cloudOverlayVisible) scheduleCloudRefresh();
+
     if (!mapState.smokeOverlayVisible || !smokeLayer) return;
     var visibleCount = 0;
     var viewBounds = map.getBounds();
@@ -5897,12 +6223,12 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 })();
 
 (function(){
-  var countSelect = document.getElementById("wind-reading-count");
+  var hoursSelect = document.getElementById("wind-reading-hours");
   var unitSelect = document.getElementById("wind-unit-select");
   var tableBody = document.getElementById("wind-readings-body");
   var chart = document.getElementById("wind-reading-chart");
   var status = document.getElementById("wind-reading-status");
-  if (!countSelect || !tableBody) return;
+  if (!hoursSelect || !tableBody) return;
 
   function escapeHTML(value) {
     return String(value)
@@ -5913,15 +6239,17 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       .replace(/'/g, "&#39;");
   }
 
-  function updateCountInLinks(count) {
+  function updateHoursInLinks(hours) {
     var pageURL = new URL(window.location.href);
-    pageURL.searchParams.set("wind_readings", String(count));
+    pageURL.searchParams.set("wind_hours", String(hours));
+    pageURL.searchParams.delete("wind_readings");
     window.history.replaceState(null, "", pageURL.toString());
 
     var detailsLink = document.querySelector("#full-report-card a.details-link");
     if (detailsLink) {
       var detailsURL = new URL(detailsLink.href, window.location.href);
-      detailsURL.searchParams.set("wind_readings", String(count));
+      detailsURL.searchParams.set("wind_hours", String(hours));
+      detailsURL.searchParams.delete("wind_readings");
       detailsLink.href = detailsURL.toString();
     }
   }
@@ -5966,7 +6294,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     var left = 42;
     var right = 14;
     var top = 12;
-    var bottom = 38;
+    var bottom = 42;
     var plotW = width - left - right;
     var plotH = height - top - bottom;
 
@@ -6012,34 +6340,30 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
         '" text-anchor="end">' + value.toFixed(value % 1 ? 1 : 0) + '</text>';
     }
 
+    function chooseLabelIndexes(count) {
+      if (count <= 1) return [0];
+      var desired = Math.min(6, Math.max(4, Math.round(count / 8)));
+      desired = Math.min(desired, count);
+      var result = [];
+      for (var i = 0; i < desired; i++) {
+        var idx = Math.round(i * (count - 1) / (desired - 1));
+        if (result.indexOf(idx) === -1) result.push(idx);
+      }
+      if (result[result.length - 1] !== count - 1) result.push(count - 1);
+      return result;
+    }
+
     var xLabels = "";
-    var labelIndexes = [0, Math.floor((points.length - 1) / 2), points.length - 1]
-      .filter(function(value, index, array) { return array.indexOf(value) === index; });
-    labelIndexes.forEach(function(index) {
+    chooseLabelIndexes(points.length).forEach(function(index) {
       xLabels += '<text class="wind-chart-label" x="' + xFor(index).toFixed(1) +
         '" y="' + (height-10) + '" text-anchor="middle">' +
         escapeHTML(points[index].time) + '</text>';
     });
 
-    var dots = "";
-    points.forEach(function(item, index) {
-      if (Number.isFinite(item.wind)) {
-        dots += '<circle class="wind-chart-dot-wind" cx="' + xFor(index).toFixed(1) +
-          '" cy="' + yFor(item.wind).toFixed(1) + '" r="2.7"><title>' +
-          escapeHTML(item.time + " — wind " + item.wind.toFixed(1) + " " + chartUnit) +
-          '</title></circle>';
-      }
-      if (Number.isFinite(item.gust)) {
-        dots += '<circle class="wind-chart-dot-gust" cx="' + xFor(index).toFixed(1) +
-          '" cy="' + yFor(item.gust).toFixed(1) + '" r="2.4"><title>' +
-          escapeHTML(item.time + " — gust " + item.gust.toFixed(1) + " " + chartUnit) +
-          '</title></circle>';
-      }
-    });
-
     chart.innerHTML =
+      '<div id="wind-chart-readout" class="wind-chart-readout" aria-live="polite"></div>' +
       '<svg viewBox="0 0 ' + width + ' ' + height +
-      '" role="img" aria-label="Recent sustained wind and gust history">' +
+      '" role="img" aria-label="Recent sustained wind and gust history. Drag or tap to inspect observations." tabindex="0">' +
       grid +
       '<line class="wind-chart-axis" x1="' + left + '" y1="' + top +
       '" x2="' + left + '" y2="' + (height-bottom) + '"></line>' +
@@ -6048,9 +6372,124 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       '<text class="wind-chart-label" x="10" y="' + (top+8) + '">' + chartUnit + '</text>' +
       '<path class="wind-chart-wind" d="' + pathFor("wind") + '"></path>' +
       '<path class="wind-chart-gust" d="' + pathFor("gust") + '"></path>' +
-      dots + xLabels + '</svg>';
-  }
+      xLabels +
+      '<g id="wind-chart-inspector" hidden>' +
+      '<line class="wind-chart-cursor" x1="0" y1="' + top + '" x2="0" y2="' + (height-bottom) + '"></line>' +
+      '<circle class="wind-chart-cursor-dot wind" cx="0" cy="0" r="4" hidden></circle>' +
+      '<circle class="wind-chart-cursor-dot gust" cx="0" cy="0" r="4" hidden></circle>' +
+      '</g>' +
+      '<rect class="wind-chart-hit" x="' + left + '" y="' + top + '" width="' + plotW +
+      '" height="' + plotH + '" aria-hidden="true"></rect>' +
+      '</svg>';
 
+    var svg = chart.querySelector("svg");
+    var hit = chart.querySelector(".wind-chart-hit");
+    var inspector = document.getElementById("wind-chart-inspector");
+    var cursorLine = inspector ? inspector.querySelector(".wind-chart-cursor") : null;
+    var windDot = inspector ? inspector.querySelector(".wind-chart-cursor-dot.wind") : null;
+    var gustDot = inspector ? inspector.querySelector(".wind-chart-cursor-dot.gust") : null;
+    var readout = document.getElementById("wind-chart-readout");
+    var activeIndex = -1;
+    var dragging = false;
+
+    function formatObservation(item) {
+      var parts = [item.time];
+      if (Number.isFinite(item.wind)) parts.push("Wind " + item.wind.toFixed(1) + " " + chartUnit);
+      if (Number.isFinite(item.gust)) parts.push("Gust " + item.gust.toFixed(1) + " " + chartUnit);
+      return parts.join(" · ");
+    }
+
+    function showIndex(index) {
+      index = Math.max(0, Math.min(points.length - 1, index));
+      activeIndex = index;
+      var item = points[index];
+      var x = xFor(index);
+
+      if (inspector) inspector.hidden = false;
+      if (cursorLine) {
+        cursorLine.setAttribute("x1", x.toFixed(1));
+        cursorLine.setAttribute("x2", x.toFixed(1));
+      }
+
+      if (windDot) {
+        if (Number.isFinite(item.wind)) {
+          windDot.hidden = false;
+          windDot.setAttribute("cx", x.toFixed(1));
+          windDot.setAttribute("cy", yFor(item.wind).toFixed(1));
+        } else {
+          windDot.hidden = true;
+        }
+      }
+
+      if (gustDot) {
+        if (Number.isFinite(item.gust)) {
+          gustDot.hidden = false;
+          gustDot.setAttribute("cx", x.toFixed(1));
+          gustDot.setAttribute("cy", yFor(item.gust).toFixed(1));
+        } else {
+          gustDot.hidden = true;
+        }
+      }
+
+      if (readout) readout.textContent = formatObservation(item);
+    }
+
+    function indexForClientX(clientX) {
+      var rect = svg.getBoundingClientRect();
+      if (!rect.width) return 0;
+      var svgX = (clientX - rect.left) * width / rect.width;
+      var ratio = (svgX - left) / plotW;
+      ratio = Math.max(0, Math.min(1, ratio));
+      return Math.round(ratio * (points.length - 1));
+    }
+
+    if (hit) {
+      hit.addEventListener("pointerdown", function(event) {
+        dragging = true;
+        if (hit.setPointerCapture) hit.setPointerCapture(event.pointerId);
+        showIndex(indexForClientX(event.clientX));
+        event.preventDefault();
+      });
+
+      hit.addEventListener("pointermove", function(event) {
+        if (!dragging) return;
+        showIndex(indexForClientX(event.clientX));
+        event.preventDefault();
+      });
+
+      hit.addEventListener("pointerup", function(event) {
+        if (!dragging) return;
+        dragging = false;
+        showIndex(indexForClientX(event.clientX));
+        if (hit.releasePointerCapture) {
+          try { hit.releasePointerCapture(event.pointerId); } catch (_) {}
+        }
+        event.preventDefault();
+      });
+
+      hit.addEventListener("pointercancel", function() {
+        dragging = false;
+      });
+
+      hit.addEventListener("click", function(event) {
+        showIndex(indexForClientX(event.clientX));
+      });
+    }
+
+    if (svg) {
+      svg.addEventListener("keydown", function(event) {
+        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight" &&
+            event.key !== "Home" && event.key !== "End") return;
+
+        if (activeIndex < 0) activeIndex = points.length - 1;
+        if (event.key === "ArrowLeft") showIndex(activeIndex - 1);
+        else if (event.key === "ArrowRight") showIndex(activeIndex + 1);
+        else if (event.key === "Home") showIndex(0);
+        else if (event.key === "End") showIndex(points.length - 1);
+        event.preventDefault();
+      });
+    }
+  }
   function readingsFromTable() {
     return Array.prototype.map.call(tableBody.querySelectorAll("tr"), function(row) {
       var cells = row.querySelectorAll("td");
@@ -6066,17 +6505,17 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 
   renderWindChart(readingsFromTable());
 
-  countSelect.addEventListener("change", function() {
-    var count = countSelect.value;
-    var station = countSelect.getAttribute("data-station") || "";
+  hoursSelect.addEventListener("change", function() {
+    var hours = hoursSelect.value;
+    var station = hoursSelect.getAttribute("data-station") || "";
     if (!station) return;
 
-    countSelect.disabled = true;
+    hoursSelect.disabled = true;
     if (status) status.textContent = "Updating…";
 
     var target = new URL("/wind-readings", window.location.origin);
     target.searchParams.set("station", station);
-    target.searchParams.set("wind_readings", count);
+    target.searchParams.set("wind_hours", hours);
     target.searchParams.set(
       "wind_unit",
       unitSelect && unitSelect.value === "mph" ? "mph" : "kts"
@@ -6084,9 +6523,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 
     fetch(target.toString(), {headers:{"Accept":"application/json"}})
       .then(function(response) {
-        if (!response.ok) {
-          throw new Error("HTTP " + response.status);
-        }
+        if (!response.ok) throw new Error("HTTP " + response.status);
         return response.json();
       })
       .then(function(data) {
@@ -6095,20 +6532,18 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
         renderWindChart(readings);
 
         var summary = document.querySelector(".wind-card .wind-summary");
-        if (summary && typeof data.summary === "string") {
-          summary.textContent = data.summary;
-        }
+        if (summary && typeof data.summary === "string") summary.textContent = data.summary;
 
-        countSelect.value = String(data.count || count);
-        updateCountInLinks(countSelect.value);
+        hoursSelect.value = String(data.hours || hours);
+        updateHoursInLinks(hoursSelect.value);
         if (status) status.textContent = "";
       })
       .catch(function(err) {
         if (status) status.textContent = "Update failed";
-        console.error("Wind readings update failed:", err);
+        console.error("Wind history update failed:", err);
       })
       .finally(function() {
-        countSelect.disabled = false;
+        hoursSelect.disabled = false;
       });
   });
 })();
@@ -6647,7 +7082,12 @@ func writeSharedWindDetailsText(
 
 	if len(report.Latest10) > 0 {
 		fmt.Fprintln(w)
-		fmt.Fprintf(w, "LATEST %d OBSERVATIONS\n", len(report.Latest10))
+		windHours := parseWindReadingHours(report.RequestQuery)
+		fmt.Fprintf(w, "WIND OBSERVATIONS — LAST %d HOUR", windHours)
+		if windHours != 1 {
+			fmt.Fprint(w, "S")
+		}
+		fmt.Fprintln(w)
 		fmt.Fprintln(w, "--------------------------------")
 		fmt.Fprintf(w, "%-9s %-3s %6s  %s\n", "Time", "Dir", "Wind", "Gust")
 
