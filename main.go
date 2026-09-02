@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	appVersion                      = "1.8.0"
+	appVersion                      = "1.9.0"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -1211,6 +1211,23 @@ func runServer(
 		mux.ServeHTTP(w, voiceRequest)
 	})
 
+	mux.HandleFunc("/planning", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		planningRequest := r.Clone(r.Context())
+		planningURL := *r.URL
+		q := cloneQuery(r.URL.Query())
+		q.Set("format", "html")
+		q.Set("planning", "1")
+		planningURL.Path = "/report"
+		planningURL.RawQuery = q.Encode()
+		planningRequest.URL = &planningURL
+		mux.ServeHTTP(w, planningRequest)
+	})
+
 	mux.HandleFunc("/report", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1544,6 +1561,8 @@ type htmlReportData struct {
 	CurrentRangeLabel                                             string
 	FullDetailsURL                                                string
 	WindStationsURL                                               string
+	PlanningDetails                                               bool
+	PlanningDetailsURL, ConditionsURL                             string
 	CurrentPrevURL, CurrentTodayURL, CurrentNextURL               string
 	CurrentIsToday                                                bool
 	CurrentOutlook                                                []string
@@ -1558,6 +1577,8 @@ type htmlReportData struct {
 	PlanningMaxEbb, PlanningMaxFlood, PlanningBuffer              string
 	PlanningCurrentDistanceWarning, PlanningAutoCurrentLimit      string
 	CurrentChart                                                  template.HTML
+	BottomLineCurrentChart                                        template.HTML
+	BottomLineWindSource, BottomLineCurrentSource                 string
 	BottomLine                                                    []string
 	BottomLineNarrative                                           []string
 	FullText                                                      string
@@ -2566,6 +2587,21 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 	stationsQuery.Set("stations", "1")
 	stationsQuery.Del("details")
 	d.WindStationsURL = "/report?" + stationsQuery.Encode()
+
+	d.PlanningDetails = strings.TrimSpace(report.RequestQuery.Get("planning")) == "1"
+	planningQuery := cloneQuery(report.RequestQuery)
+	planningQuery.Del("format")
+	planningQuery.Del("details")
+	planningQuery.Del("stations")
+	planningQuery.Set("planning", "1")
+	d.PlanningDetailsURL = "/planning?" + planningQuery.Encode()
+
+	conditionsQuery := cloneQuery(report.RequestQuery)
+	conditionsQuery.Set("format", "html")
+	conditionsQuery.Del("planning")
+	conditionsQuery.Del("details")
+	conditionsQuery.Del("stations")
+	d.ConditionsURL = "/report?" + conditionsQuery.Encode()
 	if !report.ReportTime.IsZero() {
 		d.ReportTime = report.ReportTime.In(loc).Format("Mon Jan 2, 2006 · 3:04 PM MST")
 	}
@@ -2779,6 +2815,39 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 				s.RequestedLon,
 				s.ObservationAgeMinutes,
 			)
+		}
+	}
+
+	windSourceID := strings.ToUpper(strings.TrimSpace(report.Station))
+	if report.WindSelection != nil {
+		windSourceID = strings.ToUpper(strings.TrimSpace(report.WindSelection.StationID))
+		windSourceName := strings.TrimSpace(report.WindSelection.StationName)
+		if windSourceID != "" && windSourceName != "" {
+			d.BottomLineWindSource = fmt.Sprintf("%s — %s", windSourceID, windSourceName)
+		} else {
+			d.BottomLineWindSource = windSourceID
+		}
+	} else {
+		d.BottomLineWindSource = windSourceID
+	}
+
+	if report.Current != nil && report.Current.CurrentStation != nil {
+		s := report.Current.CurrentStation
+		currentID := strings.TrimSpace(s.ID)
+		currentName := strings.TrimSpace(s.Name)
+		switch {
+		case currentID != "" && currentName != "":
+			d.BottomLineCurrentSource = fmt.Sprintf("%s — %s", currentID, currentName)
+		case currentID != "":
+			d.BottomLineCurrentSource = currentID
+		default:
+			d.BottomLineCurrentSource = currentName
+		}
+		if strings.TrimSpace(report.Current.Bin) != "" {
+			d.BottomLineCurrentSource += fmt.Sprintf(" · bin %s", report.Current.Bin)
+		}
+		if s.DistanceNM > 0 {
+			d.BottomLineCurrentSource += fmt.Sprintf(" · %.1f nmi from wind station", s.DistanceNM)
 		}
 	}
 
@@ -3195,6 +3264,15 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 			planningEndMinutes,
 			d.TideRanges,
 		)
+		d.BottomLineCurrentChart = buildCurrentChartSVG(
+			report.Current,
+			report.ReportTime,
+			loc,
+			1,
+			planningStartMinutes,
+			planningEndMinutes,
+			d.TideRanges,
+		)
 	}
 	if d.WindError != "" {
 		d.BottomLine = append(
@@ -3214,7 +3292,7 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 			line = strings.TrimSpace(line)
 			if line != "" && line != "BOTTOM LINE" && !strings.HasPrefix(line, "---") {
 				d.BottomLine = append(d.BottomLine, line)
-				if !strings.HasPrefix(line, "Latest wind at ") {
+				if d.BottomLineCurrentChart == "" && !strings.HasPrefix(line, "Latest wind at ") {
 					d.BottomLineNarrative = append(d.BottomLineNarrative, line)
 				}
 			}
@@ -4453,9 +4531,14 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 .marine-forecast-note{color:var(--muted);font-size:.82rem;margin:10px 0 0}
 .marine-forecast-error{color:var(--muted);font-size:.9rem}
 @media(max-width:640px){.marine-periods{grid-template-columns:1fr}}
-.error-card{border-left:5px solid #b64735;background:#fff7f4}.error-card h2{color:#8f3025}.error-message{font-weight:650;line-height:1.5}.error-help{color:var(--muted);font-size:.9rem}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}.bottom.planning-preferred{background:#eff8f1;border-color:#b8d8c0}.bottom.planning-caution{background:#fff8e6;border-color:#e6c66a}.bottom.planning-redflag{background:#fff0ef;border-color:#e0a39d}.bottom .planning-period-status{margin:0 0 10px;font-weight:900;font-size:1.05rem}.bottom .planning-period-status.preferred{color:#176246}.bottom .planning-period-status.caution{color:#8a5a00}.bottom .planning-period-status.redflag{color:#9b3027}.bottom-wind-summary{margin:10px 0 14px}.bottom-wind-summary .metrics{margin-bottom:7px}.bottom-wind-observed{margin:0;color:var(--muted);font-size:.82rem}.map-sources-card h2{margin-bottom:7px}.map-sources-note{margin:0;color:var(--muted);font-size:.84rem;line-height:1.5}</style></head><body><main class="shell">
+.bottom-source-context{display:grid;gap:3px;margin:0 0 12px;padding:9px 11px;border:1px solid var(--line);border-radius:12px;background:#f7fbfc;color:var(--muted);font-size:.86rem}.bottom-source-context strong{color:var(--navy)}
+.error-card{border-left:5px solid #b64735;background:#fff7f4}.error-card h2{color:#8f3025}.error-message{font-weight:650;line-height:1.5}.error-help{color:var(--muted);font-size:.9rem}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}.bottom.planning-preferred{background:#eff8f1;border-color:#b8d8c0}.bottom.planning-caution{background:#fff8e6;border-color:#e6c66a}.bottom.planning-redflag{background:#fff0ef;border-color:#e0a39d}.bottom .planning-period-status{margin:0 0 10px;font-weight:900;font-size:1.05rem}.bottom .planning-period-status.preferred{color:#176246}.bottom .planning-period-status.caution{color:#8a5a00}.bottom .planning-period-status.redflag{color:#9b3027}.bottom-wind-summary{margin:10px 0 14px}.bottom-wind-summary .metrics{margin-bottom:7px}.bottom-wind-observed{margin:0;color:var(--muted);font-size:.82rem}.map-sources-card h2{margin-bottom:7px}.map-sources-note{margin:0;color:var(--muted);font-size:.84rem;line-height:1.5}.planning-page-link-card{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}.planning-page-link-card h2{margin-bottom:4px}.planning-page-link-card p{margin:0;color:var(--muted)}.planning-page-link{display:inline-block;padding:11px 16px;border-radius:999px;background:var(--navy);color:#fff;text-decoration:none;font-weight:900}.planning-page-link:hover{filter:brightness(1.08)}@media(max-width:640px){.planning-page-link{width:100%;text-align:center}}</style></head><body><main class="shell">
 <section class="hero"><div class="eyebrow">Mauri's Weather & Water Conditions</div><h1>{{.Title}}</h1><div class="sub">{{.ReportTime}} · {{.Station}}</div>{{if .Historical}}<span class="badge">Historical · {{.RequestedTime}}</span>{{end}}{{if .Yogiism}}<div class="yogiism">“{{.Yogiism}}” — Yogi Berra</div>{{end}}</section><div class="grid">
-<section id="bottom-line-card" class="card full bottom{{if .PlanningPeriodClass}} planning-{{.PlanningPeriodClass}}{{end}}"><h2>Bottom line</h2>{{if .PlanningPeriodCause}}<p><strong>{{.PlanningPeriodCause}}</strong></p>{{end}}{{if .PlanningPeriodDetail}}<p>{{.PlanningPeriodDetail}}</p>{{end}}{{if not .WindError}}<div class="bottom-wind-summary" aria-label="Latest wind observation"><div class="metrics"><div class="metric"><div class="label">Direction</div><div class="value">{{if .WindDirection}}{{.WindDirection}}{{else}}—{{end}}</div></div><div class="metric"><div class="label">Wind</div><div class="value">{{if .WindSpeed}}{{.WindSpeed}}{{else}}—{{end}}</div></div><div class="metric"><div class="label">Gust</div><div class="value">{{if .WindGust}}{{.WindGust}}{{else}}—{{end}}</div></div><div class="metric"><div class="label">Air temp</div><div class="value">{{if .WindAirTemp}}{{.WindAirTemp}}{{else}}—{{end}}</div></div></div><p class="bottom-wind-observed"><strong>Latest observation:</strong> {{if .WindObserved}}{{.WindObserved}}{{else}}unavailable{{end}}</p></div>{{end}}{{range .BottomLineNarrative}}<p>{{.}}</p>{{else}}{{if .WindError}}<p>Summary unavailable.</p>{{end}}{{end}}</section>
+{{if not .PlanningDetails}}
+<section id="bottom-line-card" class="card full bottom{{if .PlanningPeriodClass}} planning-{{.PlanningPeriodClass}}{{end}}"><h2>Bottom line</h2><div class="bottom-source-context">{{if .BottomLineWindSource}}<div><strong>Wind station:</strong> {{.BottomLineWindSource}}</div>{{end}}{{if .BottomLineCurrentSource}}<div><strong>Currents station:</strong> {{.BottomLineCurrentSource}}</div>{{else}}<div><strong>Currents station:</strong> unavailable</div>{{end}}</div>{{if .PlanningPeriodCause}}<p><strong>{{.PlanningPeriodCause}}</strong></p>{{end}}{{if .PlanningPeriodDetail}}<p>{{.PlanningPeriodDetail}}</p>{{end}}{{if not .WindError}}<div class="bottom-wind-summary" aria-label="Latest wind observation"><div class="metrics"><div class="metric"><div class="label">Direction</div><div class="value">{{if .WindDirection}}{{.WindDirection}}{{else}}—{{end}}</div></div><div class="metric"><div class="label">Wind</div><div class="value">{{if .WindSpeed}}{{.WindSpeed}}{{else}}—{{end}}</div></div><div class="metric"><div class="label">Gust</div><div class="value">{{if .WindGust}}{{.WindGust}}{{else}}—{{end}}</div></div><div class="metric"><div class="label">Air temp</div><div class="value">{{if .WindAirTemp}}{{.WindAirTemp}}{{else}}—{{end}}</div></div></div><p class="bottom-wind-observed"><strong>Latest observation:</strong> {{if .WindObserved}}{{.WindObserved}}{{else}}unavailable{{end}}</p></div>{{end}}{{if .BottomLineCurrentChart}}<div class="chart-explainer"><strong>1-day tidal current outlook.</strong> Above zero = flood; below zero = ebb; crossings = slack water.</div><div class="current-chart-wrap">{{.BottomLineCurrentChart}}</div>{{else}}{{range .BottomLineNarrative}}<p>{{.}}</p>{{else}}{{if .WindError}}<p>Summary unavailable.</p>{{end}}{{end}}{{end}}</section>
+<section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Open the full planning dashboard for location, wind, currents, forecasts, map layers, and customization controls.</p></div><a class="planning-page-link" href="{{.PlanningDetailsURL}}">Planning and Details →</a></section>
+{{else}}
+<section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Full planning dashboard and customization controls.</p></div><a class="planning-page-link" href="{{.ConditionsURL}}">← Back to Bottom Line</a></section>
 <section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map, enter coordinates, or use My location to choose a sailing location, then use Find stations near selected location. Panning only changes the view; to search somewhere else, move the selected ★ location first. Click a nearby wind station to pin its details and preview the associated currents station, then use the selection link in the map panel to commit the wind-station choice. Candidate stations and distances always refer to the selected location.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-resize-handle" class="map-resize-handle" role="separator" aria-label="Resize map vertically" aria-orientation="horizontal" aria-valuemin="260" aria-valuemax="900" aria-valuenow="390" aria-grabbed="false" tabindex="0" title="Drag up or down to resize map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-navigation" aria-label="Map navigation"><button id="map-geolocate" class="map-nav-button" type="button" title="Use your device location as the selected location">◎ My location</button><button id="map-nav-selected" class="map-nav-button" type="button" title="Center map on selected location" {{if not .MapHasRequest}}disabled{{end}}>Center on selected location</button><button id="map-nav-wind" class="map-nav-button" type="button" title="Center map on selected wind station" {{if not .MapHasWind}}disabled{{end}}>Center on selected wind station</button><button id="map-nav-current" class="map-nav-button" type="button" title="Center map on selected currents station" {{if not .MapHasCurrent}}disabled{{end}}>Center on selected currents station</button></div><div class="map-state-controls" aria-label="Map selection controls"><label class="map-current-toggle"><input type="checkbox" id="map-show-currents" checked> Show selected currents station</label><details id="map-types-menu" class="map-overlays-menu"><summary>Map Types</summary><div class="map-overlays-panel"><label class="map-overlay-toggle"><input type="radio" name="map-type" value="map"> <span>Street Map</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="nautical"> <span>Nautical Chart</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="satellite"> <span>Satellite</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="hybrid"> <span>Hybrid</span></label></div></details><details id="map-overlays-menu" class="map-overlays-menu"><summary>Map Overlays</summary><div class="map-overlays-panel"><label id="map-marine-zone-control" class="map-overlay-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-smoke"> <span>Satellite smoke (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-clouds"> <span>Satellite Cloud Cover (NOAA)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-radar"> <span>Weather radar (NOAA/NWS)</span></label><div class="map-overlay-note">Satellite Cloud Cover uses NOAA/NESDIS GOES imagery rendered for the current map view; daylight areas appear natural-color-like and nighttime areas use infrared imagery. Radar uses Iowa State IEM's Web-Mercator CONUS NEXRAD N0Q WMS layer; a clear/transparent radar layer can simply mean no precipitation echoes are present.</div></div></details><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}" {{if not .MapHasRequest}}disabled{{end}}>Clear selected location</button></div><div class="map-coordinate-entry" aria-label="Enter exact location"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="number" step="any" min="-90" max="90" inputmode="decimal" placeholder="38.03542" {{if .MapHasRequest}}value="{{printf "%.5f" .MapRequestLat}}"{{end}}></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="number" step="any" min="-180" max="180" inputmode="decimal" placeholder="-121.88631" {{if .MapHasRequest}}value="{{printf "%.5f" .MapRequestLon}}"{{end}}></div><button id="map-use-coordinate" class="map-coordinate-use" type="button">Use location</button><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div class="map-controls"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Select a location to find stations</span><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-weather-overlay-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div class="map-layer-note">Drag the handle directly below the map to make the map taller or shorter. Keyboard users can focus the handle and use ↑/↓ (Shift for larger steps).</div><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
 {{if .WindError}}<section class="card full error-card"><h2>Wind station selection unavailable</h2><p class="error-message">{{.WindError}}</p><p class="error-help">The page is still available so you can inspect the request and nearby station diagnostics. Try nearby coordinates or an explicit NDBC station ID.</p></section>{{end}}
 <section class="card full wind-card"><div class="wind-card-head"><h2>Wind</h2><label class="wind-unit-control" for="wind-unit-select">Wind speed<select id="wind-unit-select"><option value="kts" {{if eq .WindUnit "kts"}}selected{{end}}>Knots</option><option value="mph" {{if eq .WindUnit "mph"}}selected{{end}}>MPH</option></select></label></div>
@@ -4491,7 +4574,8 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 
 {{if .CurrentChart}}<section id="current-chart-card" class="card full"><div class="current-chart-header"><div><h2>Tidal Current</h2>{{if .CurrentRangeLabel}}<div class="current-date-label">{{.CurrentRangeLabel}}</div>{{end}}</div></div><div class="current-range-toolbar" aria-label="Current graph date controls"><a class="current-date-nav" href="{{.CurrentPrevURL}}" aria-label="Previous date range">← Previous range</a><label class="current-control-label"><span>Start date</span><input id="current-date-picker" class="current-date-picker" type="date" value="{{.CurrentDateISO}}" aria-label="Choose starting date"></label><label class="current-control-label"><span>Range</span><select id="current-days-picker" class="current-date-picker" aria-label="Number of days"><option value="1" {{if eq .CurrentDays 1}}selected{{end}}>1 day</option><option value="3" {{if eq .CurrentDays 3}}selected{{end}}>3 days</option><option value="7" {{if eq .CurrentDays 7}}selected{{end}}>7 days</option></select></label><a class="current-date-nav {{if .CurrentIsToday}}is-current{{end}}" href="{{.CurrentTodayURL}}">Today</a><a class="current-date-nav" href="{{.CurrentNextURL}}" aria-label="Next date range">Next range →</a></div>{{if .CurrentWindow}}<div class="current-window-inline"><strong>{{if .CurrentWindowMode}}{{.CurrentWindowMode}}{{else}}Conditions window{{end}}</strong><span>{{.CurrentWindow}}</span></div>{{end}}<div class="chart-explainer"><strong>This is current, not tide height.</strong> Above zero = flood; below zero = ebb; crossings = slack water.</div>{{if .TideRangeOverlayAvailable}}<div class="tide-range-legend"><label class="tide-range-toggle"><input id="show-tide-range-overlay" type="checkbox" checked> Show daily tidal range on right axis</label><span class="tide-range-key"><span class="tide-range-swatch typical"></span>{{if .TideRangeLegendTypical}}{{.TideRangeLegendTypical}}{{else}}Normal-cycle (&lt; +15%){{end}}</span><span class="tide-range-key"><span class="tide-range-swatch elevated"></span>{{if .TideRangeLegendElevated}}{{.TideRangeLegendElevated}}{{else}}Elevated (≥ +15%){{end}}</span><span class="tide-range-key"><span class="tide-range-swatch large"></span>{{if .TideRangeLegendLarge}}{{.TideRangeLegendLarge}}{{else}}Large (≥ +30%){{end}}</span><span class="tide-range-key"><span class="tide-range-swatch exceptional"></span>{{if .TideRangeLegendExceptional}}{{.TideRangeLegendExceptional}}{{else}}Exceptional (≥ +45%){{end}}</span></div>{{end}}<div class="current-chart-wrap">{{.CurrentChart}}</div><div class="chart-note">NOAA 6-minute harmonic current predictions. The current-speed axis stays at ±3.5 kt for date-to-date comparison and expands only when needed. Darker bands are night; light areas are daylight; warm bands mark the configured preferred planning period. When enabled, thin daily markers use a stable 0–10 ft right axis for predicted high-to-low tidal range, expanding only above 10 ft when needed; marker color is classified relative to the surrounding lunar-cycle median, where Normal-cycle means less than 15% above that median. {{if eq .CurrentDays 1}}Max flood, max ebb, and slack events are labeled with their times.{{else}}Small dots mark max flood, max ebb, and slack across the displayed range.{{end}} {{if .CurrentIsToday}}Red line marks report time when it falls inside the displayed range.{{end}}{{if gt .CurrentDays 1}} Day boundaries are emphasized for multi-day planning.{{end}}</div><div class="current-events-integrated"><div class="current-events-head"><strong>Key current times{{if .CurrentDateLabel}} — {{.CurrentDateLabel}}{{end}}</strong>{{if gt .CurrentDays 1}}<span>Selected start date only; graph covers {{.CurrentDays}} days.</span>{{end}}</div><div class="current-key-times">{{range .CurrentEvents}}<div class="current-key-time"><div class="current-key-time-time">{{.Time}}</div><div class="current-key-time-label"><strong>{{.Label}}</strong>{{if .Speed}}<span class="current-key-time-meta">{{.Speed}} · {{.Direction}}</span>{{end}}</div></div>{{else}}<p>No key current times in the conditions window.</p>{{end}}</div></div>{{if .CurrentPlanningHints}}<div class="current-planning"><div class="current-planning-head"><strong>Preferred-period planning hint{{if eq .CurrentDays 1}} — today / selected day{{end}}</strong><span>Current strength has separate caution and red-flag thresholds; the time buffer also warns about strong current just outside the preferred period.</span></div><div class="planning-preferences"><div class="planning-preferences-row"><label><span>Start</span><input id="planning-start" type="time" value="{{.PlanningStart}}" aria-label="Preferred period start"></label><label><span>End</span><input id="planning-end" type="time" value="{{.PlanningEnd}}" aria-label="Preferred period end"></label></div><div class="planning-preferences-row"><label><span>Ebb caution</span><input id="planning-caution-ebb" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningCautionEbb}}" aria-label="Ebb caution threshold in knots"><b>kt</b></label><label><span>Ebb red</span><input id="planning-max-ebb" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningMaxEbb}}" aria-label="Ebb red flag threshold in knots"><b>kt</b></label></div><div class="planning-preferences-row"><label><span>Flood caution</span><input id="planning-caution-flood" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningCautionFlood}}" aria-label="Flood caution threshold in knots"><b>kt</b></label><label><span>Flood red</span><input id="planning-max-flood" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningMaxFlood}}" aria-label="Flood red flag threshold in knots"><b>kt</b></label></div><div class="planning-preferences-row"><label><span>Caution time before/after period</span><input id="planning-buffer" type="number" min="0" max="360" step="15" value="{{.PlanningBuffer}}" aria-label="Caution time before or after preferred planning period in minutes"><b>min</b></label></div><div class="planning-preferences-row"><label><span>Currents station distance caution</span><input id="planning-current-distance-warning" type="number" min="0.1" max="{{.PlanningAutoCurrentLimit}}" step="0.1" value="{{.PlanningCurrentDistanceWarning}}" aria-label="Currents station distance caution threshold in nautical miles"><b>nmi</b></label></div></div><div class="planning-help"><strong>How these settings work:</strong> By default, ebb or flood below 2.0 kt is <strong>Preferred</strong>, 2.0 kt up to but not including 3.0 kt is <strong>Caution</strong>, and 3.0 kt or more during the preferred period is a <strong>Red flag</strong>. Ebb and flood thresholds can be adjusted independently. The caution time before/after period setting also warns when caution-level or stronger current occurs within that many minutes immediately before or after the preferred planning period; a threshold reached only there is reported as <strong>Caution</strong>. A currents station farther than the configured distance-caution threshold also makes the overall Bottom Line <strong>Caution</strong>, without changing the current-strength classification. Automatic current-station selection will not use a station beyond {{.PlanningAutoCurrentLimit}} nmi.</div><div class="current-planning-days">{{range .CurrentPlanningHints}}<div class="planning-day {{.Class}}"><div class="planning-date">{{.Date}}</div><div class="planning-status">{{if eq .Class "preferred"}}✓{{else if eq .Class "redflag"}}⚠{{else}}△{{end}} {{.Status}}</div><div class="planning-detail">{{.Detail}}</div></div>{{end}}</div><div class="planning-disclaimer">Current-based planning hint only; wind, swell, weather, traffic, and local effects still matter.</div></div>{{end}}</section>{{end}}
 <section class="card full map-sources-card"><h2>Map &amp; Data Sources</h2><p class="map-sources-note">Base maps: <strong>Street Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service; <strong>Satellite</strong> uses Esri World Imagery; <strong>Hybrid</strong> combines Esri imagery with place/boundary labels. NWS forecast-zone, NOAA smoke, <strong>Satellite Cloud Cover</strong>, and radar layers remain independent overlays. The nautical chart layer is for planning/reference and does not replace official navigation products.</p></section>
-<section id="full-report-card" class="card full details-link-card"><div><h2>Need the details?</h2><p class="details-note">Open the complete text-style report, including diagnostic and supporting information.</p></div><a class="details-link" href="{{.FullDetailsURL}}">View full report details →</a></section></div>
+<section id="full-report-card" class="card full details-link-card"><div><h2>Need the details?</h2><p class="details-note">Open the complete text-style report, including diagnostic and supporting information.</p></div><a class="details-link" href="{{.FullDetailsURL}}">View full report details →</a></section>
+{{end}}</div>
 <div class="footer"><strong>Mauri's Weather & Water Conditions</strong><br>NOAA/NDBC observations + NWS forecast context + NOAA CO-OPS current predictions · Conditions-planning aid, not a navigation system<br>Version {{.AppVersion}}</div></main><script>
 (function(){
   var el = document.getElementById("sailing-location-map");
