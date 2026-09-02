@@ -6,10 +6,10 @@ The default wind station is **PSBC1**.
 
 ## Current release
 
-**Public version: 1.9.0**  
+**Public version: 1.9.1**  
 **Generated source lineage: v115**
 
-Version 1.9.0 introduces a streamlined browser workflow. The main conditions page now focuses on the **Bottom Line**, including compact wind metrics and a one-day tidal-current graph. The rest of the dashboard is available from a separate **Planning and Details** page, which preserves the active query state and provides the full set of planning, map, current, wind, forecast, and customization controls.
+Version 1.9.1 retains the streamlined browser workflow introduced in 1.9.0 and refines the map controls. The main conditions page now focuses on the **Bottom Line**, including compact wind metrics and a one-day tidal-current graph. The rest of the dashboard is available from a separate **Planning and Details** page, which preserves the active query state and provides the full set of planning, map, current, wind, forecast, and customization controls.
 
 ## What it does
 
@@ -137,23 +137,23 @@ For multi-day reports, the overall planning result uses the worst status present
 
 The interactive Leaflet map keeps selected location, committed stations, candidate stations, and map viewport as distinct pieces of state.
 
-A user can establish the selected location by:
+A user establishes the selected sailing location by clicking the map. The selected location is distinct from the map viewport center, and panning or zooming does not change it.
 
-- clicking the map
-- entering latitude and longitude
-- using browser geolocation with **My location**
+The latitude and longitude fields are intended to display the current map viewport center. v127 resolves those input elements directly during each Leaflet synchronization and listens across drag/move/zoom completion paths. A user may edit either field normally; typing does not select a sailing location or move the map. The edited pair is applied only by choosing **Center Map → Latitude & Longitude**, which validates the coordinates and pans the map there while preserving zoom.
 
-Panning or zooming does not change the selected location.
+Nearby wind-station discovery is centered on the selected location. Candidate wind stations are shown only when an actual selected location exists; the default map does not display candidate markers merely because the server has a default wind-station candidate list. Candidates are previewed before the user commits one as the wind source.
 
-Nearby wind-station discovery is centered on the selected location. Candidate stations are previewed before the user commits one as the wind source.
+The **Map Types**, **Map Overlays**, and **Center Map** dropdowns share one map-control row. The **Center Map** dropdown uses momentary action buttons that pan the map without changing the zoom level or the selected sailing/report location. It includes:
 
-The map includes recenter controls for:
-
+- My location
+- Latitude & Longitude
 - selected location
 - selected wind station
 - selected currents station
 
-Recenter actions preserve the current zoom level.
+**My location** uses browser geolocation only as a map-centering action. It does not commit a new selected location, change station selection, or alter report calculations. Center Map items do not remain selected after use, so the same action can be invoked repeatedly after manually panning the map.
+
+Recenter actions preserve the current zoom level. The selected currents station associated with the active wind station is always shown on the map when available; there is no separate visibility checkbox. Clearing the selected location also clears the wind-station candidates derived from that location, removes the selected-location URL parameters, and leaves the latitude/longitude fields showing the current viewport center. The button is labeled **Clear selected location & candidates**.
 
 ## Map Types
 
@@ -340,7 +340,71 @@ The project uses three-part versions:
 - **minor** — new feature or significant behavior change
 - **micro** — small UI polish or minor refinement
 
-The current release candidate is **1.9.0**.
+The current release candidate is **1.9.1**. Generated source builds also carry a separate `buildVersion` identifier so test clients can distinguish different 1.9.1 candidates.
+
+### 1.9.1 / v129
+
+- Adds explicit no-cache headers to dynamically generated HTML responses so Safari Dock web apps and other WebView clients re-fetch current HTML instead of retaining stale builds.
+- Uses `Cache-Control: no-store, no-cache, must-revalidate, max-age=0` with legacy `Pragma` and `Expires` safeguards for dynamic HTML only.
+- Leaves static assets and existing data/overlay caching policies unchanged.
+- Displays the runtime identity as **Version 1.9.1 · Build v129**.
+
+### 1.9.1 / v128
+
+- Adds an explicit `buildVersion` constant separate from the public `appVersion`.
+- Displays **Version 1.9.1 · Build v128** in the HTML runtime identity so stale browser/WebView content is immediately visible during testing.
+
+### 1.9.1 / v127
+
+- Reworks viewport-center coordinate synchronization to resolve the Latitude/Longitude DOM inputs directly every time the map synchronizes, rather than relying on cached element references.
+- Synchronizes on Leaflet `drag`, `move`, `moveend`, `zoom`, and `zoomend`, and performs an immediate startup sync through the same function.
+- Keeps **Center Map → Latitude & Longitude** as the explicit action that applies manually edited coordinates and preserves zoom.
+
+### 1.9.1 / v126
+
+- Fixes viewport-center coordinate synchronization so Latitude/Longitude update on every Leaflet `move` and final `moveend`, even if a coordinate input previously had focus.
+- Removes the focus guard that could leave the displayed map-center coordinates frozen after panning.
+- Keeps **Center Map → Latitude & Longitude** as the explicit action that applies manually edited coordinates and preserves zoom.
+
+### 1.9.1 / v125
+
+- Added continuous latitude/longitude viewport-center synchronization on Leaflet `move` with a final `moveend` update.
+- Added an edit-focus guard intended to protect manual coordinate entry; v126 removes that guard because browser focus could persist during map dragging and suppress updates.
+- Kept **Center Map → Latitude & Longitude** as the explicit action that applies manually edited coordinates and preserves zoom.
+
+### 1.9.1 / v124
+
+- Shows nearby wind-station candidates only when an actual selected sailing location exists, eliminating the default-page candidate/clear-button state mismatch.
+- Recasts the latitude/longitude fields as live map-viewport-center coordinates that update after map movement.
+- Replaces **Use location** with the explicit **Center Map → Latitude & Longitude** command; manual coordinate edits do nothing until that command is chosen.
+- Uses normal text editing for coordinate fields so typing does not fight numeric-input replacement behavior.
+- Keeps coordinate centering pan-only at the current zoom level and does not change the selected sailing location.
+- Persists map-click selected locations in the URL without reload and removes those parameters when the selected location is cleared.
+
+### 1.9.1 / v123
+
+- Fixes the earlier **Use location** coordinate path so blank latitude/longitude fields are rejected before numeric conversion instead of silently becoming `0,0`.
+- Preserves a valid coordinate pair in the current page URL with `history.replaceState` without reloading, so a later page refresh can reconstruct the selected location.
+- Keeps **Use location** pan-only at the current zoom level.
+
+### 1.9.1 / v122
+
+- Replaces Center Map radio-style choices with momentary action buttons so centering commands have no persistent checked state and can be repeated after panning.
+
+### 1.9.1 / v121
+
+- Keeps all map-centering actions under the **Center Map** dropdown and places it on the same control row as **Map Types** and **Map Overlays**.
+- Always shows the currents station associated with the active wind station when one is available; removes the separate **Show selected currents station** checkbox and its visibility state.
+- Renames the clear action to **Clear selected location & candidates** to make clear that candidate wind stations derived from the selected location are cleared with it.
+- Keeps every Center Map choice pan-only, preserving the current zoom level.
+- Keeps **My location** as centering-only browser/device geolocation without changing selected/report location or station-selection state.
+
+### 1.9.1 / v120
+
+- Keeps all map-centering actions under the **Center Map** dropdown.
+- Makes every Center Map choice pan only, preserving the current zoom level.
+- Makes **My location** center on browser/device geolocation without changing the selected sailing/report location or station-selection state.
+- Keeps unavailable selected-location and station targets disabled.
 
 ### 1.9.0 / v115
 
