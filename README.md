@@ -7,9 +7,9 @@ The default wind station is **PSBC1**.
 ## Current release
 
 **Public version: 1.9.1**  
-**Generated source lineage: v115**
+**Generated source lineage: v132**
 
-Version 1.9.1 retains the streamlined browser workflow introduced in 1.9.0 and refines the map controls. The main conditions page now focuses on the **Bottom Line**, including compact wind metrics and a one-day tidal-current graph. The rest of the dashboard is available from a separate **Planning and Details** page, which preserves the active query state and provides the full set of planning, map, current, wind, forecast, and customization controls.
+Version 1.9.1 retains the streamlined browser workflow introduced in 1.9.0 and refines the map controls. The main conditions page now focuses on **Conditions Now**, including compact wind metrics and a one-day tidal-current graph. The rest of the dashboard is available from a separate **Planning and Details** page, which preserves the active query state and provides the full set of planning, map, current, wind, forecast, and customization controls.
 
 ## What it does
 
@@ -24,7 +24,7 @@ The application is a conditions-planning aid. It is not a navigation system and 
 
 ## Browser workflow
 
-### Bottom Line page
+### Conditions Now page
 
 Open:
 
@@ -35,14 +35,14 @@ Open:
 The main browser page is intentionally compact. It presents:
 
 - the selected location/station context
-- Bottom Line wind metric tiles
+- Conditions Now wind metric tiles
 - the latest observation time
 - a one-day tidal-current graph
 - a **Planning and Details →** link
 
-The Bottom Line graph reuses the same current-chart renderer as the full Currents card, but it is fixed to a one-day range so the landing page stays concise and immediately useful on a phone.
+The Conditions Now graph reuses the same current-chart renderer as the full Currents card, but it is fixed to a one-day range so the landing page stays concise and immediately useful on a phone.
 
-If the one-day current graph cannot be generated, the existing Bottom Line current narrative remains available as a fallback.
+If the one-day current graph cannot be generated, the existing current narrative remains available as a fallback.
 
 ### Planning and Details page
 
@@ -52,11 +52,11 @@ Open:
 /planning
 ```
 
-or use the **Planning and Details →** link from the Bottom Line page.
+or use the **Planning and Details →** link from the Conditions Now page.
 
 The Planning and Details page reuses the same report-generation path as the main report and preserves the current query parameters. It contains the full operational dashboard, including location selection, wind station tools, maps and overlays, wind history, current planning controls, current-range controls, forecast context, tidal/lunar context, and supporting reference cards.
 
-A **← Back to Bottom Line** link returns to the streamlined conditions page while preserving the active report state.
+A **← Back to Conditions Now** link returns to the streamlined conditions page while preserving the active report state.
 
 ## Wind
 
@@ -155,6 +155,8 @@ The **Map Types**, **Map Overlays**, and **Center Map** dropdowns share one map-
 
 Recenter actions preserve the current zoom level. The selected currents station associated with the active wind station is always shown on the map when available; there is no separate visibility checkbox. Clearing the selected location also clears the wind-station candidates derived from that location, removes the selected-location URL parameters, and leaves the latitude/longitude fields showing the current viewport center. The button is labeled **Clear selected location & candidates**.
 
+The Choose Location card reserves a compact **Local Conditions** panel beside the Latitude/Longitude controls on wider screens, stacking below them on narrow displays. Keeping that panel present before a location is selected avoids a large card-height jump when weather data appears. When a selected ★ sailing location exists, the panel uses the NWS point forecast for that latitude/longitude and displays the NWS nearby city/state from `relativeLocation`, the current-hour forecast air temperature, the next applicable daytime high and nighttime low, and a short forecast phrase. This weather context is informational only and does not alter wind-station or currents-station selection.
+
 ## Map Types
 
 The **Map Types** dropdown provides mutually exclusive basemaps:
@@ -197,7 +199,7 @@ NWS retrieval failures do not prevent the rest of the report from rendering.
 
 ## Bottom Line compatibility
 
-The streamlined HTML Bottom Line presentation does not replace the established non-HTML interfaces.
+The streamlined HTML heading is now **Conditions Now**. The established internal and non-HTML **Bottom Line** interfaces remain unchanged for compatibility.
 
 The existing prose Bottom Line remains available for:
 
@@ -341,6 +343,19 @@ The project uses three-part versions:
 - **micro** — small UI polish or minor refinement
 
 The current release candidate is **1.9.1**. Generated source builds also carry a separate `buildVersion` identifier so test clients can distinguish different 1.9.1 candidates.
+
+### 1.9.1 / v131
+
+- Renames the streamlined HTML **Bottom Line** heading to **Conditions Now** while preserving established internal/text/JSON/voice Bottom Line identifiers for compatibility.
+- Adds **Weather at Selected Location** to the Choose Location card when a selected ★ location exists.
+- Shows NWS point-forecast current-hour air temperature, expected high and low, and a short forecast near that selected location.
+- Refreshes the selected-location weather immediately when the browser changes the selected ★ location.
+- Displays runtime identity **Version 1.9.1 · Build v131**.
+
+### 1.9.1 / v130
+
+- Controlled cache-validation build: no functional change beyond advancing the visible build identifier from v129 to v130.
+- Confirmed the Safari Dock web app picked up the new build without clearing Website Data after the dynamic HTML no-cache policy was introduced.
 
 ### 1.9.1 / v129
 
