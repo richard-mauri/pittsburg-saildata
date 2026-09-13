@@ -6,10 +6,10 @@ The default wind station is **PSBC1**.
 
 ## Current release
 
-**Public version: 1.9.1**  
-**Generated source lineage: v132**
+**Public version: 1.9.2**  
+**Generated source lineage: v137**
 
-Version 1.9.1 retains the streamlined browser workflow introduced in 1.9.0 and refines the map controls. The main conditions page now focuses on **Conditions Now**, including compact wind metrics and a one-day tidal-current graph. The rest of the dashboard is available from a separate **Planning and Details** page, which preserves the active query state and provides the full set of planning, map, current, wind, forecast, and customization controls.
+Version 1.9.2 builds on the streamlined browser workflow with clearer observation freshness, better page-loading feedback, and an updated Welcome page that matches the current planning and map functionality. The main conditions page now focuses on **Conditions Now**, including compact wind metrics and a one-day tidal-current graph. The rest of the dashboard is available from a separate **Planning and Details** page, which preserves the active query state and provides the full set of planning, map, current, wind, forecast, and customization controls.
 
 ## What it does
 
@@ -36,9 +36,9 @@ The main browser page is intentionally compact. It presents:
 
 - the selected location/station context
 - Conditions Now wind metric tiles
-- the latest observation time
+- an **AS OF** heading using the actual latest wind-observation time plus observation age (for example, `AS OF 9:18 AM · 12 MIN AGO`)
 - a one-day tidal-current graph
-- a **Planning and Details →** link
+- a **Planning and Details →** link with an immediate loading spinner/overlay while the server-rendered planning page is loading
 
 The Conditions Now graph reuses the same current-chart renderer as the full Currents card, but it is fixed to a one-day range so the landing page stays concise and immediately useful on a phone.
 
@@ -57,6 +57,12 @@ or use the **Planning and Details →** link from the Conditions Now page.
 The Planning and Details page reuses the same report-generation path as the main report and preserves the current query parameters. It contains the full operational dashboard, including location selection, wind station tools, maps and overlays, wind history, current planning controls, current-range controls, forecast context, tidal/lunar context, and supporting reference cards.
 
 A **← Back to Conditions Now** link returns to the streamlined conditions page while preserving the active report state.
+
+When the user follows **Planning and Details →**, the Conditions Now page immediately displays a spinner and `Loading Planning and Details…` overlay. This is an indeterminate loading indicator; it does not claim a synthetic percentage.
+
+## Welcome page
+
+The `/welcome` page is kept aligned with the current browser workflow. It introduces **Conditions Now** and **Planning and Details**, explains selected-location versus map-center state, describes **Local Conditions**, nearby wind-station selection, current graphs, map types/overlays, and retains the randomized Yogi Berra quote. The footer also shows the public version and generated build identity.
 
 ## Wind
 
@@ -168,6 +174,8 @@ The **Map Types** dropdown provides mutually exclusive basemaps:
 
 Changing basemap does not change location, station, forecast, current, or planning state.
 
+The map also shows a live scale/status label in the lower-right corner. It reports the approximate horizontal distance represented by a short screen sample in both nautical miles and statute miles, together with the current Leaflet zoom level. NOAA Nautical Chart is available at Zoom 9 or closer. If Nautical is the preferred map type and the user zooms farther out than Zoom 9, the app temporarily displays Street Map and automatically restores Nautical when the map returns to Zoom 9+; the Nautical preference is retained.
+
 ## Map overlays
 
 The **Map Overlays** control supports independent visual overlays:
@@ -199,7 +207,7 @@ NWS retrieval failures do not prevent the rest of the report from rendering.
 
 ## Bottom Line compatibility
 
-The streamlined HTML heading is now **Conditions Now**. The established internal and non-HTML **Bottom Line** interfaces remain unchanged for compatibility.
+The streamlined HTML heading is **CONDITIONS NOW — AS OF <observation time> · <age>**. The separate duplicate `Latest observation:` line is intentionally omitted from this card. The established internal and non-HTML **Bottom Line** interfaces remain unchanged for compatibility.
 
 The existing prose Bottom Line remains available for:
 
@@ -457,3 +465,141 @@ These are reference stations, not a hard-coded application whitelist. Active sta
 `main.go` remains intentionally large and contains substantial browser HTML, CSS, JavaScript, Leaflet behavior, HTTP orchestration, and report presentation logic.
 
 A future refactor should be treated as a separate behavior-preserving project after the current UI and release behavior are stable. The safest direction would be to move browser templates/static assets out of `main.go` first, then separate HTTP/report orchestration while preserving the existing `wind.go` and `currents.go` data-source boundaries.
+
+## v137 / 1.9.2 changes
+
+- Moved the live map scale/status readout to the lower-right corner.
+- Established **Zoom 9** as the practical minimum for the NOAA Nautical Chart basemap.
+- Nautical Chart is unavailable for new selection below Zoom 9.
+- If Nautical is already the preferred basemap and the user zooms out below Zoom 9, Street Map is shown temporarily while the Nautical preference remains selected.
+- A map notice explains that Nautical Chart is available at Zoom 9+.
+- Zooming back to Zoom 9 or closer automatically restores the Nautical Chart.
+- Legitimate inland/no-chart blank areas at supported nautical zoom levels remain unchanged.
+- Advanced runtime identity to **Version 1.9.2 · Build v137**.
+
+## v136 / 1.9.2 changes
+
+- Added a persistent map scale/status label showing approximate nautical miles, statute miles, and the current Leaflet zoom level.
+- The scale readout updates as the map pans, zooms, and is resized.
+- Nautical Chart availability behavior is intentionally unchanged in this build; the new scale/zoom readout is instrumentation for choosing a realistic minimum nautical-chart zoom.
+- Advanced runtime identity to **Version 1.9.2 · Build v136**.
+
+## v135 / 1.9.2 changes
+
+- Reworked NOAA HMS smoke styling to use a warm yellow → amber → burnt-orange density palette that contrasts more clearly with blue/green map basemaps.
+- Reduced the dominance of smoke polygon outlines so the filled smoke areas read first while boundaries remain visible.
+- Updated the smoke legend swatches to match the new on-map palette on both street/nautical and satellite/hybrid basemaps.
+- Smoke data semantics are unchanged: NOAA HMS polygons remain qualitative satellite analysis, not AQI or measured PM2.5 concentration.
+- Carries forward the v133 Conditions Now observation-age heading, Planning and Details loading overlay, refreshed Welcome page, and expanded Yogiism asset.
+- Advanced runtime identity to **Version 1.9.2 · Build v135**.
+
+## Development State and Chat Handoff
+
+This section is the authoritative development handoff for this repository. A new ChatGPT conversation can read this section together with the current repository files and continue development without a separate `PROJECT_STATE.md`.
+
+`README.md` is intentionally the single tracked project-state document. The former local/untracked `PROJECT_STATE.md` workflow is retired once this README/checker pair is installed.
+
+<!-- PROJECT-STATE:BEGIN -->
+
+- Public app version: **1.9.2**
+- Generated source build: **v137**
+- Next generated source build: **v138**
+- Authoritative repository: **https://github.com/richard-mauri/pittsburg-saildata**
+- Authoritative branch: **main**
+- Release status: **v137 / 1.9.2 current development baseline**
+
+### Managed-file checkpoints
+
+| Repository file | SHA-256 |
+| --- | --- |
+| `main.go` | `3778cc5a24397a60c7997b406c97cd3f48b5ecc4dbce4103d0d63054ff12ced2` |
+| `assets/yogiisms.txt` | `4ebf00217e194ee26a8e8fe38237b298800b36ead0c64accdbb82f623c142371` |
+| `check-project-state.sh` | `85fa5062e2ae4509174b6843ebc0066f4a94e2f2e90001230ca74c07aeb500dc` |
+
+<!-- PROJECT-STATE:END -->
+
+`README.md` deliberately does not contain its own SHA-256 because that would create a self-referential checkpoint. Git provides the history/integrity record for README itself.
+
+### Source-generation workflow
+
+Complete Go source candidates are generated as `main-updated-vNN.go`. Generated candidates never overwrite repository `main.go` automatically. After review, manually copy the candidate to `main.go`, run the checker/build/tests, inspect the Git diff, and then commit/push.
+
+The generated build number is immutable. Any change to generated Go source bytes requires a new `vNN` value and filename; do not reuse an earlier build number for a corrected candidate.
+
+The public application version and generated build are separate identities. The current runtime identity is expected to render as:
+
+`Version 1.9.2 · Build v137`
+
+For future public pushes, increment the patch/micro version (`1.9.2` → `1.9.3` → `1.9.4`, and so on). Existing Git release tags are immutable: never reuse or move an existing version tag.
+
+### Verification workflow
+
+`check-project-state.sh` is a tracked repository file. It reads this README section directly and checks:
+
+- SHA-256 of `main.go`
+- SHA-256 of `assets/yogiisms.txt`
+- SHA-256 of `check-project-state.sh`
+- `appVersion` in `main.go` against the README public version
+- `buildVersion` in `main.go` against the README generated build
+
+Run:
+
+```bash
+./check-project-state.sh
+```
+
+A clean checkpoint should report every managed file as `MATCH`, plus matching `appVersion` and `buildVersion`.
+
+Then run:
+
+```bash
+gofmt -w main.go
+go build ./...
+go test ./...
+```
+
+Before a release commit:
+
+```bash
+git status
+git diff -- main.go README.md check-project-state.sh assets/yogiisms.txt
+```
+
+Stage only intended tracked changes. There is no longer a local `PROJECT_STATE.md` to maintain.
+
+### Current functional baseline
+
+The current browser architecture is intentionally split into two pages. **Conditions Now** is the compact landing page; **Planning and Details** contains the full dashboard and customization controls. Navigation preserves active report/query state, and the Conditions Now → Planning and Details transition shows an immediate loading overlay.
+
+Conditions Now displays the active wind/current station context, compact wind metrics, a one-day tidal-current graph, and the latest actual wind-observation timestamp plus freshness age in the heading: `CONDITIONS NOW — AS OF <time> · <age>`.
+
+Planning and Details includes location selection, nearby wind-station discovery, current-station context, 1/3/7-day current planning, wind history from 1h through 24h, NWS forecast context, Local Conditions at a selected point, map types, independent map overlays, and Center Map controls.
+
+The **Choose Location** card treats selected sailing location and map viewport center as separate state. Latitude/Longitude display the viewport center and can be edited without side effects; **Center Map → Latitude & Longitude** explicitly applies those values. Candidate wind stations appear only after an actual selected location exists.
+
+The **Center Map** menu uses momentary actions for My location, Latitude & Longitude, selected location, selected wind station, and selected currents station. Centering pans without changing zoom or report selection state.
+
+The selected currents station associated with the active wind station is shown automatically when available. **Clear selected location & candidates** removes the selected location and its derived wind candidates.
+
+The **Local Conditions** panel is permanently reserved beside the Lat/Lon controls on wider screens to avoid layout jumps. For a selected location it uses NWS point metadata/forecast data to show nearby city/state, current-hour forecast temperature, expected high/low, and a short forecast phrase.
+
+Dynamic HTML responses use no-cache headers so Safari/Dock WebView clients pick up new builds without requiring repeated manual website-data clearing. Runtime HTML displays both public version and generated build.
+
+Map controls place **Map Types**, **Map Overlays**, and **Center Map** on one row. The scale/status readout appears in the lower-right and reports approximate nautical miles, statute miles, and Leaflet zoom.
+
+NOAA Nautical Chart is considered practical at **Zoom 9+**. If Nautical is the preferred basemap and the user zooms below 9, Street Map is shown temporarily with a notice; Nautical automatically returns at Zoom 9+. Legitimate inland/no-chart blank areas at supported zooms are left unchanged.
+
+Map overlays include NWS forecast zone, NOAA HMS qualitative smoke, NOAA/NESDIS cloud cover, and NEXRAD radar. HMS smoke uses the current warm yellow → amber → burnt-orange light/medium/heavy palette. Smoke is qualitative satellite analysis, not AQI or measured PM2.5.
+
+The Welcome page reflects the current Conditions Now / Planning and Details workflow and retains the randomized Yogi Berra quotation. `assets/yogiisms.txt` currently contains the expanded 59-line quote set.
+
+Non-HTML compatibility remains intentional: plain-text reports, compact text/JSON, Full Report Details, and `/voice` retain the established Bottom Line interfaces even though the browser heading is Conditions Now.
+
+### New-chat continuation instruction
+
+When migrating development to a new conversation, provide or point the assistant to the repository/README and say:
+
+> Read the **Development State and Chat Handoff** section of README.md, treat GitHub `main` as authoritative, and continue from the recorded generated build. Generate complete `main-updated-vNN.go` candidates, never overwrite `main.go`, run `gofmt`, and provide SHA-256 hashes and download links.
+
+The next source candidate should therefore be **v138** unless a newer local candidate is supplied.
+
