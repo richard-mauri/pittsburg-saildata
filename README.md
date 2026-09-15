@@ -6,8 +6,8 @@ The default wind station is **PSBC1**.
 
 ## Current release
 
-**Public version: 1.9.2**  
-**Generated source lineage: v137**
+**Public version: 1.9.3**  
+**Generated source lineage: v183**
 
 Version 1.9.2 builds on the streamlined browser workflow with clearer observation freshness, better page-loading feedback, and an updated Welcome page that matches the current planning and map functionality. The main conditions page now focuses on **Conditions Now**, including compact wind metrics and a one-day tidal-current graph. The rest of the dashboard is available from a separate **Planning and Details** page, which preserves the active query state and provides the full set of planning, map, current, wind, forecast, and customization controls.
 
@@ -350,7 +350,7 @@ The project uses three-part versions:
 - **minor** — new feature or significant behavior change
 - **micro** — small UI polish or minor refinement
 
-The current release candidate is **1.9.1**. Generated source builds also carry a separate `buildVersion` identifier so test clients can distinguish different 1.9.1 candidates.
+The current release candidate is **1.9.3**. Generated source builds also carry a separate `buildVersion` identifier so test clients can distinguish successive 1.9.3 candidates.
 
 ### 1.9.1 / v131
 
@@ -466,6 +466,106 @@ These are reference stations, not a hard-coded application whitelist. Active sta
 
 A future refactor should be treated as a separate behavior-preserving project after the current UI and release behavior are stable. The safest direction would be to move browser templates/static assets out of `main.go` first, then separate HTTP/report orchestration while preserving the existing `wind.go` and `currents.go` data-source boundaries.
 
+## v183 / 1.9.3 changes
+
+- Returned the active browser SST code to the **v181 single-image path** after v182's multi-segment `Promise.all()` implementation regressed to no visible SST when any wrapped segment failed.
+- Kept the proven v180 server-side Web-Mercator reprojection and v181 fixed **35–95°F** temperature scale unchanged.
+- Replaced the old low-zoom dateline rejection with a minimal **center-world clipping** rule: Leaflet's visible viewport is clipped to the single 360° world copy containing the current map center, then that displayed longitude interval is translated back into NOAA's canonical **-180° to +180°** request domain.
+- The returned SST image is placed only over that clipped displayed interval. This avoids invalid NOAA longitude requests without introducing multiple simultaneous SST fetches.
+- Normal single-request loading, replacement, blob cleanup, 0.50 opacity, native land/no-data transparency, and existing NOAA/IPv4 diagnostics remain unchanged from v181.
+- v182 is retained below as failed-candidate history and should not be used as the SST implementation baseline.
+- Advanced runtime identity to **Version 1.9.3 · Build v183**.
+
+## v182 / 1.9.3 changes
+
+**Failed browser candidate:** visual testing showed no SST overlay after the multi-segment change; v183 does not use this path.
+
+- Kept the v180 Web-Mercator SST reprojection and v181 fixed **35–95°F** display scale unchanged.
+- Removed the browser-side rule that disabled Sea Surface Temp whenever Leaflet's wrapped viewport extended below -180° or above +180° longitude.
+- Added SST viewport segmentation at the international date line. Each visible wrapped-world segment is mapped back into NOAA's canonical **-180° to +180°** longitude domain for the server request, then displayed at its corresponding wrapped Leaflet longitude.
+- A low-zoom North America view that extends west of -180° can now load adjacent SST image segments instead of reporting the layer unavailable or retaining a stale partial rectangle.
+- SST layers are cleared when a new viewport refresh begins, and generated blob URLs are revoked when replaced, disabled, or failed, preventing old SST rectangles from lingering during wrapped requests.
+- Multi-segment SST loads retain the same NOAA CoastWatch source, projection correction, 0.50 opacity, native land/no-data transparency, and fixed scale as the single-segment path.
+- Advanced runtime identity to **Version 1.9.3 · Build v182**.
+
+## v181 / 1.9.3 changes
+
+- Kept the v180 server-side Web-Mercator reprojection path for Sea Surface Temp and focused this build on the display scale only.
+- Widened the fixed Sea Surface Temp display range from **45–75°F** to **35–95°F** so tropical/subtropical water and unusually warm periods such as strong El Niño conditions no longer saturate into one broad hottest-color region at continental map extents.
+- Increased the rendered temperature sections from 30 to 60 so the wider range still preserves approximately **1°F visual steps** and retains useful regional temperature-break contrast.
+- Updated the Planning and Details SST legend, explanatory text, and runtime overlay-status wording to describe the wider fixed scale.
+- Kept the proven NOAA CoastWatch `noaacwBLENDEDsstDNDaily:analysed_sst` source, SST-only IPv4 transport workaround, 0.50 Leaflet opacity, and v180 projection correction unchanged.
+- Advanced runtime identity to **Version 1.9.3 · Build v181**.
+
+## v180 / 1.9.3 changes
+
+- Corrected the Sea Surface Temp map geometry rather than applying another coastline mask. NOAA CoastWatch ERDDAP `griddap` surface images are rendered on a regular latitude/longitude grid, while Leaflet displays the map in EPSG:3857 Web Mercator. Directly stretching the latitude/longitude PNG to Leaflet bounds aligns the outer corners but causes increasing north/south coastline drift as the map view spans more latitude.
+- `/sst-overlay` now decodes the CoastWatch PNG and server-side resamples every output scanline into Web Mercator Y before returning it to the browser. Longitude remains unchanged because it is linear in both the source image and Web Mercator x coordinate.
+- The reprojection uses premultiplied-alpha interpolation so CoastWatch's native transparent land/no-data edge is retained without bleeding opaque SST color into transparent pixels. No secondary coastline mask, synthetic SST fill, or browser-side vector mask is used.
+- Added `X-SST-Projection` response diagnostics so a returned overlay identifies the server-side EPSG:4326-latitude-grid → EPSG:3857 reprojection path.
+- Kept the proven `noaacwBLENDEDsstDNDaily:analysed_sst` source, fixed 45–75°F fishing-oriented scale, SST-only IPv4 transport workaround, and 0.50 Leaflet opacity. The data remain approximately 5 km resolution; v180 fixes map projection/alignment, not source-grid resolution.
+- Updated the Planning and Details SST help/status language to distinguish corrected Web-Mercator alignment from the underlying product's still-coarse near-shore resolution.
+- Advanced runtime identity to **Version 1.9.3 · Build v180**.
+
+## v179 / 1.9.3 changes
+
+- Restored the last known-working Sea Surface Temp implementation from v176 after the v177 JPL MUR griddap experiment and v178 MUR WMS experiment both failed to display an SST overlay reliably in browser testing.
+- `/sst-info`, `/sst-overlay`, and Fishing Planning SST numeric sampling are again source-consistent on NOAA CoastWatch `noaacwBLENDEDsstDNDaily:analysed_sst`.
+- `/sst-overlay` again uses the proven ERDDAP `griddap` transparent-PNG rendering path with the fixed fishing-oriented 45–75°F scale and the SST-only IPv4 transport workaround.
+- Restored CoastWatch's native transparent/no-data mask and the normal Leaflet image-overlay path at 0.50 opacity. No synthetic SST fill, browser-side vector coastline mask, or JPL MUR WMS dependency remains in the active SST path.
+- The v177/v178 MUR work is retained below as failed-candidate history only; it is not part of the v179 runtime behavior.
+- No unrelated v178 behavior needed to be carried forward: the v176→v178 source differences were confined to the SST/MUR experiment plus build identity.
+- Advanced runtime identity to **Version 1.9.3 · Build v179**.
+
+## v178 / 1.9.3 changes
+
+- Replaced the v177 JPL MUR `griddap` transparent-PNG rendering path with NOAA CoastWatch ERDDAP's documented **WMS GetMap** interface for the SST map overlay. v177 could resolve MUR metadata but did not reliably return a display image.
+- `/sst-overlay` now proxies WMS 1.1.1 using `SRS=EPSG:4326` and `bbox=west,south,east,north`, avoiding the WMS 1.3.0 latitude/longitude axis-order ambiguity while remaining fully georeferenced to the current Leaflet viewport.
+- The displayed SST layer now uses NOAA's Fahrenheit MUR dataset `jplMURSST41F:analysed_sst`. WMS supplies the dataset's native **30–90°F** display scale and transparent missing/land pixels.
+- `/sst-info` now reads time metadata from `jplMURSST41F`; `time=current` remains a supported fallback and WMS defaults to the latest field if no explicit time is available.
+- Numeric Fishing Planning SST calculations remain on the MUR numeric grid and continue to report Fahrenheit values after conversion; this change is to the displayed image transport, not the underlying destination-statistics logic.
+- Continued the SST-specific IPv4 transport workaround for the previously unreliable local IPv6 CoastWatch route.
+- Advanced runtime identity to **Version 1.9.3 · Build v178**.
+
+## v177 / 1.9.3 changes
+
+- Replaced the approximately 5 km NOAA Geo-Polar Blended SST display source with NASA JPL **MUR SST v4.1** (`jplMURSST41`) served through NOAA CoastWatch ERDDAP. MUR is a daily global Level-4 analysis on a 0.01° grid, approximately 1 km.
+- `/sst-info`, `/sst-overlay`, and the Fishing Planning SST numeric window now use the same MUR `analysed_sst` field so the map and destination statistics remain source-consistent.
+- Preserved MUR's native land/no-data mask and removed any need for synthetic shoreline clipping. The higher-resolution source is intended to improve coastal alignment directly rather than hide a coarse source edge with a second coastline product.
+- Added adaptive ERDDAP source-grid stride for wide map views: requests retain native 0.01° sampling when the view fits within the output image and downsample only when there are more source cells than display pixels.
+- Changed the fixed 45–75°F SST rendering from discrete 1°F bands to a continuous color ramp to reduce posterized/blocky appearance while retaining a stable cross-view temperature scale.
+- Continued to force SST/CoastWatch requests over IPv4 because the earlier local IPv6 route was unreliable.
+- Advanced runtime identity to **Version 1.9.3 · Build v177**.
+
+## v176 / 1.9.3 changes
+
+- Reverted the v175 browser-side NOAA ENC vector coastline mask after visual testing showed large rectangular SST regions leaking over land at wider map views.
+- `/sst-overlay` now preserves the native NOAA CoastWatch transparent/no-data cells exactly as returned by the Geo-Polar Blended SST product. It no longer fills transparent coastal cells and no longer synthesizes SST beneath land.
+- Removed the SST `/coastline-geometry` dependency and the client-side SVG/Web-Mercator masking path. This favors truthful source coverage over a cosmetically precise shoreline that the approximately 5 km SST grid cannot support.
+- Sea Surface Temp is again rendered as a normal Leaflet image overlay, at 0.50 opacity, with the fixed 45–75°F fishing-oriented scale unchanged.
+- User-facing SST notes now explicitly describe the native CoastWatch shoreline/no-data edge as coarse in bays and estuaries and position the layer as a regional/offshore temperature-gradient aid rather than a shoreline-precision product.
+- Chlorophyll Field remains on the v174 supersampled NOAA ENC raster-mask path; numeric SST/chlorophyll retrieval, Fishing Planning calculations, chlorophyll contours, and source datasets are unchanged.
+- Advanced runtime identity to **Version 1.9.3 · Build v176**.
+
+## v175 / 1.9.3 changes
+
+- Reworked the Sea Surface Temp shoreline path after visual review showed that supersampling the NOAA ENC raster mask still left an obviously crude, blocky coastline.
+- The SST proxy now fills CoastWatch's coarse transparent land/no-data cells from the nearest valid SST color before display. This prevents the native ~5 km grid mask from carving rectangular bites out of bays, headlands, and islands.
+- The browser now requests NOAA ENC Direct `Coastal.Land_Area` vector geometry for the current map bounds through a new `/coastline-geometry` endpoint and uses that geometry as an SVG mask over the SST image.
+- The SVG coastline mask is transformed in Web-Mercator screen space so the visible shoreline follows the Leaflet basemap rather than a separately rendered raster mask.
+- SST opacity remains 0.58 and the fixed 45–75°F fishing-oriented color scale is unchanged. Numeric SST data, Fishing Planning calculations, chlorophyll data/contours, and source datasets are unchanged.
+- Chlorophyll Field continues to use the v174 supersampled raster land mask; this v175 change is specific to Sea Surface Temp.
+- Advanced runtime identity to **Version 1.9.3 · Build v175**.
+
+## v174 / 1.9.3 changes
+
+- Refined NOAA CoastWatch raster coastline clipping to reduce the coarse, stair-stepped shoreline visible around bays, headlands, islands, and other complex coastlines.
+- NOAA ENC `Coastal.Land_Area` is now requested at 2× the displayed CoastWatch raster dimensions (bounded by the NOAA service image limit) and reduced back to the raster using fractional alpha coverage instead of a same-size binary land/no-land cutoff.
+- The change is display-only: Sea Surface Temp and Chlorophyll numeric data, Fishing Planning calculations, chlorophyll contours, and source datasets are unchanged.
+- Reduced the Sea Surface Temp Leaflet overlay opacity from 0.72 to 0.58 so the basemap coastline and place context remain easier to read through the approximately 5 km SST field.
+- Coastline-clipped raster responses expose the supersampled NOAA ENC mask in the `X-Coastline-Mask` diagnostic header.
+- Advanced runtime identity to **Version 1.9.3 · Build v174**.
+
 ## v137 / 1.9.2 changes
 
 - Moved the live map scale/status readout to the lower-right corner.
@@ -475,7 +575,7 @@ A future refactor should be treated as a separate behavior-preserving project af
 - A map notice explains that Nautical Chart is available at Zoom 9+.
 - Zooming back to Zoom 9 or closer automatically restores the Nautical Chart.
 - Legitimate inland/no-chart blank areas at supported nautical zoom levels remain unchanged.
-- Advanced runtime identity to **Version 1.9.2 · Build v172**.
+- Advanced runtime identity to **Version 1.9.2 · Build v173**.
 
 ## v136 / 1.9.2 changes
 
@@ -501,18 +601,18 @@ This section is the authoritative development handoff for this repository. A new
 
 <!-- PROJECT-STATE:BEGIN -->
 
-- Public app version: **1.9.2**
-- Generated source build: **v172**
-- Next generated source build: **v173**
+- Public app version: **1.9.3**
+- Generated source build: **v183**
+- Next generated source build: **v184**
 - Authoritative repository: **https://github.com/richard-mauri/pittsburg-saildata**
 - Authoritative branch: **main**
-- Release status: **v172 / 1.9.3 release baseline**
+- Release status: **v183 / 1.9.3 release candidate**
 
 ### Managed-file checkpoints
 
 | Repository file | SHA-256 |
 | --- | --- |
-| `main.go` | `8d3330b490335c985fadf7ffef3970b496974839da1e0d47a45777835c112f13` |
+| `main.go` | `c34e2f67374d946fbfadc78cc3bba0eff0a5940c65d0dd48028958128b3c4cf7` |
 | `assets/yogiisms.txt` | `4ebf00217e194ee26a8e8fe38237b298800b36ead0c64accdbb82f623c142371` |
 | `assets/fishing_reports.json` | `02b01de77784153157c6a4a60d6ad21e286f7c191bbe204fed605659ea15ca5e` |
 | `check-project-state.sh` | `85fa5062e2ae4509174b6843ebc0066f4a94e2f2e90001230ca74c07aeb500dc` |
@@ -529,7 +629,7 @@ The generated build number is immutable. Any change to generated Go source bytes
 
 The public application version and generated build are separate identities. The current runtime identity is expected to render as:
 
-`Version 1.9.3 · Build v172`
+`Version 1.9.3 · Build v183`
 
 For future public pushes, increment the patch/micro version (`1.9.2` → `1.9.3` → `1.9.4`, and so on). Existing Git release tags are immutable: never reuse or move an existing version tag.
 
@@ -591,7 +691,7 @@ Map controls place **Map Types**, **Map Overlays**, and **Center Map** on one ro
 
 NOAA Nautical Chart is considered practical at **Zoom 9+**. If Nautical is the preferred basemap and the user zooms below 9, Street Map is shown temporarily with a notice; Nautical automatically returns at Zoom 9+. Legitimate inland/no-chart blank areas at supported zooms are left unchanged.
 
-Map overlays include NWS forecast zone, NOAA HMS qualitative smoke, **NOAA CoastWatch Sea Surface Temp**, NOAA/NESDIS cloud cover, and NEXRAD radar. Sea Surface Temp uses the NOAA ACSPO daily global 0.02° near-real-time product (`noaacwLEOACSPOSSTL3SnrtCDaily:sea_surface_temperature`) through ERDDAP WMS; the overlay requests the latest available dataset time from `/sst-info`, shows the product timestamp, and includes a °F legend corresponding to NOAA's 0–35°C display scale. Satellite/cloud/coastal gaps are expected. HMS smoke uses the current warm yellow → amber → burnt-orange light/medium/heavy palette. Smoke is qualitative satellite analysis, not AQI or measured PM2.5.
+Map overlays include NWS forecast zone, NOAA HMS qualitative smoke, **Sea Surface Temp**, NOAA/NESDIS cloud cover, and NEXRAD radar. Sea Surface Temp uses NOAA CoastWatch Central dataset `noaacwBLENDEDsstDNDaily`, variable `analysed_sst`, a daily global Level-4 blended SST field at about 5 km resolution. `/sst-info` resolves the latest available dataset time and `/sst-overlay` renders the current map bounds through ERDDAP `griddap` as a transparent PNG using a fixed **35–95°F** wide-area fishing-oriented scale. Because the ERDDAP source image is linear in latitude while Leaflet is EPSG:3857 Web Mercator, v180 server-side reprojects the SST scanlines into Web Mercator before returning the PNG. The browser displays that reprojected PNG as a normal Leaflet image overlay at 0.50 opacity. CoastWatch's native transparent/no-data edge is preserved and no secondary coastline mask is applied. The wider fixed range avoids painting most warm tropical/subtropical water with one saturated hottest color while preserving cross-view comparability. At low zooms, Leaflet world wrapping can extend the viewport outside -180°/+180°. v183 keeps the reliable single-image path: it clips the visible viewport to the one 360° world copy containing the map center, translates that interval into NOAA's canonical longitude range, and displays the returned SST image over only that clipped interval. The projection fix improves geographic alignment at wide map extents; the approximately 5 km source grid still limits shoreline-scale detail. HMS smoke uses the current warm yellow → amber → burnt-orange light/medium/heavy palette. Smoke is qualitative satellite analysis, not AQI or measured PM2.5.
 
 The Welcome page reflects the current Conditions Now / Planning and Details workflow and retains the randomized Yogi Berra quotation. `assets/yogiisms.txt` currently contains the expanded 59-line quote set.
 
@@ -607,55 +707,55 @@ When migrating development to a new conversation, provide or point the assistant
 
 > Read the **Development State and Chat Handoff** section of README.md, treat GitHub `main` as authoritative, and continue from the recorded generated build. Generate complete `main-updated-vNN.go` candidates, never overwrite `main.go`, run `gofmt`, and provide SHA-256 hashes and download links.
 
-The next source candidate should therefore be **v173** unless a newer local candidate is supplied.
+The next source candidate should therefore be **v184** unless a newer local candidate is supplied.
 
 
 
 ### SST implementation note
 
-Sea Surface Temp uses NOAA CoastWatch MUR daily analysed sea-surface temperature imagery. Because the NOAA ERDDAP WMS does not support Leaflet's native Web-Mercator tile CRS, the app requests an EPSG:4326 PNG for the current map bounds through `/sst-overlay` and displays it as a georeferenced image overlay. SST rendering does not depend on `time_coverage_end`; the app uses ERDDAP `time=current` as a fallback and derives the displayed latest timestamp from the time-axis `actual_range` when available. Clouds and coastal/inland gaps are expected.
+Sea Surface Temp currently uses NOAA CoastWatch Central `noaacwBLENDEDsstDNDaily:analysed_sst`, the last browser-tested working SST path from v176. `/sst-overlay` requests an ERDDAP `griddap` transparent PNG for the current EPSG:4326 map bounds, with a fixed **35–95°F** wide-area fishing-oriented color scale, then server-side reprojects that image from its latitude-linear source grid into Leaflet Web Mercator before returning the PNG for display as a georeferenced Leaflet image overlay at 0.50 opacity. CoastWatch's native transparent/no-data mask is preserved and no second coastline product is applied. The wider fixed range is intended to reduce hot-end saturation during very warm tropical/subtropical conditions while preserving stable cross-view color meaning. When Leaflet's wrapped viewport extends beyond -180°/+180°, v183 preserves the single-request path by clipping to the world copy containing the current map center and translating that clipped interval into NOAA's canonical longitude domain. `/sst-info` reads the same dataset's metadata/time axis so image and timestamp remain source-consistent. The active SST-only CoastWatch transport continues to force IPv4 because the local IPv6 route previously timed out.
 
 ### SST WMS compatibility
 
-Build v172 changes the NOAA CoastWatch SST proxy request to WMS 1.3.0 with `CRS=EPSG:4326`. For WMS 1.3.0, EPSG:4326 uses latitude/longitude axis order, so the requested bounding box is sent as `south,west,north,east`. This replaces the v140 WMS 1.1.1 `SRS=EPSG:4326` request used during SST troubleshooting.
+Build v179 retires the failed v178 JPL MUR WMS display path and restores the v176 ERDDAP `griddap` transparent-PNG request. The active SST request uses explicit latitude/longitude slices in the CoastWatch data query, so WMS 1.1.1/1.3.0 axis-order rules no longer apply to the current display path. The v178 WMS behavior is retained only in the historical change log above.
 
 ### SST loading reliability
 
-Build v172 keeps the v141 NOAA WMS 1.3.0 / `CRS=EPSG:4326` request and improves the image-loading path. The SST raster request now uses the map's CSS pixel dimensions with a maximum of 1200×900 instead of Retina/device-pixel doubling, the NOAA request timeout is 45 seconds, and the browser no longer preloads the same SST image before Leaflet requests it. Leaflet makes the single image request directly, while the status line remains `Loading NOAA CoastWatch SST image…` until the image either loads or reports an error.
+Build v173 keeps the v141 NOAA WMS 1.3.0 / `CRS=EPSG:4326` request and improves the image-loading path. The SST raster request now uses the map's CSS pixel dimensions with a maximum of 1200×900 instead of Retina/device-pixel doubling, the NOAA request timeout is 45 seconds, and the browser no longer preloads the same SST image before Leaflet requests it. Leaflet makes the single image request directly, while the status line remains `Loading NOAA CoastWatch SST image…` until the image either loads or reports an error.
 
 ### SST product change
 
-Build v172 keeps the v142 WMS 1.3.0 proxy and single-image loading path, but switches the SST source to NOAA CoastWatch's MUR SST dataset, `noaacwBLENDEDsstDNDaily`, variable `analysed_sst`. NOAA's ERDDAP WMS documentation uses this exact dataset/layer in its working GetMap examples. The Geo-Polar product provides a daily global Level-4 blended SST analysis at about 5 km resolution and is served from NOAA CoastWatch Central rather than the PFEL host that was timing out from the local Go process.
+Build v173 keeps the v142 WMS 1.3.0 proxy and single-image loading path, but switches the SST source to NOAA CoastWatch's MUR SST dataset, `noaacwBLENDEDsstDNDaily`, variable `analysed_sst`. NOAA's ERDDAP WMS documentation uses this exact dataset/layer in its working GetMap examples. The Geo-Polar product provides a daily global Level-4 blended SST analysis at about 5 km resolution and is served from NOAA CoastWatch Central rather than the PFEL host that was timing out from the local Go process.
 
 ### SST diagnostic fetch path
 
-Build v172 keeps the MUR SST product and WMS 1.3.0 proxy, but changes the browser loading path to make upstream failures visible. The browser now `fetch()`es `/sst-overlay` first. If the proxy returns an error, the actual response text is shown in the SST status line instead of collapsing to a generic image-load failure. If the proxy returns a PNG successfully, the response is converted to a blob URL and displayed through Leaflet. Blob URLs are revoked when replaced or when the SST overlay is disabled.
+Build v173 keeps the MUR SST product and WMS 1.3.0 proxy, but changes the browser loading path to make upstream failures visible. The browser now `fetch()`es `/sst-overlay` first. If the proxy returns an error, the actual response text is shown in the SST status line instead of collapsing to a generic image-load failure. If the proxy returns a PNG successfully, the response is converted to a blob URL and displayed through Leaflet. Blob URLs are revoked when replaced or when the SST overlay is disabled.
 
 ### SST transport fallback
 
-Build v172 keeps the MUR SST WMS request and v144 diagnostics, and hardens the Go HTTP transport for NOAA CoastWatch. The SST proxy now uses a cloned `http.Transport` with a 30-second TLS handshake timeout, a 45-second response-header timeout, and a 75-second overall request timeout. It first tries the standard CoastWatch ERDDAP endpoint and, on a transport/read failure, retries once against NOAA's `/wcn/erddap/` endpoint. Successful responses expose the endpoint label in `X-SST-Upstream`, and the browser includes that source in the SST status line.
+Build v173 keeps the MUR SST WMS request and v144 diagnostics, and hardens the Go HTTP transport for NOAA CoastWatch. The SST proxy now uses a cloned `http.Transport` with a 30-second TLS handshake timeout, a 45-second response-header timeout, and a 75-second overall request timeout. It first tries the standard CoastWatch ERDDAP endpoint and, on a transport/read failure, retries once against NOAA's `/wcn/erddap/` endpoint. Successful responses expose the endpoint label in `X-SST-Upstream`, and the browser includes that source in the SST status line.
 
 ### SST IPv4 transport workaround
 
-Build v172 keeps the MUR SST product, WMS 1.3.0 request, endpoint fallback, and browser diagnostics from v145. The v145 diagnostics identified the actual transport failure: the local Go process resolved `coastwatch.pfeg.noaa.gov` to IPv6 and the IPv6 route timed out before the HTTPS request completed. The SST-only HTTP transport now forces `tcp4` through a dedicated `net.Dialer`; other application networking is unchanged. A successful SST status line includes `IPv4` so the workaround is visible during testing.
+Build v173 keeps the MUR SST product, WMS 1.3.0 request, endpoint fallback, and browser diagnostics from v145. The v145 diagnostics identified the actual transport failure: the local Go process resolved `coastwatch.pfeg.noaa.gov` to IPv6 and the IPv6 route timed out before the HTTPS request completed. The SST-only HTTP transport now forces `tcp4` through a dedicated `net.Dialer`; other application networking is unchanged. A successful SST status line includes `IPv4` so the workaround is visible during testing.
 
 ### SST source moved to CoastWatch Central
 
-Build v172 changes the SST upstream hostname and product after repeated TLS failures to `coastwatch.pfeg.noaa.gov`. The overlay now uses NOAA CoastWatch Central at `coastwatch.noaa.gov`, dataset `noaacwBLENDEDsstDNDaily`, variable `analysed_sst`. This NOAA Geo-Polar Blended Day+Night product is a daily global Level-4 SST analysis at about 5 km resolution and is listed by NOAA as near-real-time. The existing WMS 1.3.0, EPSG:4326, browser fetch diagnostics, blob-image overlay, and SST-only IPv4 transport remain in place. The old PFEL/WCN SST retry path is removed so a known-bad host does not add long delays.
+Build v173 changes the SST upstream hostname and product after repeated TLS failures to `coastwatch.pfeg.noaa.gov`. The overlay now uses NOAA CoastWatch Central at `coastwatch.noaa.gov`, dataset `noaacwBLENDEDsstDNDaily`, variable `analysed_sst`. This NOAA Geo-Polar Blended Day+Night product is a daily global Level-4 SST analysis at about 5 km resolution and is listed by NOAA as near-real-time. The existing WMS 1.3.0, EPSG:4326, browser fetch diagnostics, blob-image overlay, and SST-only IPv4 transport remain in place. The old PFEL/WCN SST retry path is removed so a known-bad host does not add long delays.
 
 ### SST fishing-view refinements
 
-Build v172 keeps the working CoastWatch Central Geo-Polar Blended SST source from v147 and adds two UI refinements for practical offshore use. Sea Surface Temp is now treated as a Zoom 5+ overlay; below Zoom 5 the checkbox remains selected but the raster is removed and the status line tells the user to zoom in. Returning to Zoom 5+ automatically reloads the SST field. The old broad 32–95°F legend has been replaced by a qualitative Cooler → Warmer legend because the WMS image's color scaling is controlled by NOAA; this avoids implying exact temperature/color breakpoints that the app is not setting itself.
+Build v173 keeps the working CoastWatch Central Geo-Polar Blended SST source from v147 and adds two UI refinements for practical offshore use. Sea Surface Temp is now treated as a Zoom 5+ overlay; below Zoom 5 the checkbox remains selected but the raster is removed and the status line tells the user to zoom in. Returning to Zoom 5+ automatically reloads the SST field. The old broad 32–95°F legend has been replaced by a qualitative Cooler → Warmer legend because the WMS image's color scaling is controlled by NOAA; this avoids implying exact temperature/color breakpoints that the app is not setting itself.
 
 ### SST temp-break presentation
 
-Build v172 removes the hard SST minimum-zoom restriction. The SST overlay can be used at any zoom level; zoom level is now purely a usage choice.
+Build v173 removes the hard SST minimum-zoom restriction. The SST overlay can be used at any zoom level; zoom level is now purely a usage choice.
 
 The SST image path now uses NOAA CoastWatch ERDDAP `griddap` transparent PNG output instead of the WMS color defaults so the application can enforce a stable fishing-oriented temperature scale. The overlay uses `noaacwBLENDEDsstDNDaily:analysed_sst` with a fixed Rainbow palette from 45°F through 75°F, divided into approximately 1°F discrete bands. The on-page legend shows 45, 50, 55, 60, 65, 70, and 75°F. This is intended to make temperature breaks and boundaries between cooler and warmer water easier to identify and to keep the same color meaning as the map is panned or zoomed. Values below 45°F or above 75°F saturate at the palette endpoints.
 
 ### Step 2 — underwater structure overlay
 
-Build v172 begins roadmap Step 2 while keeping the Step 1 SST-break behavior intact.
+Build v173 begins roadmap Step 2 while keeping the Step 1 SST-break behavior intact.
 
 A new `Underwater Structure (NOAA bathymetry + names)` map overlay combines two NOAA sources for the current map view:
 
@@ -668,7 +768,7 @@ ETOPO is a global relief model, so small fishing pinnacles may not be resolved. 
 
 ### Step 2 label readability refinement
 
-Build v172 keeps the v150 NOAA/NCEI ETOPO shaded-relief layer but replaces the NOAA server-rendered undersea-name image with locally styled vector labels from the NOAA Marine Cadastre `UnderseaFeaturePlaceNames` feature query service.
+Build v173 keeps the v150 NOAA/NCEI ETOPO shaded-relief layer but replaces the NOAA server-rendered undersea-name image with locally styled vector labels from the NOAA Marine Cadastre `UnderseaFeaturePlaceNames` feature query service.
 
 The app requests official point features for the current map bounds and displays only fishing-relevant structural names whose official names identify seamounts, banks, ridges, hills, knolls, shoals, reefs, rises, plateaus, pinnacles, or escarpments. Canyons and other lower-priority names are suppressed to reduce clutter.
 
@@ -676,7 +776,7 @@ Labels are rendered by Leaflet with larger cream/white text, a strong dark halo,
 
 ### Step 3 — chlorophyll / water-clarity overlay
 
-Build v172 implements roadmap Step 3 while preserving the completed Step 1 SST-break and Step 2 underwater-structure behavior.
+Build v173 implements roadmap Step 3 while preserving the completed Step 1 SST-break and Step 2 underwater-structure behavior.
 
 A new `Chlorophyll / Water Clarity (NOAA CoastWatch)` overlay uses the NOAA CoastWatch VIIRS multi-sensor daily chlorophyll-a product:
 
@@ -694,7 +794,7 @@ This layer is a fishing-planning indicator, not a direct optical-water-clarity m
 
 ### Step 3 refinement — clear-water edge emphasis
 
-Build v172 refines the Step 3 chlorophyll presentation after the first 4 km global product proved visually too dominant and blocky for the intended fishing workflow.
+Build v173 refines the Step 3 chlorophyll presentation after the first 4 km global product proved visually too dominant and blocky for the intended fishing workflow.
 
 The underlying NOAA CoastWatch daily chlorophyll source is unchanged in this build, but the rendering is deliberately less intrusive:
 
@@ -707,7 +807,7 @@ NOAA documents higher-resolution VIIRS sector products at about 750 m, including
 
 ### Step 3 high-resolution chlorophyll refinement
 
-Build v172 replaces the coarse ~4 km global chlorophyll source with NOAA CoastWatch's near-real-time S-NPP VIIRS 750 m sector product for the eastern Pacific:
+Build v173 replaces the coarse ~4 km global chlorophyll source with NOAA CoastWatch's near-real-time S-NPP VIIRS 750 m sector product for the eastern Pacific:
 
 - Dataset: `noaacwNPPVIIRSchlaSectorUYDaily`
 - Variable: `chlor_a`
@@ -721,7 +821,7 @@ The Step 3 clear-water-edge presentation from v153 is retained: low opacity and 
 
 ### Step 3 high-resolution cloud-gap fill
 
-Build v172 keeps the NOAA CoastWatch S-NPP VIIRS 750 m Sector UY chlorophyll source from v154, but changes the server-side rendering strategy to reduce the sparse "colored islands" caused by cloud masking.
+Build v173 keeps the NOAA CoastWatch S-NPP VIIRS 750 m Sector UY chlorophyll source from v154, but changes the server-side rendering strategy to reduce the sparse "colored islands" caused by cloud masking.
 
 Instead of showing only the newest daily scene, the Go server requests the five most recent daily scenes in parallel and builds a recency-prioritized mosaic. For each pixel, the newest valid chlorophyll value is used; if that pixel is transparent/masked in the newest scene, the server fills it from the next-most-recent scene, continuing through up to five scenes. This is intentionally not an average or temporal smoothing operation: it is a latest-valid-pixel cloud-gap fill.
 
@@ -731,7 +831,7 @@ ERDDAP supports `last` and `last-n` time index selectors, which this build uses 
 
 ### Step 3 native NOAA gap-filled chlorophyll
 
-Build v172 abandons the failed app-generated 5-scene mosaic from v155 and switches to NOAA's native DINEOF gap-filled chlorophyll analysis:
+Build v173 abandons the failed app-generated 5-scene mosaic from v155 and switches to NOAA's native DINEOF gap-filled chlorophyll analysis:
 
 - Dataset: `noaacwNPPN20S3ASCIDINEOF2kmDaily`
 - Variable: `chlor_a`
@@ -746,7 +846,7 @@ The Step 3 fishing-oriented presentation remains: low overlay opacity and a fixe
 
 ### Step 3 diagnostic repair
 
-Build v172 repairs a source-generation regression introduced during the v155/v156 chlorophyll experiments. Those candidates no longer contained dedicated `/chlorophyll-info` and `/chlorophyll-overlay` HTTP handlers, which explains why the browser checkbox could remain selected while no chlorophyll layer or chlorophyll attribution appeared.
+Build v173 repairs a source-generation regression introduced during the v155/v156 chlorophyll experiments. Those candidates no longer contained dedicated `/chlorophyll-info` and `/chlorophyll-overlay` HTTP handlers, which explains why the browser checkbox could remain selected while no chlorophyll layer or chlorophyll attribution appeared.
 
 v157 restores the chlorophyll handlers while preserving the working SST and underwater-structure routes. It uses the NOAA native DINEOF gap-filled dataset `noaacwNPPN20S3ASCIDINEOF2kmDaily`, variable `chlor_a`, and always asks ERDDAP for the actual last indexed field with `[last]`.
 
@@ -754,7 +854,7 @@ The metadata endpoint now prefers the time-axis `actual_range` endpoint when rep
 
 ### Step 3 presentation cleanup
 
-Build v172 keeps the working NOAA native DINEOF gap-filled 2 km chlorophyll source and changes only its presentation.
+Build v173 keeps the working NOAA native DINEOF gap-filled 2 km chlorophyll source and changes only its presentation.
 
 The chlorophyll raster now uses ERDDAP's calmer `Ocean` palette instead of `Rainbow`, while retaining the fixed logarithmic 0.05–2 mg/m³ range. Overlay opacity is reduced from 0.34 to 0.26 so Sea Surface Temp breaks, bathymetry, undersea-feature labels, and the basemap remain visually dominant.
 
@@ -762,7 +862,7 @@ The on-page legend is also changed to a muted clean-water palette: deep blue thr
 
 ### Step 3 fishing-contrast tuning
 
-Build v172 keeps the working NOAA native DINEOF gap-filled 2 km chlorophyll source and retunes only the visual mapping for offshore fishing.
+Build v173 keeps the working NOAA native DINEOF gap-filled 2 km chlorophyll source and retunes only the visual mapping for offshore fishing.
 
 The chlorophyll overlay opacity is increased from 0.26 to 0.38. The map rendering range is tightened from 0.05–2 mg/m³ to 0.1–1 mg/m³ on a logarithmic scale, concentrating visual contrast in the offshore transition range instead of letting very high nearshore chlorophyll dominate.
 
@@ -770,13 +870,13 @@ The legend now emphasizes a stronger deep-blue → cyan → green → yellow pro
 
 ### SST regression repair
 
-Build v172 fixes an SST rendering regression introduced while adding the chlorophyll overlay-bounds logic. `refreshSSTOverlay()` was accidentally changed to call `L.imageOverlay()` with `overlayBounds`, a variable that exists in the chlorophyll path but not in the SST path. That JavaScript reference error occurred after the SST PNG was fetched, so the SST checkbox could remain selected while no SST raster or attribution appeared.
+Build v173 fixes an SST rendering regression introduced while adding the chlorophyll overlay-bounds logic. `refreshSSTOverlay()` was accidentally changed to call `L.imageOverlay()` with `overlayBounds`, a variable that exists in the chlorophyll path but not in the SST path. That JavaScript reference error occurred after the SST PNG was fetched, so the SST checkbox could remain selected while no SST raster or attribution appeared.
 
 The SST image overlay now correctly uses its own current map `bounds` again. Chlorophyll continues to use its separate `overlayBounds` behavior unchanged. No SST product, palette, transport, or Step 1 temp-break behavior is otherwise changed.
 
 ### Step 3 redesign — chlorophyll as edge lines
 
-Build v172 keeps SST as the colored raster and stops displaying chlorophyll as a second filled color raster.
+Build v173 keeps SST as the colored raster and stops displaying chlorophyll as a second filled color raster.
 
 The app still retrieves the NOAA CoastWatch native DINEOF gap-filled 2 km chlorophyll field, but the browser now converts that image into a transparent strong-gradient edge overlay. An adaptive threshold emphasizes roughly the strongest local chlorophyll gradients in the current view. The rendered line uses a dark halo with a bright center so it remains visible over both warm and cool SST colors.
 
@@ -784,7 +884,7 @@ This avoids hue mixing between SST and chlorophyll. The chlorophyll layer now an
 
 ### Step 3 redesign — numeric chlorophyll contours
 
-Build v172 replaces the v161 image-gradient edge detector with concentration contours derived from the NOAA numeric chlorophyll grid.
+Build v173 replaces the v161 image-gradient edge detector with concentration contours derived from the NOAA numeric chlorophyll grid.
 
 The `/chlorophyll-overlay` route now requests the latest `chlor_a` grid from `noaacwNPPN20S3ASCIDINEOF2kmDaily` as ERDDAP JSON, downsamples large map extents with ERDDAP stride, reconstructs the latitude/longitude grid, and runs server-side marching-squares contour extraction.
 
@@ -798,13 +898,13 @@ Each line has a dark halo so it remains readable over SST colors. This avoids th
 
 ### Step 3 contour compile fix
 
-Build v172 fixes the Go type errors in the v162 marching-squares contour renderer. The contour endpoints are floating-point pixel coordinates, but the `drawLine` helper was mistakenly declared with integer endpoint parameters. That caused the reported `math.Abs`, `math.Round`, arithmetic, and `crossings[].x/y` compile errors.
+Build v173 fixes the Go type errors in the v162 marching-squares contour renderer. The contour endpoints are floating-point pixel coordinates, but the `drawLine` helper was mistakenly declared with integer endpoint parameters. That caused the reported `math.Abs`, `math.Round`, arithmetic, and `crossings[].x/y` compile errors.
 
 `drawLine` now accepts `float64` endpoints and rounds only when plotting pixels. No contour levels, chlorophyll data source, SST behavior, or underwater-structure behavior are changed.
 
 ### Step 3 split chlorophyll presentation
 
-Build v172 separates chlorophyll into two independent overlays using the same NOAA CoastWatch DINEOF gap-filled 2 km source.
+Build v173 separates chlorophyll into two independent overlays using the same NOAA CoastWatch DINEOF gap-filled 2 km source.
 
 `Chlorophyll Field` restores a restrained semi-transparent background raster so broad water-mass features—such as low-chlorophyll pockets, eddies, and clean-water intrusions—remain visually obvious. It uses the fixed 0.1–1 mg/m³ logarithmic display range and sits below the contour layer.
 
@@ -814,7 +914,7 @@ This split is intended to preserve both kinds of information the prior experimen
 
 ### Fishing Reports overlay prototype
 
-Build v172 adds a single `Fishing Reports (recent tuna snapshot)` overlay. It is intentionally one overlay rather than separate species/confidence layers.
+Build v173 adds a single `Fishing Reports (recent tuna snapshot)` overlay. It is intentionally one overlay rather than separate species/confidence layers.
 
 The prototype contains recent public Northern/Central California tuna reports:
 
@@ -829,7 +929,7 @@ This is a curated snapshot, not yet a live scraper or automated fishing-report f
 
 ### Fishing Reports external data file
 
-Build v172 removes the hard-coded fishing report arrays from `main.go`.
+Build v173 removes the hard-coded fishing report arrays from `main.go`.
 
 The map now loads `GET /fishing-reports`, and that server route reads and validates `assets/fishing_reports.json`. The JSON file is therefore the update point for future fishing reports; adding, removing, or refreshing report records no longer requires changing the Go source or JavaScript map implementation.
 
@@ -841,7 +941,7 @@ This is still a manually curated feed. A future ingestion job can update `assets
 
 ### Underwater structure label decluttering
 
-Build v172 keeps the NOAA/NCEI bathymetry relief visible at all zoom levels but adds strict controls to undersea feature names.
+Build v173 keeps the NOAA/NCEI bathymetry relief visible at all zoom levels but adds strict controls to undersea feature names.
 
 Feature names are now hidden below Zoom 6. At wider planning scales the label count is capped progressively: 10 at Zoom 6, 24 at Zoom 7, 45 at Zoom 8, 65 at Zoom 9, and 85 at Zoom 10+.
 
@@ -851,7 +951,7 @@ The browser also performs screen-space collision suppression using an estimated 
 
 ### Offshore Trip Planning — first operational panel
 
-Build v172 adds an `Offshore Trip Planning` panel tied to the selected ★ map destination.
+Build v173 adds an `Offshore Trip Planning` panel tied to the selected ★ map destination.
 
 The new `/offshore-trip` endpoint combines two sources for the selected lat/lon:
 
@@ -868,13 +968,13 @@ This first pass evaluates the selected offshore destination, not the entire tran
 
 ### Offshore Trip Planning startup fix and Sea Surface Temp terminology
 
-Build v172 fixes the v168 startup case where the `Offshore Trip Planning` card could remain hidden when the Planning page loaded with an already-selected `lat`/`lon` in the URL. The page now explicitly refreshes the offshore trip panel during initialization whenever `mapState.selectedLocation` already exists, while retaining the existing refresh when the user clicks a new ★ destination.
+Build v173 fixes the v168 startup case where the `Offshore Trip Planning` card could remain hidden when the Planning page loaded with an already-selected `lat`/`lon` in the URL. The page now explicitly refreshes the offshore trip panel during initialization whenever `mapState.selectedLocation` already exists, while retaining the existing refresh when the user clicks a new ★ destination.
 
 This build also changes the user-facing SST wording to `Sea Surface Temp` for clarity. The map overlay checkbox and legend now use `Sea Surface Temp`, and explanatory text spells out sea-surface temperature where appropriate. Internal JavaScript identifiers, `/sst-*` endpoints, diagnostic headers, and data-source plumbing remain unchanged for compatibility.
 
 ### Fishing Planning subsection
 
-Build v172 keeps the existing `Offshore Trip Planning` card for weather, buoy observations, swell/period context, NWS forecast periods, alerts, and operational watch items, and adds a separate `Fishing Planning` subsection inside that card.
+Build v173 keeps the existing `Offshore Trip Planning` card for weather, buoy observations, swell/period context, NWS forecast periods, alerts, and operational watch items, and adds a separate `Fishing Planning` subsection inside that card.
 
 For the selected ★ destination, the Fishing Planning subsection now summarizes four fishing-specific factors:
 
@@ -891,7 +991,7 @@ This is still selected-destination analysis rather than route-wide fishing analy
 
 ### Offshore Trip Planning eligibility gate
 
-Build v172 makes the entire `Offshore Trip Planning` card conditional on the selected ★ location actually qualifying as offshore/coastal-ocean water.
+Build v173 makes the entire `Offshore Trip Planning` card conditional on the selected ★ location actually qualifying as offshore/coastal-ocean water.
 
 The `/offshore-trip` endpoint now returns an explicit `is_offshore` boolean. It resolves the NWS forecast zone for the selected point, reads the zone name from the NWS forecast-zone API, and only treats recognized ocean/coastal marine zone families as eligible. Land forecast zones therefore do not qualify.
 
@@ -901,10 +1001,50 @@ The browser now keeps the card hidden while offshore eligibility is being resolv
 
 This means a selected location in Antioch, the Delta, San Pablo Bay, or San Francisco Bay will not show `Offshore Trip Planning`, while selected coastal-ocean/offshore points can still use the full trip and fishing-planning workflow.
 
-### Release 1.9.3 / Build v172
+### Release 1.9.3 / Build v173
 
-Build v172 is a release-only bump from the v171 feature-complete candidate. There are no functional changes from v171.
+Build v173 is a release-only bump from the v171 feature-complete candidate. There are no functional changes from v171.
 
 Public version changes from `1.9.2` to `1.9.3`, and the immutable generated source lineage advances from `v171` to `v172`.
 
 Release 1.9.3 includes the offshore/fishing planning work completed across the preceding development builds: Sea Surface Temp terminology and temp-break context, chlorophyll field and contours, decluttered underwater structure, externalized fishing reports, Offshore Trip Planning with NWS/NDBC conditions, Fishing Planning synthesis, and the offshore eligibility gate that suppresses the offshore card for inland, Delta, Bay, and other non-offshore selections.
+
+### NOAA coastline clipping for Sea Surface Temp and Chlorophyll
+
+Build v173 adds server-side coastline clipping to the displayed Sea Surface Temp and Chlorophyll Field rasters.
+
+The clipping mask comes from NOAA ENC Direct's `Coastal.Land_Area` polygon layer (layer 171). For each CoastWatch image request, the server requests a transparent NOAA ENC land-mask PNG using the exact same geographic bounds and pixel dimensions as the CoastWatch raster. Pixels identified as land are then made transparent before the image is returned to Leaflet.
+
+This is a display-only operation. The original NOAA CoastWatch numeric grids used by Fishing Planning, temp-break analysis, chlorophyll context, and contour generation remain unchanged.
+
+If the NOAA coastline-mask request fails or returns an incompatible image, the raster request fails with a diagnostic error rather than silently showing un-clipped land data. Both clipped raster responses include an `X-Coastline-Mask` diagnostic header identifying the NOAA ENC land source.
+
+This build does not add raster smoothing or interpolation. The native data resolution and existing fishing-oriented color scales are preserved.
+
+### Coastline rendering refinement / Build v174
+
+Build v174 refines the server-side NOAA ENC land mask introduced in v173 after visual review showed that a same-size binary mask could look crudely registered against detailed basemap coastlines.
+
+The CoastWatch display raster is still clipped against NOAA ENC Direct `Coastal.Land_Area` (layer 171), but the mask request is now supersampled at 2× the CoastWatch display dimensions, subject to the NOAA service's 4096-pixel image limit. Each CoastWatch pixel receives fractional land coverage derived from the higher-resolution mask rather than being discarded whenever a single same-resolution mask pixel crosses a fixed alpha threshold. This produces an antialiased transition at the shoreline and reduces visible stair-stepping without altering the underlying CoastWatch field.
+
+Sea Surface Temp display opacity is reduced from 0.72 to 0.58 so Street Map, Nautical Chart, Satellite, and Hybrid coastline context remains more legible beneath the approximately 5 km NOAA Geo-Polar Blended SST analysis. This does not increase the scientific resolution of the SST product and should not be interpreted as higher-resolution near-shore temperature data.
+
+The same supersampled clipping helper is also used by the Chlorophyll Field raster. Numeric SST/chlorophyll retrieval, Fishing Planning statistics, chlorophyll contours, and the source datasets remain unchanged.
+
+### Vector coastline masking for Sea Surface Temp / Build v175
+
+Build v175 replaces the SST-specific raster coastline cutout with a browser-side vector mask. CoastWatch's image still contains coarse transparent land/no-data cells inherited from the approximately 5 km SST grid, so `/sst-overlay` first fills those transparent cells outward from the nearest valid SST color. That infill is only a display-preparation step; the original CoastWatch numeric grid used for Fishing Planning remains unchanged.
+
+The browser then requests NOAA ENC Direct `Coastal.Land_Area` geometry from `/coastline-geometry`. The server proxies the NOAA ArcGIS layer as GeoJSON for the current map bounds with modest geometry simplification. The client converts the polygons into an SVG mask in Web-Mercator screen coordinates and applies that mask to the SST image inside Leaflet. Land is therefore hidden by NOAA vector shoreline geometry rather than by a second rasterized coastline image.
+
+This specifically targets the visibly crude Bay Area shoreline registration seen in v173/v174. The SST field remains a coarse daily analysis, and the new mask does not imply finer near-shore temperature accuracy. If NOAA ENC geometry cannot be fetched or parsed, the SST overlay fails with a diagnostic message instead of falling back to unmasked land coverage. Chlorophyll Field remains on the v174 supersampled raster-mask path for now.
+### Native CoastWatch shoreline policy / Build v176
+
+Build v176 retires the v175 SST vector-mask experiment after browser testing showed that the client-side SVG mask could expose large rectangular SST areas over land at wider Bay Area views. The failure demonstrated that independently reconstructing the shoreline from NOAA ENC geometry is not a reliable display path for this coarse raster product.
+
+`/sst-overlay` now returns the NOAA CoastWatch transparent PNG with its native land/no-data transparency preserved. The server does not fill transparent SST cells and does not apply a second coastline product to Sea Surface Temp. The browser displays that image directly as a Leaflet image overlay at 0.50 opacity.
+
+The tradeoff is intentional: the approximately 5 km Geo-Polar Blended SST grid can show a visibly coarse edge around complex coastlines, bays, and estuaries. That edge is now treated as an honest representation of source resolution rather than hidden behind a synthetic shoreline. The Sea Surface Temp layer should therefore be used to identify regional/offshore gradients and temperature breaks, not to infer temperature immediately against a detailed shoreline.
+
+The fixed 45–75°F display scale and numeric CoastWatch values used by Fishing Planning remain unchanged. Chlorophyll Field continues to use the v174 supersampled NOAA ENC raster mask; this rollback applies only to the displayed Sea Surface Temp raster.
+

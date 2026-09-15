@@ -29,7 +29,7 @@ import (
 
 const (
 	appVersion                      = "1.9.3"
-	buildVersion                    = "v172"
+	buildVersion                    = "v183"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -853,6 +853,253 @@ func latestNearbyStationWind(stationID, windUnit string) (string, string) {
 	return wind, fmt.Sprintf("%d min", ageMinutes)
 }
 
+func applyNOAACoastlineMask(
+	sourcePNG []byte,
+	west float64,
+	south float64,
+	east float64,
+	north float64,
+	width int,
+	height int,
+) ([]byte, error) {
+	if len(sourcePNG) == 0 {
+		return nil, fmt.Errorf("empty source PNG")
+	}
+	if width <= 0 || height <= 0 {
+		return nil, fmt.Errorf("invalid coastline-mask image size")
+	}
+
+	// NOAA ENC Direct Coastal Land_Area layer. Request the land mask at 2x
+	// the CoastWatch display resolution and reduce it back to the source raster
+	// with alpha coverage. ArcGIS renders this service without antialiasing, so
+	// supersampling prevents the visibly stair-stepped shoreline produced by a
+	// same-size binary mask. CoastWatch numeric data are not modified; this
+	// affects display PNGs only.
+	maskWidth := width * 2
+	maskHeight := height * 2
+	if maskWidth > 4096 {
+		maskWidth = 4096
+	}
+	if maskHeight > 4096 {
+		maskHeight = 4096
+	}
+
+	params := url.Values{}
+	params.Set("f", "image")
+	params.Set("bbox", fmt.Sprintf("%.6f,%.6f,%.6f,%.6f", west, south, east, north))
+	params.Set("bboxSR", "4326")
+	params.Set("imageSR", "4326")
+	params.Set("size", fmt.Sprintf("%d,%d", maskWidth, maskHeight))
+	params.Set("format", "png32")
+	params.Set("transparent", "true")
+	params.Set("layers", "show:171")
+
+	maskURL := "https://maritimeboundaries.noaa.gov/arcgis/rest/services/encdirect/enc_coastal/MapServer/export?" +
+		params.Encode()
+
+	req, err := http.NewRequest(http.MethodGet, maskURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "pittsburg-saildata/"+appVersion)
+
+	client := &http.Client{Timeout: 25 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("NOAA coastline mask request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	maskBytes, err := ioutil.ReadAll(io.LimitReader(resp.Body, 12<<20))
+	if err != nil {
+		return nil, fmt.Errorf("NOAA coastline mask read failed: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		detail := strings.TrimSpace(string(maskBytes))
+		if len(detail) > 500 {
+			detail = detail[:500]
+		}
+		return nil, fmt.Errorf(
+			"NOAA coastline mask returned HTTP %d: %s",
+			resp.StatusCode,
+			detail,
+		)
+	}
+
+	sourceImage, err := png.Decode(bytes.NewReader(sourcePNG))
+	if err != nil {
+		return nil, fmt.Errorf("source PNG decode failed: %w", err)
+	}
+	maskImage, err := png.Decode(bytes.NewReader(maskBytes))
+	if err != nil {
+		return nil, fmt.Errorf("NOAA coastline mask PNG decode failed: %w", err)
+	}
+
+	sourceBounds := sourceImage.Bounds()
+	maskBounds := maskImage.Bounds()
+	if maskBounds.Dx() <= 0 || maskBounds.Dy() <= 0 {
+		return nil, fmt.Errorf("NOAA coastline mask returned an empty image")
+	}
+
+	sourceWidth := sourceBounds.Dx()
+	sourceHeight := sourceBounds.Dy()
+	maskImageWidth := maskBounds.Dx()
+	maskImageHeight := maskBounds.Dy()
+	clipped := image.NewNRGBA(sourceBounds)
+
+	for y := sourceBounds.Min.Y; y < sourceBounds.Max.Y; y++ {
+		sy := y - sourceBounds.Min.Y
+		my0 := maskBounds.Min.Y + sy*maskImageHeight/sourceHeight
+		my1 := maskBounds.Min.Y + (sy+1)*maskImageHeight/sourceHeight
+		if my1 <= my0 {
+			my1 = my0 + 1
+		}
+		if my1 > maskBounds.Max.Y {
+			my1 = maskBounds.Max.Y
+		}
+
+		for x := sourceBounds.Min.X; x < sourceBounds.Max.X; x++ {
+			sx := x - sourceBounds.Min.X
+			mx0 := maskBounds.Min.X + sx*maskImageWidth/sourceWidth
+			mx1 := maskBounds.Min.X + (sx+1)*maskImageWidth/sourceWidth
+			if mx1 <= mx0 {
+				mx1 = mx0 + 1
+			}
+			if mx1 > maskBounds.Max.X {
+				mx1 = maskBounds.Max.X
+			}
+
+			var alphaSum int
+			var samples int
+			for my := my0; my < my1; my++ {
+				for mx := mx0; mx < mx1; mx++ {
+					mask := color.NRGBAModel.Convert(maskImage.At(mx, my)).(color.NRGBA)
+					alphaSum += int(mask.A)
+					samples++
+				}
+			}
+
+			src := color.NRGBAModel.Convert(sourceImage.At(x, y)).(color.NRGBA)
+			if samples > 0 && alphaSum > 0 {
+				coverage := float64(alphaSum) / float64(samples*255)
+				if coverage > 1 {
+					coverage = 1
+				}
+				src.A = uint8(math.Round(float64(src.A) * (1 - coverage)))
+			}
+			clipped.SetNRGBA(x, y, src)
+		}
+	}
+
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, clipped); err != nil {
+		return nil, fmt.Errorf("coastline-clipped PNG encoding failed: %w", err)
+	}
+	return encoded.Bytes(), nil
+}
+
+func webMercatorY(latDegrees float64) float64 {
+	const maxMercatorLat = 85.0511287798066
+	if latDegrees > maxMercatorLat {
+		latDegrees = maxMercatorLat
+	}
+	if latDegrees < -maxMercatorLat {
+		latDegrees = -maxMercatorLat
+	}
+	latRadians := latDegrees * math.Pi / 180
+	return math.Log(math.Tan(math.Pi/4 + latRadians/2))
+}
+
+func inverseWebMercatorY(y float64) float64 {
+	latRadians := 2*math.Atan(math.Exp(y)) - math.Pi/2
+	return latRadians * 180 / math.Pi
+}
+
+func reprojectLatLonPNGToWebMercator(
+	sourcePNG []byte,
+	south float64,
+	north float64,
+) ([]byte, error) {
+	if len(sourcePNG) == 0 {
+		return nil, fmt.Errorf("empty SST source PNG")
+	}
+	if south >= north {
+		return nil, fmt.Errorf("invalid SST latitude bounds")
+	}
+
+	sourceImage, err := png.Decode(bytes.NewReader(sourcePNG))
+	if err != nil {
+		return nil, fmt.Errorf("SST source PNG decode failed: %w", err)
+	}
+	b := sourceImage.Bounds()
+	width := b.Dx()
+	height := b.Dy()
+	if width <= 0 || height <= 0 {
+		return nil, fmt.Errorf("SST source PNG has invalid dimensions")
+	}
+
+	mercatorNorth := webMercatorY(north)
+	mercatorSouth := webMercatorY(south)
+	if mercatorNorth <= mercatorSouth {
+		return nil, fmt.Errorf("invalid SST Web Mercator latitude span")
+	}
+
+	output := image.NewNRGBA(image.Rect(0, 0, width, height))
+	sourceMaxY := float64(height - 1)
+
+	for dy := 0; dy < height; dy++ {
+		// Leaflet's EPSG:3857 map is linear in Web Mercator Y, while ERDDAP's
+		// griddap image is linear in latitude. Convert each destination scanline
+		// back to latitude, then sample the corresponding source scanline.
+		t := (float64(dy) + 0.5) / float64(height)
+		mercatorY := mercatorNorth + t*(mercatorSouth-mercatorNorth)
+		lat := inverseWebMercatorY(mercatorY)
+		sourceY := (north-lat)/(north-south)*float64(height) - 0.5
+		if sourceY < 0 {
+			sourceY = 0
+		}
+		if sourceY > sourceMaxY {
+			sourceY = sourceMaxY
+		}
+		y0 := int(math.Floor(sourceY))
+		y1 := y0 + 1
+		if y1 >= height {
+			y1 = height - 1
+		}
+		fy := sourceY - float64(y0)
+
+		for dx := 0; dx < width; dx++ {
+			c0 := color.NRGBAModel.Convert(sourceImage.At(b.Min.X+dx, b.Min.Y+y0)).(color.NRGBA)
+			c1 := color.NRGBAModel.Convert(sourceImage.At(b.Min.X+dx, b.Min.Y+y1)).(color.NRGBA)
+
+			// Interpolate in premultiplied-alpha space so transparent land/no-data
+			// cells do not bleed opaque SST colors across the shoreline.
+			a0 := float64(c0.A) / 255
+			a1 := float64(c1.A) / 255
+			a := a0 + (a1-a0)*fy
+			pr := float64(c0.R)*a0 + (float64(c1.R)*a1-float64(c0.R)*a0)*fy
+			pg := float64(c0.G)*a0 + (float64(c1.G)*a1-float64(c0.G)*a0)*fy
+			pb := float64(c0.B)*a0 + (float64(c1.B)*a1-float64(c0.B)*a0)*fy
+
+			var r, g, bl uint8
+			if a > 1e-6 {
+				r = uint8(math.Round(math.Max(0, math.Min(255, pr/a))))
+				g = uint8(math.Round(math.Max(0, math.Min(255, pg/a))))
+				bl = uint8(math.Round(math.Max(0, math.Min(255, pb/a))))
+			}
+			alpha := uint8(math.Round(math.Max(0, math.Min(255, a*255))))
+			output.SetNRGBA(dx, dy, color.NRGBA{R: r, G: g, B: bl, A: alpha})
+		}
+	}
+
+	var encoded bytes.Buffer
+	encoder := png.Encoder{CompressionLevel: png.BestSpeed}
+	if err := encoder.Encode(&encoded, output); err != nil {
+		return nil, fmt.Errorf("SST Web Mercator PNG encoding failed: %w", err)
+	}
+	return encoded.Bytes(), nil
+}
+
 type coastWatchWindowStats struct {
 	Point float64
 	Min   float64
@@ -1617,9 +1864,8 @@ func runServer(
 		}
 
 		// Use ERDDAP griddap instead of WMS so the SST color scale is fixed.
-		// The 45-75 F range (7.222-23.889 C) is intentionally fishing-oriented,
-		// and 30 discrete sections create approximately 1 F color bands so
-		// temperature breaks are easier to see and compare between map views.
+		// The 35-95 F range (1.667-35.000 C) gives warm tropical/subtropical water and strong El Niño conditions more headroom,
+		// while 60 sections preserve approximately 1 F color bands so temperature breaks remain easy to compare between map views.
 		timeSelector := "(last)"
 		if timeValue != "" && !strings.EqualFold(timeValue, "current") {
 			timeSelector = "(" + timeValue + ")"
@@ -1636,7 +1882,7 @@ func runServer(
 		graphics := url.Values{}
 		graphics.Set(".draw", "surface")
 		graphics.Set(".vars", "longitude|latitude|analysed_sst")
-		graphics.Set(".colorBar", "Rainbow|D|Linear|7.222222|23.888889|30")
+		graphics.Set(".colorBar", "Rainbow|D|Linear|1.666667|35.000000|60")
 		graphics.Set(".land", "off")
 		graphics.Set(".legend", "Off")
 		graphics.Set(".size", strconv.Itoa(width)+"|"+strconv.Itoa(height))
@@ -1749,9 +1995,23 @@ func runServer(
 			return
 		}
 
+		// ERDDAP's griddap surface PNG is linear in latitude, while Leaflet's
+		// EPSG:3857 display is linear in Web Mercator Y. Stretching the source PNG
+		// directly to Leaflet bounds aligns only the outer corners and produces
+		// increasingly obvious coastline drift at wide geographic extents. Reproject
+		// the image scanlines server-side before Leaflet displays it. Longitude needs
+		// no resampling because both representations are linear in longitude here.
+		projectedBody, projectionErr := reprojectLatLonPNGToWebMercator(body, south, north)
+		if projectionErr != nil {
+			http.Error(w, "Sea Surface Temp Web Mercator reprojection failed: "+projectionErr.Error(), http.StatusBadGateway)
+			return
+		}
+
+		w.Header().Set("X-SST-Coastline", "native CoastWatch transparency/no-data mask")
+		w.Header().Set("X-SST-Projection", "server-reprojected EPSG:4326 latitude grid to EPSG:3857 scanlines")
 		w.Header().Set("Content-Type", "image/png")
 		w.Header().Set("Cache-Control", "public, max-age=900")
-		_, _ = w.Write(body)
+		_, _ = w.Write(projectedBody)
 	})
 
 	mux.HandleFunc("/chlorophyll-info", func(w http.ResponseWriter, r *http.Request) {
@@ -1966,7 +2226,23 @@ func runServer(
 			return
 		}
 
+		clippedBody, maskErr := applyNOAACoastlineMask(
+			body,
+			west,
+			south,
+			east,
+			north,
+			width,
+			height,
+		)
+		if maskErr != nil {
+			http.Error(w, "Chlorophyll coastline clipping failed: "+maskErr.Error(), http.StatusBadGateway)
+			return
+		}
+		body = clippedBody
+
 		w.Header().Set("X-Chlorophyll-Upstream", "CoastWatch Central ERDDAP · DINEOF field")
+		w.Header().Set("X-Coastline-Mask", "NOAA ENC Direct Coastal Land_Area · 2x supersampled")
 		w.Header().Set("Content-Type", "image/png")
 		w.Header().Set("Cache-Control", "public, max-age=900")
 		_, _ = w.Write(body)
@@ -6288,7 +6564,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 <section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Open the full planning dashboard for location, wind, currents, forecasts, map layers, and customization controls.</p></div><a id="planning-page-link" class="planning-page-link" href="{{.PlanningDetailsURL}}">Planning and Details →</a></section>
 {{else}}
 <section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Full planning dashboard and customization controls.</p></div><a class="planning-page-link" href="{{.ConditionsURL}}">← Back to Conditions Now</a></section>
-<section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map to choose a sailing location, then use Find stations near selected location. The latitude/longitude fields always show the current map center; you may edit them and use Center Map → Latitude & Longitude to pan there without changing the selected sailing location. My location also centers the map only. Panning changes the view, not the selected ★ location. Click a nearby wind station to pin its details and preview the associated currents station, then use the selection link in the map panel to commit the wind-station choice. Candidate stations and distances always refer to the selected location.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-nautical-zoom-note" class="map-nautical-zoom-note" hidden aria-live="polite">Nautical chart available at Zoom 9+.</div><div id="map-resize-handle" class="map-resize-handle" role="separator" aria-label="Resize map vertically" aria-orientation="horizontal" aria-valuemin="260" aria-valuemax="900" aria-valuenow="390" aria-grabbed="false" tabindex="0" title="Drag up or down to resize map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-state-controls" aria-label="Map controls"><details id="map-types-menu" class="map-overlays-menu"><summary>Map Types</summary><div class="map-overlays-panel"><label class="map-overlay-toggle"><input type="radio" name="map-type" value="map"> <span>Street Map</span></label><label id="map-type-nautical-label" class="map-overlay-toggle"><input id="map-type-nautical" type="radio" name="map-type" value="nautical"> <span>Nautical Chart <small>(Zoom 9+)</small></span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="satellite"> <span>Satellite</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="hybrid"> <span>Hybrid</span></label></div></details><details id="map-overlays-menu" class="map-overlays-menu"><summary>Map Overlays</summary><div class="map-overlays-panel"><label id="map-marine-zone-control" class="map-overlay-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-smoke"> <span>Satellite smoke (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-sst"> <span>Sea Surface Temp (NOAA CoastWatch)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-chlorophyll-field"> <span>Chlorophyll Field (NOAA gap-filled 2 km)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-chlorophyll"> <span>Chlorophyll Contours (NOAA gap-filled 2 km)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-structure"> <span>Underwater Structure (NOAA bathymetry + names)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-fishing-reports"> <span>Fishing Reports (external data file)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-clouds"> <span>Satellite Cloud Cover (NOAA)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-radar"> <span>Weather radar (NOAA/NWS)</span></label><div class="map-overlay-note">Sea Surface Temp uses NOAA CoastWatch Geo-Polar Blended daily analysed sea-surface temperature imagery. The fixed fishing-oriented color scale emphasizes temperature breaks and boundaries between cooler and warmer water. It is a multi-satellite global Level-4 analysis at about 5 km resolution; near-shore and inland values should still be interpreted cautiously. Chlorophyll Field uses NOAA CoastWatch multi-sensor Level-4 DINEOF gap-filled daily chlorophyll-a at about 2 km as a restrained semi-transparent background raster so broad water-mass features remain visible. Chlorophyll Contours are a separate overlay derived from the same NOAA numeric grid and draw only three concentration contours: 0.2, 0.3, and 0.5 mg/m³. Use either layer independently or combine them with Sea Surface Temp and underwater structure. NOAA performs the cloud-gap filling upstream. Underwater Structure combines NOAA/NCEI ETOPO shaded relief with NOAA Marine Cadastre official undersea feature points. Fishing-relevant features such as seamounts, banks, ridges, hills, knolls, shoals, reefs, rises, plateaus, pinnacles, and escarpments are labeled locally for better contrast. It is intended for fishing-planning context, not navigation; smaller pinnacles may not appear in the global relief model. Fishing Reports is loaded from assets/fishing_reports.json so report updates do not require changing Go or map UI code. Exact positions are plotted only when the source provides them; fisherman shorthand such as “20×20” is shown as a derived approximate position with an uncertainty circle, and broad reports such as “Cordell to Monterey” are shown as regional zones rather than fake point coordinates. Satellite Cloud Cover uses NOAA/NESDIS GOES imagery rendered for the current map view; daylight areas appear natural-color-like and nighttime areas use infrared imagery. Radar uses Iowa State IEM's Web-Mercator CONUS NEXRAD N0Q WMS layer; a clear/transparent radar layer can simply mean no precipitation echoes are present.</div></div></details><details id="map-center-menu" class="map-overlays-menu"><summary>Center Map</summary><div class="map-overlays-panel map-center-panel"><button type="button" id="map-geolocate" class="map-center-action" title="Center the map on your device location without changing the selected location">My location</button><button type="button" id="map-nav-coordinates" class="map-center-action" title="Center the map on the latitude and longitude shown below">Latitude &amp; Longitude</button><button type="button" id="map-nav-selected" class="map-center-action" {{if not .MapHasRequest}}disabled{{end}}>Selected location</button><button type="button" id="map-nav-wind" class="map-center-action" {{if not .MapHasWind}}disabled{{end}}>Selected wind station</button><button type="button" id="map-nav-current" class="map-center-action" {{if not .MapHasCurrent}}disabled{{end}}>Selected currents station</button></div></details><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}" {{if not .MapHasRequest}}disabled{{end}}>Clear selected location &amp; candidates</button></div><div class="map-location-info-grid"><div class="map-coordinate-entry" aria-label="Map center coordinates"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLat}}" aria-label="Map center latitude"></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLon}}" aria-label="Map center longitude"></div><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div id="selected-location-weather" class="selected-location-weather" aria-live="polite"><div class="selected-location-weather-head"><strong>Local Conditions</strong><span id="selected-location-weather-updated" class="selected-location-weather-updated">{{if .SelectedWeatherUpdated}}Updated {{.SelectedWeatherUpdated}}{{end}}</span></div><div id="selected-location-weather-place" class="selected-location-weather-place">{{if .MapHasRequest}}{{if .SelectedWeatherLocation}}{{.SelectedWeatherLocation}}{{else}}Near selected location{{end}}{{else}}Select a location for local conditions{{end}}</div><div id="selected-location-weather-content" {{if not .MapHasRequest}}hidden{{end}}><div class="selected-location-weather-metrics"><span class="selected-location-weather-metric"><b>Air temp:</b> <span id="selected-location-weather-air">{{if .SelectedWeatherAirTemp}}{{.SelectedWeatherAirTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>High:</b> <span id="selected-location-weather-high">{{if .SelectedWeatherHighTemp}}{{.SelectedWeatherHighTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>Low:</b> <span id="selected-location-weather-low">{{if .SelectedWeatherLowTemp}}{{.SelectedWeatherLowTemp}}{{else}}—{{end}}</span></span></div><p id="selected-location-weather-forecast" class="selected-location-weather-forecast" {{if not .SelectedWeatherShortForecast}}hidden{{end}}>{{.SelectedWeatherShortForecast}}</p><p id="selected-location-weather-error" class="selected-location-weather-error" {{if not .SelectedWeatherError}}hidden{{end}}>{{.SelectedWeatherError}}</p><p class="selected-location-weather-note">NWS point forecast near the selected location. Air temperature is the current-hour forecast, not a direct observation.</p></div></div></div><div class="map-controls"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Select a location to find stations</span><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-weather-overlay-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div id="map-sst-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-structure-status" class="map-structure-status" hidden></div><div id="map-chl-field-legend" class="map-chl-field-legend" hidden><strong>Chlorophyll Field</strong><span class="map-chl-field-bar" aria-hidden="true"></span><span class="map-chl-field-scale"><span>0.1</span><span>0.2</span><span>0.3</span><span>0.5</span><span>0.7</span><span>1 mg/m³</span></span><span class="map-chl-field-note">Semi-transparent NOAA gap-filled chlorophyll background. Blue/cyan = lower chlorophyll / cleaner water; green/yellow = higher chlorophyll. Use this layer to see broad water-mass features such as pockets and eddies.</span></div><div id="map-chl-field-status" class="map-chl-field-status" hidden></div><div id="map-chl-legend" class="map-chl-legend" hidden><strong>Chlorophyll Contours</strong><span class="map-chl-contour-key"><i class="map-chl-contour-line c02"></i>0.2 mg/m³</span><span class="map-chl-contour-key"><i class="map-chl-contour-line c03"></i>0.3 mg/m³</span><span class="map-chl-contour-key"><i class="map-chl-contour-line c05"></i>0.5 mg/m³</span><span class="map-chl-note">Exact chlorophyll concentration contours from the NOAA numeric grid. The 0.3 mg/m³ line is emphasized as the primary clear-water transition reference; compare it with Sea Surface Temp breaks and offshore structure.</span></div><div id="map-chl-status" class="map-chl-status" hidden></div><div id="map-fishing-legend" class="map-fishing-legend" hidden><strong>Fishing Reports</strong><span class="map-fishing-key"><i class="map-fishing-dot albacore"></i>Albacore</span><span class="map-fishing-key"><i class="map-fishing-dot bluefin"></i>Bluefin</span><span class="map-fishing-key"><i class="map-fishing-zone-key"></i>Broad regional report</span><span>Dashed uncertainty circles = derived shorthand positions.</span></div><div id="map-fishing-status" class="map-fishing-status" hidden></div><div id="map-sst-legend" class="map-sst-legend" hidden><strong>Sea Surface Temp / Temp Breaks</strong><span class="map-sst-bar" aria-hidden="true"></span><span class="map-sst-scale"><span>45°F</span><span>50</span><span>55</span><span>60</span><span>65</span><span>70</span><span>75°F</span></span><span class="map-sst-note">Fixed 45–75°F NOAA sea-surface temperature scale in 1°F bands. Closely packed color changes make temperature breaks easier to see; values below/above the range saturate at the end colors. NOAA Geo-Polar Blended daily sea-surface temperature, about 5 km resolution.</span></div><div class="map-layer-note">Drag the handle directly below the map to make the map taller or shorter. Keyboard users can focus the handle and use ↑/↓ (Shift for larger steps).</div><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
+<section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map to choose a sailing location, then use Find stations near selected location. The latitude/longitude fields always show the current map center; you may edit them and use Center Map → Latitude & Longitude to pan there without changing the selected sailing location. My location also centers the map only. Panning changes the view, not the selected ★ location. Click a nearby wind station to pin its details and preview the associated currents station, then use the selection link in the map panel to commit the wind-station choice. Candidate stations and distances always refer to the selected location.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-nautical-zoom-note" class="map-nautical-zoom-note" hidden aria-live="polite">Nautical chart available at Zoom 9+.</div><div id="map-resize-handle" class="map-resize-handle" role="separator" aria-label="Resize map vertically" aria-orientation="horizontal" aria-valuemin="260" aria-valuemax="900" aria-valuenow="390" aria-grabbed="false" tabindex="0" title="Drag up or down to resize map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-state-controls" aria-label="Map controls"><details id="map-types-menu" class="map-overlays-menu"><summary>Map Types</summary><div class="map-overlays-panel"><label class="map-overlay-toggle"><input type="radio" name="map-type" value="map"> <span>Street Map</span></label><label id="map-type-nautical-label" class="map-overlay-toggle"><input id="map-type-nautical" type="radio" name="map-type" value="nautical"> <span>Nautical Chart <small>(Zoom 9+)</small></span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="satellite"> <span>Satellite</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="hybrid"> <span>Hybrid</span></label></div></details><details id="map-overlays-menu" class="map-overlays-menu"><summary>Map Overlays</summary><div class="map-overlays-panel"><label id="map-marine-zone-control" class="map-overlay-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-smoke"> <span>Satellite smoke (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-sst"> <span>Sea Surface Temp (NOAA CoastWatch)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-chlorophyll-field"> <span>Chlorophyll Field (NOAA gap-filled 2 km · land-clipped)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-chlorophyll"> <span>Chlorophyll Contours (NOAA gap-filled 2 km)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-structure"> <span>Underwater Structure (NOAA bathymetry + names)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-fishing-reports"> <span>Fishing Reports (external data file)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-clouds"> <span>Satellite Cloud Cover (NOAA)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-radar"> <span>Weather radar (NOAA/NWS)</span></label><div class="map-overlay-note">Sea Surface Temp uses NOAA CoastWatch Geo-Polar Blended daily analysed sea-surface temperature imagery with the dataset's own native land/no-data transparency preserved. The fixed fishing-oriented color scale emphasizes temperature breaks and boundaries between cooler and warmer water. It is a multi-satellite global Level-4 analysis at about 5 km resolution; the shoreline edge is therefore coarse in bays and estuaries, and this layer is intended for regional/offshore temperature gradients rather than precise shoreline interpretation. Chlorophyll Field uses NOAA CoastWatch multi-sensor Level-4 DINEOF gap-filled daily chlorophyll-a at about 2 km as a restrained semi-transparent background raster so broad water-mass features remain visible. Chlorophyll Contours are a separate overlay derived from the same NOAA numeric grid and draw only three concentration contours: 0.2, 0.3, and 0.5 mg/m³. Use either layer independently or combine them with Sea Surface Temp and underwater structure. NOAA performs the cloud-gap filling upstream. Underwater Structure combines NOAA/NCEI ETOPO shaded relief with NOAA Marine Cadastre official undersea feature points. Fishing-relevant features such as seamounts, banks, ridges, hills, knolls, shoals, reefs, rises, plateaus, pinnacles, and escarpments are labeled locally for better contrast. It is intended for fishing-planning context, not navigation; smaller pinnacles may not appear in the global relief model. Fishing Reports is loaded from assets/fishing_reports.json so report updates do not require changing Go or map UI code. Exact positions are plotted only when the source provides them; fisherman shorthand such as “20×20” is shown as a derived approximate position with an uncertainty circle, and broad reports such as “Cordell to Monterey” are shown as regional zones rather than fake point coordinates. Satellite Cloud Cover uses NOAA/NESDIS GOES imagery rendered for the current map view; daylight areas appear natural-color-like and nighttime areas use infrared imagery. Radar uses Iowa State IEM's Web-Mercator CONUS NEXRAD N0Q WMS layer; a clear/transparent radar layer can simply mean no precipitation echoes are present.</div></div></details><details id="map-center-menu" class="map-overlays-menu"><summary>Center Map</summary><div class="map-overlays-panel map-center-panel"><button type="button" id="map-geolocate" class="map-center-action" title="Center the map on your device location without changing the selected location">My location</button><button type="button" id="map-nav-coordinates" class="map-center-action" title="Center the map on the latitude and longitude shown below">Latitude &amp; Longitude</button><button type="button" id="map-nav-selected" class="map-center-action" {{if not .MapHasRequest}}disabled{{end}}>Selected location</button><button type="button" id="map-nav-wind" class="map-center-action" {{if not .MapHasWind}}disabled{{end}}>Selected wind station</button><button type="button" id="map-nav-current" class="map-center-action" {{if not .MapHasCurrent}}disabled{{end}}>Selected currents station</button></div></details><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}" {{if not .MapHasRequest}}disabled{{end}}>Clear selected location &amp; candidates</button></div><div class="map-location-info-grid"><div class="map-coordinate-entry" aria-label="Map center coordinates"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLat}}" aria-label="Map center latitude"></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLon}}" aria-label="Map center longitude"></div><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div id="selected-location-weather" class="selected-location-weather" aria-live="polite"><div class="selected-location-weather-head"><strong>Local Conditions</strong><span id="selected-location-weather-updated" class="selected-location-weather-updated">{{if .SelectedWeatherUpdated}}Updated {{.SelectedWeatherUpdated}}{{end}}</span></div><div id="selected-location-weather-place" class="selected-location-weather-place">{{if .MapHasRequest}}{{if .SelectedWeatherLocation}}{{.SelectedWeatherLocation}}{{else}}Near selected location{{end}}{{else}}Select a location for local conditions{{end}}</div><div id="selected-location-weather-content" {{if not .MapHasRequest}}hidden{{end}}><div class="selected-location-weather-metrics"><span class="selected-location-weather-metric"><b>Air temp:</b> <span id="selected-location-weather-air">{{if .SelectedWeatherAirTemp}}{{.SelectedWeatherAirTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>High:</b> <span id="selected-location-weather-high">{{if .SelectedWeatherHighTemp}}{{.SelectedWeatherHighTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>Low:</b> <span id="selected-location-weather-low">{{if .SelectedWeatherLowTemp}}{{.SelectedWeatherLowTemp}}{{else}}—{{end}}</span></span></div><p id="selected-location-weather-forecast" class="selected-location-weather-forecast" {{if not .SelectedWeatherShortForecast}}hidden{{end}}>{{.SelectedWeatherShortForecast}}</p><p id="selected-location-weather-error" class="selected-location-weather-error" {{if not .SelectedWeatherError}}hidden{{end}}>{{.SelectedWeatherError}}</p><p class="selected-location-weather-note">NWS point forecast near the selected location. Air temperature is the current-hour forecast, not a direct observation.</p></div></div></div><div class="map-controls"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Select a location to find stations</span><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-weather-overlay-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div id="map-sst-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-structure-status" class="map-structure-status" hidden></div><div id="map-chl-field-legend" class="map-chl-field-legend" hidden><strong>Chlorophyll Field</strong><span class="map-chl-field-bar" aria-hidden="true"></span><span class="map-chl-field-scale"><span>0.1</span><span>0.2</span><span>0.3</span><span>0.5</span><span>0.7</span><span>1 mg/m³</span></span><span class="map-chl-field-note">Semi-transparent NOAA gap-filled chlorophyll background. Blue/cyan = lower chlorophyll / cleaner water; green/yellow = higher chlorophyll. Use this layer to see broad water-mass features such as pockets and eddies.</span></div><div id="map-chl-field-status" class="map-chl-field-status" hidden></div><div id="map-chl-legend" class="map-chl-legend" hidden><strong>Chlorophyll Contours</strong><span class="map-chl-contour-key"><i class="map-chl-contour-line c02"></i>0.2 mg/m³</span><span class="map-chl-contour-key"><i class="map-chl-contour-line c03"></i>0.3 mg/m³</span><span class="map-chl-contour-key"><i class="map-chl-contour-line c05"></i>0.5 mg/m³</span><span class="map-chl-note">Exact chlorophyll concentration contours from the NOAA numeric grid. The 0.3 mg/m³ line is emphasized as the primary clear-water transition reference; compare it with Sea Surface Temp breaks and offshore structure.</span></div><div id="map-chl-status" class="map-chl-status" hidden></div><div id="map-fishing-legend" class="map-fishing-legend" hidden><strong>Fishing Reports</strong><span class="map-fishing-key"><i class="map-fishing-dot albacore"></i>Albacore</span><span class="map-fishing-key"><i class="map-fishing-dot bluefin"></i>Bluefin</span><span class="map-fishing-key"><i class="map-fishing-zone-key"></i>Broad regional report</span><span>Dashed uncertainty circles = derived shorthand positions.</span></div><div id="map-fishing-status" class="map-fishing-status" hidden></div><div id="map-sst-legend" class="map-sst-legend" hidden><strong>Sea Surface Temp / Temp Breaks</strong><span class="map-sst-bar" aria-hidden="true"></span><span class="map-sst-scale"><span>35°F</span><span>45</span><span>55</span><span>65</span><span>75</span><span>85</span><span>95°F</span></span><span class="map-sst-note">Fixed 35–95°F NOAA sea-surface temperature scale in 1°F bands. The wider fixed range preserves headroom for warm tropical/subtropical water and strong El Niño conditions while still showing regional temperature breaks; values below/above the range saturate at the end colors. NOAA Geo-Polar Blended daily sea-surface temperature, about 5 km resolution. The server reprojects the latitude/longitude raster into Leaflet Web Mercator before display, while preserving CoastWatch land/no-data transparency. Source-grid detail remains coarse near complex shorelines, so use the layer for regional/offshore gradients rather than shoreline-scale temperature.</span></div><div class="map-layer-note">Drag the handle directly below the map to make the map taller or shorter. Keyboard users can focus the handle and use ↑/↓ (Shift for larger steps).</div><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
 {{if .WindError}}<section class="card full error-card"><h2>Wind station selection unavailable</h2><p class="error-message">{{.WindError}}</p><p class="error-help">The page is still available so you can inspect the request and nearby station diagnostics. Try nearby coordinates or an explicit NDBC station ID.</p></section>{{end}}
 <section class="card full wind-card"><div class="wind-card-head"><h2>Wind</h2><label class="wind-unit-control" for="wind-unit-select">Wind speed<select id="wind-unit-select"><option value="kts" {{if eq .WindUnit "kts"}}selected{{end}}>Knots</option><option value="mph" {{if eq .WindUnit "mph"}}selected{{end}}>MPH</option></select></label></div>
 <div class="metrics">
@@ -6814,8 +7090,9 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 
   function sstOverlayURL(bounds) {
     var mapSize = map.getSize();
-    // ERDDAP renders this raster on demand. Keep the request modest and avoid
-    // Retina/device-pixel doubling so the overlay loads reliably.
+    // ERDDAP renders a latitude/longitude raster on demand; the server then
+    // reprojects its scanlines into Leaflet/Web-Mercator geometry. Keep the
+    // request modest and avoid Retina/device-pixel doubling so it loads reliably.
     var width = Math.max(256, Math.min(1200, Math.round(mapSize.x)));
     var height = Math.max(256, Math.min(900, Math.round(mapSize.y)));
     var params = new URLSearchParams();
@@ -6829,28 +7106,56 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     return "/sst-overlay?" + params.toString();
   }
 
+  function sstCanonicalViewport(bounds) {
+    var centerLng = map.getCenter().lng;
+    var world = Math.floor((centerLng + 180) / 360);
+    var worldWest = -180 + 360 * world;
+    var worldEast = 180 + 360 * world;
+
+    var displayWest = Math.max(bounds.getWest(), worldWest);
+    var displayEast = Math.min(bounds.getEast(), worldEast);
+    if (!(displayEast > displayWest)) return null;
+
+    var sourceWest = displayWest - 360 * world;
+    var sourceEast = displayEast - 360 * world;
+    sourceWest = Math.max(-180, Math.min(180, sourceWest));
+    sourceEast = Math.max(-180, Math.min(180, sourceEast));
+    if (!(sourceEast > sourceWest)) return null;
+
+    return {
+      sourceBounds: L.latLngBounds(
+        [bounds.getSouth(), sourceWest],
+        [bounds.getNorth(), sourceEast]
+      ),
+      displayBounds: L.latLngBounds(
+        [bounds.getSouth(), displayWest],
+        [bounds.getNorth(), displayEast]
+      ),
+      clipped:
+        Math.abs(displayWest - bounds.getWest()) > 1e-9 ||
+        Math.abs(displayEast - bounds.getEast()) > 1e-9
+    };
+  }
+
   function refreshSSTOverlay() {
     if (!mapState.sstOverlayVisible || !sstMetadataLoaded) return;
 
     var bounds = map.getBounds();
-    if (bounds.getWest() < -180 || bounds.getEast() > 180) {
-      setSSTStatus(
-        "Satellite SST is unavailable while the map view crosses the international date line.",
-        true
-      );
+    var viewport = sstCanonicalViewport(bounds);
+    if (!viewport) {
+      setSSTLegendVisible(false);
+      setSSTStatus("Satellite SST is unavailable for the current map bounds.", true);
       return;
     }
 
     var requestSerial = ++sstRequestSerial;
-    var overlayURL = sstOverlayURL(bounds);
+    var overlayURL = sstOverlayURL(viewport.sourceBounds);
 
     setSSTLegendVisible(false);
-    setSSTStatus("Loading NOAA CoastWatch SST image…", false);
+    setSSTStatus("Loading NOAA CoastWatch SST…", false);
 
     var sstUpstreamLabel = "";
-    fetch(overlayURL, {
-      headers: {"Accept": "image/png"}
-    })
+    fetch(overlayURL, {headers: {"Accept": "image/png"}})
       .then(function(response) {
         sstUpstreamLabel = String(response.headers.get("X-SST-Upstream") || "").trim();
         var contentType = String(response.headers.get("Content-Type") || "").toLowerCase();
@@ -6878,8 +7183,8 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
         if (!mapState.sstOverlayVisible || requestSerial !== sstRequestSerial) return;
 
         var objectURL = URL.createObjectURL(blob);
-        var nextLayer = L.imageOverlay(objectURL, bounds, {
-          opacity: 0.72,
+        var nextLayer = L.imageOverlay(objectURL, viewport.displayBounds, {
+          opacity: 0.50,
           pane: "sstOverlayPane",
           interactive: false,
           attribution: "NOAA CoastWatch Geo-Polar Blended SST"
@@ -6896,7 +7201,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
           var previousObjectURL = sstObjectURL;
           sstLayer = nextLayer;
           sstObjectURL = objectURL;
-          sstLayer.bringToFront();
+          if (sstLayer.bringToFront) sstLayer.bringToFront();
 
           if (previousLayer && previousLayer !== sstLayer && map.hasLayer(previousLayer)) {
             map.removeLayer(previousLayer);
@@ -6910,7 +7215,12 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
             ? "latest available daily field"
             : "latest daily field: " + formatSSTDatasetTime(sstLatestTime);
           var upstreamSuffix = sstUpstreamLabel ? " · via " + sstUpstreamLabel : "";
-          setSSTStatus("NOAA CoastWatch Geo-Polar SST · fixed 45–75°F temp-break scale · " + sstTimeLabel + upstreamSuffix + " · IPv4", false);
+          setSSTStatus(
+            "NOAA CoastWatch Geo-Polar SST · Web-Mercator reprojected · native land/no-data transparency · fixed 35–95°F temp-break scale · " +
+            sstTimeLabel + upstreamSuffix + " · IPv4" +
+            (viewport.clipped ? " · viewport clipped at dateline" : ""),
+            false
+          );
 
           if (cloudLayer && mapState.cloudOverlayVisible && map.hasLayer(cloudLayer)) cloudLayer.bringToFront();
           if (radarLayer && mapState.radarOverlayVisible && map.hasLayer(radarLayer)) radarLayer.bringToFront();
@@ -6925,7 +7235,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
         });
 
         nextLayer.addTo(map);
-        nextLayer.bringToFront();
+        if (nextLayer.bringToFront) nextLayer.bringToFront();
       })
       .catch(function(err) {
         if (requestSerial !== sstRequestSerial || !mapState.sstOverlayVisible) return;
