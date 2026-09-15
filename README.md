@@ -475,7 +475,7 @@ A future refactor should be treated as a separate behavior-preserving project af
 - A map notice explains that Nautical Chart is available at Zoom 9+.
 - Zooming back to Zoom 9 or closer automatically restores the Nautical Chart.
 - Legitimate inland/no-chart blank areas at supported nautical zoom levels remain unchanged.
-- Advanced runtime identity to **Version 1.9.2 · Build v137**.
+- Advanced runtime identity to **Version 1.9.2 · Build v172**.
 
 ## v136 / 1.9.2 changes
 
@@ -502,18 +502,19 @@ This section is the authoritative development handoff for this repository. A new
 <!-- PROJECT-STATE:BEGIN -->
 
 - Public app version: **1.9.2**
-- Generated source build: **v137**
-- Next generated source build: **v138**
+- Generated source build: **v172**
+- Next generated source build: **v173**
 - Authoritative repository: **https://github.com/richard-mauri/pittsburg-saildata**
 - Authoritative branch: **main**
-- Release status: **v137 / 1.9.2 current development baseline**
+- Release status: **v172 / 1.9.3 release baseline**
 
 ### Managed-file checkpoints
 
 | Repository file | SHA-256 |
 | --- | --- |
-| `main.go` | `3778cc5a24397a60c7997b406c97cd3f48b5ecc4dbce4103d0d63054ff12ced2` |
+| `main.go` | `8d3330b490335c985fadf7ffef3970b496974839da1e0d47a45777835c112f13` |
 | `assets/yogiisms.txt` | `4ebf00217e194ee26a8e8fe38237b298800b36ead0c64accdbb82f623c142371` |
+| `assets/fishing_reports.json` | `02b01de77784153157c6a4a60d6ad21e286f7c191bbe204fed605659ea15ca5e` |
 | `check-project-state.sh` | `85fa5062e2ae4509174b6843ebc0066f4a94e2f2e90001230ca74c07aeb500dc` |
 
 <!-- PROJECT-STATE:END -->
@@ -528,7 +529,7 @@ The generated build number is immutable. Any change to generated Go source bytes
 
 The public application version and generated build are separate identities. The current runtime identity is expected to render as:
 
-`Version 1.9.2 · Build v137`
+`Version 1.9.3 · Build v172`
 
 For future public pushes, increment the patch/micro version (`1.9.2` → `1.9.3` → `1.9.4`, and so on). Existing Git release tags are immutable: never reuse or move an existing version tag.
 
@@ -538,6 +539,7 @@ For future public pushes, increment the patch/micro version (`1.9.2` → `1.9.3`
 
 - SHA-256 of `main.go`
 - SHA-256 of `assets/yogiisms.txt`
+- SHA-256 of `assets/fishing_reports.json`
 - SHA-256 of `check-project-state.sh`
 - `appVersion` in `main.go` against the README public version
 - `buildVersion` in `main.go` against the README generated build
@@ -562,7 +564,7 @@ Before a release commit:
 
 ```bash
 git status
-git diff -- main.go README.md check-project-state.sh assets/yogiisms.txt
+git diff -- main.go README.md check-project-state.sh assets/yogiisms.txt assets/fishing_reports.json
 ```
 
 Stage only intended tracked changes. There is no longer a local `PROJECT_STATE.md` to maintain.
@@ -589,11 +591,15 @@ Map controls place **Map Types**, **Map Overlays**, and **Center Map** on one ro
 
 NOAA Nautical Chart is considered practical at **Zoom 9+**. If Nautical is the preferred basemap and the user zooms below 9, Street Map is shown temporarily with a notice; Nautical automatically returns at Zoom 9+. Legitimate inland/no-chart blank areas at supported zooms are left unchanged.
 
-Map overlays include NWS forecast zone, NOAA HMS qualitative smoke, NOAA/NESDIS cloud cover, and NEXRAD radar. HMS smoke uses the current warm yellow → amber → burnt-orange light/medium/heavy palette. Smoke is qualitative satellite analysis, not AQI or measured PM2.5.
+Map overlays include NWS forecast zone, NOAA HMS qualitative smoke, **NOAA CoastWatch Sea Surface Temp**, NOAA/NESDIS cloud cover, and NEXRAD radar. Sea Surface Temp uses the NOAA ACSPO daily global 0.02° near-real-time product (`noaacwLEOACSPOSSTL3SnrtCDaily:sea_surface_temperature`) through ERDDAP WMS; the overlay requests the latest available dataset time from `/sst-info`, shows the product timestamp, and includes a °F legend corresponding to NOAA's 0–35°C display scale. Satellite/cloud/coastal gaps are expected. HMS smoke uses the current warm yellow → amber → burnt-orange light/medium/heavy palette. Smoke is qualitative satellite analysis, not AQI or measured PM2.5.
 
 The Welcome page reflects the current Conditions Now / Planning and Details workflow and retains the randomized Yogi Berra quotation. `assets/yogiisms.txt` currently contains the expanded 59-line quote set.
 
 Non-HTML compatibility remains intentional: plain-text reports, compact text/JSON, Full Report Details, and `/voice` retain the established Bottom Line interfaces even though the browser heading is Conditions Now.
+
+### v138 SST overlay
+
+v138 adds **Sea Surface Temp (NOAA CoastWatch)** to Map Overlays. It uses NOAA/NESDIS/STAR ACSPO daily near-real-time sea-surface temperature through CoastWatch ERDDAP WMS. The server-side `/sst-info` endpoint reads the latest `time_coverage_end` from NOAA metadata so the browser requests a specific latest daily field and can display its timestamp. The overlay is intended primarily for coastal/offshore ocean context such as fishing; clouds, shorelines, and inland areas can contain gaps.
 
 ### New-chat continuation instruction
 
@@ -601,5 +607,304 @@ When migrating development to a new conversation, provide or point the assistant
 
 > Read the **Development State and Chat Handoff** section of README.md, treat GitHub `main` as authoritative, and continue from the recorded generated build. Generate complete `main-updated-vNN.go` candidates, never overwrite `main.go`, run `gofmt`, and provide SHA-256 hashes and download links.
 
-The next source candidate should therefore be **v138** unless a newer local candidate is supplied.
+The next source candidate should therefore be **v173** unless a newer local candidate is supplied.
 
+
+
+### SST implementation note
+
+Sea Surface Temp uses NOAA CoastWatch MUR daily analysed sea-surface temperature imagery. Because the NOAA ERDDAP WMS does not support Leaflet's native Web-Mercator tile CRS, the app requests an EPSG:4326 PNG for the current map bounds through `/sst-overlay` and displays it as a georeferenced image overlay. SST rendering does not depend on `time_coverage_end`; the app uses ERDDAP `time=current` as a fallback and derives the displayed latest timestamp from the time-axis `actual_range` when available. Clouds and coastal/inland gaps are expected.
+
+### SST WMS compatibility
+
+Build v172 changes the NOAA CoastWatch SST proxy request to WMS 1.3.0 with `CRS=EPSG:4326`. For WMS 1.3.0, EPSG:4326 uses latitude/longitude axis order, so the requested bounding box is sent as `south,west,north,east`. This replaces the v140 WMS 1.1.1 `SRS=EPSG:4326` request used during SST troubleshooting.
+
+### SST loading reliability
+
+Build v172 keeps the v141 NOAA WMS 1.3.0 / `CRS=EPSG:4326` request and improves the image-loading path. The SST raster request now uses the map's CSS pixel dimensions with a maximum of 1200×900 instead of Retina/device-pixel doubling, the NOAA request timeout is 45 seconds, and the browser no longer preloads the same SST image before Leaflet requests it. Leaflet makes the single image request directly, while the status line remains `Loading NOAA CoastWatch SST image…` until the image either loads or reports an error.
+
+### SST product change
+
+Build v172 keeps the v142 WMS 1.3.0 proxy and single-image loading path, but switches the SST source to NOAA CoastWatch's MUR SST dataset, `noaacwBLENDEDsstDNDaily`, variable `analysed_sst`. NOAA's ERDDAP WMS documentation uses this exact dataset/layer in its working GetMap examples. The Geo-Polar product provides a daily global Level-4 blended SST analysis at about 5 km resolution and is served from NOAA CoastWatch Central rather than the PFEL host that was timing out from the local Go process.
+
+### SST diagnostic fetch path
+
+Build v172 keeps the MUR SST product and WMS 1.3.0 proxy, but changes the browser loading path to make upstream failures visible. The browser now `fetch()`es `/sst-overlay` first. If the proxy returns an error, the actual response text is shown in the SST status line instead of collapsing to a generic image-load failure. If the proxy returns a PNG successfully, the response is converted to a blob URL and displayed through Leaflet. Blob URLs are revoked when replaced or when the SST overlay is disabled.
+
+### SST transport fallback
+
+Build v172 keeps the MUR SST WMS request and v144 diagnostics, and hardens the Go HTTP transport for NOAA CoastWatch. The SST proxy now uses a cloned `http.Transport` with a 30-second TLS handshake timeout, a 45-second response-header timeout, and a 75-second overall request timeout. It first tries the standard CoastWatch ERDDAP endpoint and, on a transport/read failure, retries once against NOAA's `/wcn/erddap/` endpoint. Successful responses expose the endpoint label in `X-SST-Upstream`, and the browser includes that source in the SST status line.
+
+### SST IPv4 transport workaround
+
+Build v172 keeps the MUR SST product, WMS 1.3.0 request, endpoint fallback, and browser diagnostics from v145. The v145 diagnostics identified the actual transport failure: the local Go process resolved `coastwatch.pfeg.noaa.gov` to IPv6 and the IPv6 route timed out before the HTTPS request completed. The SST-only HTTP transport now forces `tcp4` through a dedicated `net.Dialer`; other application networking is unchanged. A successful SST status line includes `IPv4` so the workaround is visible during testing.
+
+### SST source moved to CoastWatch Central
+
+Build v172 changes the SST upstream hostname and product after repeated TLS failures to `coastwatch.pfeg.noaa.gov`. The overlay now uses NOAA CoastWatch Central at `coastwatch.noaa.gov`, dataset `noaacwBLENDEDsstDNDaily`, variable `analysed_sst`. This NOAA Geo-Polar Blended Day+Night product is a daily global Level-4 SST analysis at about 5 km resolution and is listed by NOAA as near-real-time. The existing WMS 1.3.0, EPSG:4326, browser fetch diagnostics, blob-image overlay, and SST-only IPv4 transport remain in place. The old PFEL/WCN SST retry path is removed so a known-bad host does not add long delays.
+
+### SST fishing-view refinements
+
+Build v172 keeps the working CoastWatch Central Geo-Polar Blended SST source from v147 and adds two UI refinements for practical offshore use. Sea Surface Temp is now treated as a Zoom 5+ overlay; below Zoom 5 the checkbox remains selected but the raster is removed and the status line tells the user to zoom in. Returning to Zoom 5+ automatically reloads the SST field. The old broad 32–95°F legend has been replaced by a qualitative Cooler → Warmer legend because the WMS image's color scaling is controlled by NOAA; this avoids implying exact temperature/color breakpoints that the app is not setting itself.
+
+### SST temp-break presentation
+
+Build v172 removes the hard SST minimum-zoom restriction. The SST overlay can be used at any zoom level; zoom level is now purely a usage choice.
+
+The SST image path now uses NOAA CoastWatch ERDDAP `griddap` transparent PNG output instead of the WMS color defaults so the application can enforce a stable fishing-oriented temperature scale. The overlay uses `noaacwBLENDEDsstDNDaily:analysed_sst` with a fixed Rainbow palette from 45°F through 75°F, divided into approximately 1°F discrete bands. The on-page legend shows 45, 50, 55, 60, 65, 70, and 75°F. This is intended to make temperature breaks and boundaries between cooler and warmer water easier to identify and to keep the same color meaning as the map is panned or zoomed. Values below 45°F or above 75°F saturate at the palette endpoints.
+
+### Step 2 — underwater structure overlay
+
+Build v172 begins roadmap Step 2 while keeping the Step 1 SST-break behavior intact.
+
+A new `Underwater Structure (NOAA bathymetry + names)` map overlay combines two NOAA sources for the current map view:
+
+- NOAA/NCEI ETOPO shaded relief for broad seafloor shape and underwater topography.
+- NOAA Marine Cadastre Undersea Feature Place Names for official named banks, seamounts, ridges, canyons, and related features.
+
+The bathymetry is rendered below SST so temperature breaks remain visible. Official undersea names render above SST so the user can correlate a temp break with a named structure. The overlay refreshes after map movement, has no artificial zoom restriction, and is explicitly labeled as a fishing-planning aid rather than a navigation product.
+
+ETOPO is a global relief model, so small fishing pinnacles may not be resolved. Step 2 can later add higher-resolution NOAA survey layers and a small curated fishing-feature alias registry for local names such as `the Guide` and `the 601` after their coordinates are verified.
+
+### Step 2 label readability refinement
+
+Build v172 keeps the v150 NOAA/NCEI ETOPO shaded-relief layer but replaces the NOAA server-rendered undersea-name image with locally styled vector labels from the NOAA Marine Cadastre `UnderseaFeaturePlaceNames` feature query service.
+
+The app requests official point features for the current map bounds and displays only fishing-relevant structural names whose official names identify seamounts, banks, ridges, hills, knolls, shoals, reefs, rises, plateaus, pinnacles, or escarpments. Canyons and other lower-priority names are suppressed to reduce clutter.
+
+Labels are rendered by Leaflet with larger cream/white text, a strong dark halo, and a small gold feature dot so they remain readable over blue bathymetry and can stay above the SST overlay. The status line reports how many fishing-relevant official features are currently shown. This preserves official NOAA naming—including features such as Guide Seamount—while avoiding the small blue-on-blue labels baked into the NOAA rendered map image.
+
+### Step 3 — chlorophyll / water-clarity overlay
+
+Build v172 implements roadmap Step 3 while preserving the completed Step 1 SST-break and Step 2 underwater-structure behavior.
+
+A new `Chlorophyll / Water Clarity (NOAA CoastWatch)` overlay uses the NOAA CoastWatch VIIRS multi-sensor daily chlorophyll-a product:
+
+- Dataset: `noaacwNPPN20VIIRSchlociDaily`
+- Variable: `chl_oci`
+- Product: NOAA S-NPP + NOAA-20 VIIRS merged daily chlorophyll-a
+- Spatial resolution: about 4 km
+- Units: mg/m³ chlorophyll-a
+
+The overlay uses ERDDAP `griddap` transparent PNG output with a fixed logarithmic 0.05–5 mg/m³ color scale. The fixed scale keeps the same colors meaningful between map views. Lower chlorophyll values represent relatively clearer/blue offshore water; higher values indicate greener, more phytoplankton-rich water. The legend is marked at 0.05, 0.1, 0.2, 0.5, 1, 2, and 5 mg/m³ so the user can visually compare water-clarity boundaries with Sea Surface Temp breaks and underwater structure.
+
+The chlorophyll raster is semi-transparent and sits above SST but below the locally styled underwater feature labels. As with SST, the CoastWatch request is proxied through the Go server and forced over IPv4 to avoid the previously observed local IPv6 path problem. The overlay refreshes after map movement and has no artificial zoom restriction.
+
+This layer is a fishing-planning indicator, not a direct optical-water-clarity measurement. Clouds and atmospheric conditions can create missing satellite ocean-color coverage, so gaps should not be interpreted as clear or dirty water.
+
+### Step 3 refinement — clear-water edge emphasis
+
+Build v172 refines the Step 3 chlorophyll presentation after the first 4 km global product proved visually too dominant and blocky for the intended fishing workflow.
+
+The underlying NOAA CoastWatch daily chlorophyll source is unchanged in this build, but the rendering is deliberately less intrusive:
+
+- Overlay opacity is reduced from 0.58 to 0.34 so Sea Surface Temp breaks, bathymetry, and feature labels remain readable.
+- The fixed chlorophyll range is narrowed from 0.05–5 mg/m³ to 0.05–2 mg/m³ on a logarithmic scale, putting more contrast into the cleaner-water range fishermen care about.
+- UI wording now emphasizes `Clear-Water Edge` rather than presenting chlorophyll as a full-field water-clarity map.
+- The legend is simplified to 0.05, 0.1, 0.2, 0.5, 1, and 2 mg/m³ and explicitly tells the user to look for the transition zone where clearer and greener water meet.
+
+NOAA documents higher-resolution VIIRS sector products at about 750 m, including daily CoastWatch sector chlorophyll products. Those are the preferred future Step 3 upgrade once a reliable California-sector delivery path is wired into this app. Until then, the 4 km global product remains the working near-real-time source.
+
+### Step 3 high-resolution chlorophyll refinement
+
+Build v172 replaces the coarse ~4 km global chlorophyll source with NOAA CoastWatch's near-real-time S-NPP VIIRS 750 m sector product for the eastern Pacific:
+
+- Dataset: `noaacwNPPVIIRSchlaSectorUYDaily`
+- Variable: `chlor_a`
+- Nominal resolution: 750 m
+- Sector UY bounds: approximately 0.11°S to 44.88°N and 180.03°W to 119.97°W
+- California and the offshore fishing grounds discussed in this project are within this sector.
+
+The browser clips chlorophyll requests to the UY sector and displays the raster only over the actual intersecting bounds, avoiding geographic stretching when the map view extends inland east of the sector. Areas outside sector UY are intentionally left unpainted rather than falling back to the coarse 4 km source.
+
+The Step 3 clear-water-edge presentation from v153 is retained: low opacity and a fixed logarithmic 0.05–2 mg/m³ scale so SST, underwater structure, and official feature labels remain readable. The purpose is to expose finer water-color boundaries that can be compared with Sea Surface Temp breaks and offshore structure.
+
+### Step 3 high-resolution cloud-gap fill
+
+Build v172 keeps the NOAA CoastWatch S-NPP VIIRS 750 m Sector UY chlorophyll source from v154, but changes the server-side rendering strategy to reduce the sparse "colored islands" caused by cloud masking.
+
+Instead of showing only the newest daily scene, the Go server requests the five most recent daily scenes in parallel and builds a recency-prioritized mosaic. For each pixel, the newest valid chlorophyll value is used; if that pixel is transparent/masked in the newest scene, the server fills it from the next-most-recent scene, continuing through up to five scenes. This is intentionally not an average or temporal smoothing operation: it is a latest-valid-pixel cloud-gap fill.
+
+The fixed logarithmic 0.05–2 mg/m³ clear-water scale, low overlay opacity, Sector UY clipping, SST-break layer, and underwater-structure labels remain unchanged. The goal is to preserve 750 m spatial detail while improving spatial continuity enough to make clear-water boundaries useful for fishing planning.
+
+ERDDAP supports `last` and `last-n` time index selectors, which this build uses for the five recent daily scenes.
+
+### Step 3 native NOAA gap-filled chlorophyll
+
+Build v172 abandons the failed app-generated 5-scene mosaic from v155 and switches to NOAA's native DINEOF gap-filled chlorophyll analysis:
+
+- Dataset: `noaacwNPPN20S3ASCIDINEOF2kmDaily`
+- Variable: `chlor_a`
+- Product: NOAA multi-sensor Level-4 DINEOF chlorophyll-a
+- Sensors: S-NPP VIIRS, NOAA-20 VIIRS, and Sentinel-3A OLCI
+- Nominal resolution: about 2 km
+- Coverage: global, daily, gap-filled upstream by NOAA
+
+The app again requests a single transparent PNG from CoastWatch ERDDAP. NOAA performs the cloud-gap filling upstream, which removes the fragile `last-n` compositing logic and should provide a continuous field without reverting all the way to the coarse 4 km daily product.
+
+The Step 3 fishing-oriented presentation remains: low overlay opacity and a fixed logarithmic 0.05–2 mg/m³ scale so clear-water boundaries can be compared with Sea Surface Temp breaks and underwater structure. This dataset is global, so the Sector UY clipping logic is removed.
+
+### Step 3 diagnostic repair
+
+Build v172 repairs a source-generation regression introduced during the v155/v156 chlorophyll experiments. Those candidates no longer contained dedicated `/chlorophyll-info` and `/chlorophyll-overlay` HTTP handlers, which explains why the browser checkbox could remain selected while no chlorophyll layer or chlorophyll attribution appeared.
+
+v157 restores the chlorophyll handlers while preserving the working SST and underwater-structure routes. It uses the NOAA native DINEOF gap-filled dataset `noaacwNPPN20S3ASCIDINEOF2kmDaily`, variable `chlor_a`, and always asks ERDDAP for the actual last indexed field with `[last]`.
+
+The metadata endpoint now prefers the time-axis `actual_range` endpoint when reporting the latest data time. The overlay proxy also exposes the served data time through `X-Chlorophyll-Time` and returns much more of NOAA's upstream error text, including the exact upstream request URL, when a PNG request fails. The browser surfaces that diagnostic text directly. This build is intentionally diagnostic: do not change chlorophyll products again until any remaining failure is observed in the returned error message.
+
+### Step 3 presentation cleanup
+
+Build v172 keeps the working NOAA native DINEOF gap-filled 2 km chlorophyll source and changes only its presentation.
+
+The chlorophyll raster now uses ERDDAP's calmer `Ocean` palette instead of `Rainbow`, while retaining the fixed logarithmic 0.05–2 mg/m³ range. Overlay opacity is reduced from 0.34 to 0.26 so Sea Surface Temp breaks, bathymetry, undersea-feature labels, and the basemap remain visually dominant.
+
+The on-page legend is also changed to a muted clean-water palette: deep blue through blue/cyan, subdued green, yellow-green, and muted brown. The design goal is to make the clear-water transition readable without turning the map into a multicolor heatmap.
+
+### Step 3 fishing-contrast tuning
+
+Build v172 keeps the working NOAA native DINEOF gap-filled 2 km chlorophyll source and retunes only the visual mapping for offshore fishing.
+
+The chlorophyll overlay opacity is increased from 0.26 to 0.38. The map rendering range is tightened from 0.05–2 mg/m³ to 0.1–1 mg/m³ on a logarithmic scale, concentrating visual contrast in the offshore transition range instead of letting very high nearshore chlorophyll dominate.
+
+The legend now emphasizes a stronger deep-blue → cyan → green → yellow progression with marks at 0.1, 0.2, 0.3, 0.5, 0.7, and 1 mg/m³. The goal is to make the cleaner-to-greener boundary obvious enough to compare with Sea Surface Temp breaks and underwater structure without returning to the noisy full-rainbow appearance.
+
+### SST regression repair
+
+Build v172 fixes an SST rendering regression introduced while adding the chlorophyll overlay-bounds logic. `refreshSSTOverlay()` was accidentally changed to call `L.imageOverlay()` with `overlayBounds`, a variable that exists in the chlorophyll path but not in the SST path. That JavaScript reference error occurred after the SST PNG was fetched, so the SST checkbox could remain selected while no SST raster or attribution appeared.
+
+The SST image overlay now correctly uses its own current map `bounds` again. Chlorophyll continues to use its separate `overlayBounds` behavior unchanged. No SST product, palette, transport, or Step 1 temp-break behavior is otherwise changed.
+
+### Step 3 redesign — chlorophyll as edge lines
+
+Build v172 keeps SST as the colored raster and stops displaying chlorophyll as a second filled color raster.
+
+The app still retrieves the NOAA CoastWatch native DINEOF gap-filled 2 km chlorophyll field, but the browser now converts that image into a transparent strong-gradient edge overlay. An adaptive threshold emphasizes roughly the strongest local chlorophyll gradients in the current view. The rendered line uses a dark halo with a bright center so it remains visible over both warm and cool SST colors.
+
+This avoids hue mixing between SST and chlorophyll. The chlorophyll layer now answers a narrower fishing question: where are the stronger cleaner-to-greener water boundaries? It is explicitly an edge detector, not an exact concentration contour. SST temperature colors and the underwater-structure labels remain unchanged.
+
+### Step 3 redesign — numeric chlorophyll contours
+
+Build v172 replaces the v161 image-gradient edge detector with concentration contours derived from the NOAA numeric chlorophyll grid.
+
+The `/chlorophyll-overlay` route now requests the latest `chlor_a` grid from `noaacwNPPN20S3ASCIDINEOF2kmDaily` as ERDDAP JSON, downsamples large map extents with ERDDAP stride, reconstructs the latitude/longitude grid, and runs server-side marching-squares contour extraction.
+
+Only three chlorophyll contours are drawn:
+
+- 0.2 mg/m³ — cyan
+- 0.3 mg/m³ — emphasized cream/white primary clear-water transition reference
+- 0.5 mg/m³ — gold
+
+Each line has a dark halo so it remains readable over SST colors. This avoids the spaghetti-like local-gradient outlines from v161 and makes the chlorophyll layer an exact concentration-boundary overlay rather than an image edge detector. Sea Surface Temp remains the colored raster and underwater structure remains unchanged.
+
+### Step 3 contour compile fix
+
+Build v172 fixes the Go type errors in the v162 marching-squares contour renderer. The contour endpoints are floating-point pixel coordinates, but the `drawLine` helper was mistakenly declared with integer endpoint parameters. That caused the reported `math.Abs`, `math.Round`, arithmetic, and `crossings[].x/y` compile errors.
+
+`drawLine` now accepts `float64` endpoints and rounds only when plotting pixels. No contour levels, chlorophyll data source, SST behavior, or underwater-structure behavior are changed.
+
+### Step 3 split chlorophyll presentation
+
+Build v172 separates chlorophyll into two independent overlays using the same NOAA CoastWatch DINEOF gap-filled 2 km source.
+
+`Chlorophyll Field` restores a restrained semi-transparent background raster so broad water-mass features—such as low-chlorophyll pockets, eddies, and clean-water intrusions—remain visually obvious. It uses the fixed 0.1–1 mg/m³ logarithmic display range and sits below the contour layer.
+
+`Chlorophyll Contours` remains a separate overlay and continues to draw exact 0.2, 0.3, and 0.5 mg/m³ concentration contours from the NOAA numeric grid. The two layers can be used independently or together. Sea Surface Temp remains a separate colored raster, and underwater structure remains unchanged.
+
+This split is intended to preserve both kinds of information the prior experiments exposed: the broad chlorophyll background pattern and the sharper cleaner-to-greener boundary references.
+
+### Fishing Reports overlay prototype
+
+Build v172 adds a single `Fishing Reports (recent tuna snapshot)` overlay. It is intentionally one overlay rather than separate species/confidence layers.
+
+The prototype contains recent public Northern/Central California tuna reports:
+
+- Four Fort Bragg albacore reports from September 1, 3, 4, and 5, 2026.
+- One broad bluefin regional report described as `Cordell to Monterey` from August 17, 2026.
+
+The Fort Bragg reports use local shorthand such as `27×35`, `25×25`, `24×37`, and `20×20`. The app converts those to approximate degree-minute positions and always draws a dashed uncertainty circle so the map does not imply survey-grade coordinates. The report popup preserves the original location wording, catch summary, size notes, provenance, and a source link.
+
+The Cordell-to-Monterey bluefin item is rendered as a dashed broad regional polygon, not a point, because the source did not provide an exact fishing coordinate.
+
+This is a curated snapshot, not yet a live scraper or automated fishing-report feed. The intent is to validate the map model first: one Fishing Reports overlay containing exact, derived, and broad-regional report geometries with explicit confidence.
+
+### Fishing Reports external data file
+
+Build v172 removes the hard-coded fishing report arrays from `main.go`.
+
+The map now loads `GET /fishing-reports`, and that server route reads and validates `assets/fishing_reports.json`. The JSON file is therefore the update point for future fishing reports; adding, removing, or refreshing report records no longer requires changing the Go source or JavaScript map implementation.
+
+The initial `schema_version` is `1`. Each report carries a `position_type` such as `derived_point`, `exact_point`, or `region`, plus the same provenance/confidence fields already used by the v165 prototype. Derived points retain `uncertaintyNM`; regional reports retain a polygon. The browser renders whatever valid reports are present in the file.
+
+For this candidate, copy `fishing_reports-updated-v166.json` to `assets/fishing_reports.json` before running the checker. The fishing report asset is now included in the README managed-file checkpoint table, so `check-project-state.sh` validates its SHA-256 automatically without any checker-script change.
+
+This is still a manually curated feed. A future ingestion job can update `assets/fishing_reports.json` or generate the same schema without changing the map layer.
+
+### Underwater structure label decluttering
+
+Build v172 keeps the NOAA/NCEI bathymetry relief visible at all zoom levels but adds strict controls to undersea feature names.
+
+Feature names are now hidden below Zoom 6. At wider planning scales the label count is capped progressively: 10 at Zoom 6, 24 at Zoom 7, 45 at Zoom 8, 65 at Zoom 9, and 85 at Zoom 10+.
+
+Fishing-relevant features are prioritized before labels are placed. Seamounts, banks, ridges, and plateaus receive highest priority; rises and escarpments follow; secondary classes such as knolls, shoals, reefs, pinnacles, and hills are lower priority.
+
+The browser also performs screen-space collision suppression using an estimated label footprint. When two candidate names would overlap, the lower-priority/later candidate is skipped. Within the same priority class, features nearer the current map center are considered first. The structure status line reports how many labels were shown versus how many eligible features were present in the viewport.
+
+### Offshore Trip Planning — first operational panel
+
+Build v172 adds an `Offshore Trip Planning` panel tied to the selected ★ map destination.
+
+The new `/offshore-trip` endpoint combines two sources for the selected lat/lon:
+
+- the existing NWS marine-zone forecast and active alerts for that point;
+- the nearest usable NDBC realtime station found within 180 nmi, preferring the closest station among the first 12 candidates that actually returns usable realtime wind or wave data.
+
+NDBC realtime standard-meteorological data are parsed for sustained wind, gust, significant wave height, dominant wave period, average period, mean wave direction, and observation time. Wind speed is converted from m/s to knots and significant wave height from meters to feet.
+
+The browser panel shows observed wind, gust, significant wave height, dominant period, mean wave direction, the buoy/station name and distance from the selected destination, up to four NWS marine forecast periods, and any NWS alerts. It also surfaces explicit watch items when observed conditions cross practical planning thresholds: sustained wind at 15/20 kt, gusts at 25 kt, significant seas at 6/8 ft, or at least 4 ft of significant wave height with a dominant period of 8 seconds or less.
+
+These watch items are deliberately not presented as a magic go/no-go score. They are planning flags only; the actual observed values and official NWS forecast text remain visible.
+
+This first pass evaluates the selected offshore destination, not the entire transit corridor. A later enhancement can add launch point, route distance, multiple forecast zones/buoys along the route, and outbound-versus-return timing.
+
+### Offshore Trip Planning startup fix and Sea Surface Temp terminology
+
+Build v172 fixes the v168 startup case where the `Offshore Trip Planning` card could remain hidden when the Planning page loaded with an already-selected `lat`/`lon` in the URL. The page now explicitly refreshes the offshore trip panel during initialization whenever `mapState.selectedLocation` already exists, while retaining the existing refresh when the user clicks a new ★ destination.
+
+This build also changes the user-facing SST wording to `Sea Surface Temp` for clarity. The map overlay checkbox and legend now use `Sea Surface Temp`, and explanatory text spells out sea-surface temperature where appropriate. Internal JavaScript identifiers, `/sst-*` endpoints, diagnostic headers, and data-source plumbing remain unchanged for compatibility.
+
+### Fishing Planning subsection
+
+Build v172 keeps the existing `Offshore Trip Planning` card for weather, buoy observations, swell/period context, NWS forecast periods, alerts, and operational watch items, and adds a separate `Fishing Planning` subsection inside that card.
+
+For the selected ★ destination, the Fishing Planning subsection now summarizes four fishing-specific factors:
+
+- `Sea Surface Temp` — the latest NOAA CoastWatch Geo-Polar Blended daily SST at the selected point plus the temperature spread across an approximately 15 nmi neighborhood. The UI classifies that local spread as weak, moderate, or pronounced temp-break signal rather than pretending to know an exact break line distance.
+- `Chlorophyll` — the latest NOAA CoastWatch DINEOF chlorophyll value at the selected point, a simple cleaner/transition/greener-water classification, and whether the 0.30 mg/m³ transition is crossed inside the same nearby sampling window.
+- `Structure` — the nearest fishing-relevant NOAA Marine Cadastre undersea feature found within roughly one degree of latitude of the selected point, with distance in nautical miles.
+- `Recent reports` — point fishing reports within 100 nmi, prioritizing the newest report, plus broad regional reports when the selected point falls inside a report polygon.
+
+The new `/fishing-water` endpoint retrieves numeric CoastWatch SST and chlorophyll grid values server-side. The Fishing Planning subsection then combines those water values with the existing NOAA structure service and the existing `assets/fishing_reports.json` feed in the browser.
+
+The subsection provides a short fishing-setup synthesis based on the visible factors, but it does not create an opaque numerical score. The underlying water values, structure distance, and report context remain visible so the user can make the fishing decision.
+
+This is still selected-destination analysis rather than route-wide fishing analysis. A later enhancement can evaluate where the strongest SST/chlorophyll alignment lies around the destination instead of only summarizing the local neighborhood.
+
+### Offshore Trip Planning eligibility gate
+
+Build v172 makes the entire `Offshore Trip Planning` card conditional on the selected ★ location actually qualifying as offshore/coastal-ocean water.
+
+The `/offshore-trip` endpoint now returns an explicit `is_offshore` boolean. It resolves the NWS forecast zone for the selected point, reads the zone name from the NWS forecast-zone API, and only treats recognized ocean/coastal marine zone families as eligible. Land forecast zones therefore do not qualify.
+
+For the San Francisco/Monterey region, the enclosed-water zones `PZZ530` (San Pablo Bay, Suisun Bay, West Delta, and San Francisco Bay north of the Bay Bridge), `PZZ531` (San Francisco Bay south of the Bay Bridge), and `PZZ535` (Monterey Bay) are explicitly excluded from the offshore card. A defensive zone-name check also excludes San Francisco Bay, San Pablo Bay, Suisun Bay, West Delta, and Sacramento-San Joaquin Delta wording.
+
+The browser now keeps the card hidden while offshore eligibility is being resolved. Only after `is_offshore: true` is returned does it reveal the card and run the Fishing Planning subsection. Non-offshore selections also skip the NDBC offshore-buoy lookup and the Fishing Planning water/structure/report requests.
+
+This means a selected location in Antioch, the Delta, San Pablo Bay, or San Francisco Bay will not show `Offshore Trip Planning`, while selected coastal-ocean/offshore points can still use the full trip and fishing-planning workflow.
+
+### Release 1.9.3 / Build v172
+
+Build v172 is a release-only bump from the v171 feature-complete candidate. There are no functional changes from v171.
+
+Public version changes from `1.9.2` to `1.9.3`, and the immutable generated source lineage advances from `v171` to `v172`.
+
+Release 1.9.3 includes the offshore/fishing planning work completed across the preceding development builds: Sea Surface Temp terminology and temp-break context, chlorophyll field and contours, decluttered underwater structure, externalized fishing reports, Offshore Trip Planning with NWS/NDBC conditions, Fishing Planning synthesis, and the offshore eligibility gate that suppresses the offshore card for inland, Delta, Bay, and other non-offshore selections.

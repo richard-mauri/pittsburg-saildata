@@ -1,15 +1,21 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"encoding/xml"
 	"flag"
 	"fmt"
 	"html/template"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"io/ioutil"
 	"math"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -22,8 +28,8 @@ import (
 )
 
 const (
-	appVersion                      = "1.9.2"
-	buildVersion                    = "v137"
+	appVersion                      = "1.9.3"
+	buildVersion                    = "v172"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -847,6 +853,414 @@ func latestNearbyStationWind(stationID, windUnit string) (string, string) {
 	return wind, fmt.Sprintf("%d min", ageMinutes)
 }
 
+type coastWatchWindowStats struct {
+	Point float64
+	Min   float64
+	Max   float64
+	Count int
+}
+
+func coastWatchIPv4Client(timeout time.Duration) (*http.Client, error) {
+	baseTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return nil, fmt.Errorf("default HTTP transport is unavailable")
+	}
+	transport := baseTransport.Clone()
+	dialer := &net.Dialer{
+		Timeout:   20 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		return dialer.DialContext(ctx, "tcp4", address)
+	}
+	transport.TLSHandshakeTimeout = 20 * time.Second
+	transport.ResponseHeaderTimeout = 35 * time.Second
+	return &http.Client{Transport: transport, Timeout: timeout}, nil
+}
+
+func fetchCoastWatchWindowStats(
+	dataset string,
+	variable string,
+	dataRequest string,
+	targetLat float64,
+	targetLon float64,
+) (coastWatchWindowStats, error) {
+	var result coastWatchWindowStats
+
+	encoded := url.QueryEscape(dataRequest)
+	encoded = strings.ReplaceAll(encoded, "+", "%20")
+	remoteURL := fmt.Sprintf(
+		"https://coastwatch.noaa.gov/erddap/griddap/%s.json?%s",
+		dataset,
+		encoded,
+	)
+
+	client, err := coastWatchIPv4Client(55 * time.Second)
+	if err != nil {
+		return result, err
+	}
+	req, err := http.NewRequest(http.MethodGet, remoteURL, nil)
+	if err != nil {
+		return result, err
+	}
+	req.Header.Set("User-Agent", "pittsburg-saildata/"+appVersion)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return result, err
+	}
+	defer resp.Body.Close()
+
+	body, err := ioutil.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return result, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		detail := strings.TrimSpace(string(body))
+		if len(detail) > 500 {
+			detail = detail[:500]
+		}
+		return result, fmt.Errorf("CoastWatch %s returned HTTP %d: %s", variable, resp.StatusCode, detail)
+	}
+
+	var payload struct {
+		Table struct {
+			ColumnNames []string        `json:"columnNames"`
+			Rows        [][]interface{} `json:"rows"`
+		} `json:"table"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return result, err
+	}
+
+	latCol, lonCol, valueCol := -1, -1, -1
+	for i, name := range payload.Table.ColumnNames {
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "latitude":
+			latCol = i
+		case "longitude":
+			lonCol = i
+		default:
+			if strings.EqualFold(strings.TrimSpace(name), variable) {
+				valueCol = i
+			}
+		}
+	}
+	if latCol < 0 || lonCol < 0 || valueCol < 0 {
+		return result, fmt.Errorf("CoastWatch %s response is missing expected columns", variable)
+	}
+
+	asFloat := func(v interface{}) (float64, bool) {
+		switch x := v.(type) {
+		case float64:
+			return x, !math.IsNaN(x) && !math.IsInf(x, 0)
+		case json.Number:
+			f, err := x.Float64()
+			return f, err == nil
+		case string:
+			f, err := strconv.ParseFloat(strings.TrimSpace(x), 64)
+			return f, err == nil && !math.IsNaN(f) && !math.IsInf(f, 0)
+		default:
+			return 0, false
+		}
+	}
+
+	minVal := math.Inf(1)
+	maxVal := math.Inf(-1)
+	bestDistance := math.Inf(1)
+	bestValue := 0.0
+	count := 0
+
+	for _, row := range payload.Table.Rows {
+		maxIndex := latCol
+		if lonCol > maxIndex {
+			maxIndex = lonCol
+		}
+		if valueCol > maxIndex {
+			maxIndex = valueCol
+		}
+		if len(row) <= maxIndex {
+			continue
+		}
+		lat, okLat := asFloat(row[latCol])
+		lon, okLon := asFloat(row[lonCol])
+		value, okValue := asFloat(row[valueCol])
+		if !okLat || !okLon || !okValue {
+			continue
+		}
+		count++
+		if value < minVal {
+			minVal = value
+		}
+		if value > maxVal {
+			maxVal = value
+		}
+		d := math.Hypot(lat-targetLat, (lon-targetLon)*math.Cos(targetLat*math.Pi/180))
+		if d < bestDistance {
+			bestDistance = d
+			bestValue = value
+		}
+	}
+
+	if count == 0 {
+		return result, fmt.Errorf("CoastWatch %s returned no usable values", variable)
+	}
+
+	result.Point = bestValue
+	result.Min = minVal
+	result.Max = maxVal
+	result.Count = count
+	return result, nil
+}
+
+func fetchNWSForecastZoneName(zoneID string) string {
+	zoneID = strings.ToUpper(strings.TrimSpace(zoneID))
+	if zoneID == "" {
+		return ""
+	}
+
+	var payload struct {
+		Properties struct {
+			Name string `json:"name"`
+		} `json:"properties"`
+	}
+	zoneURL := "https://api.weather.gov/zones/forecast/" + url.PathEscape(zoneID)
+	if err := fetchNWSJSON(zoneURL, &payload); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.Properties.Name)
+}
+
+func isOffshoreTripZone(zoneID, zoneName string) bool {
+	zoneID = strings.ToUpper(strings.TrimSpace(zoneID))
+	if zoneID == "" {
+		return false
+	}
+
+	// NWS ocean/coastal marine forecast-zone prefixes. Land forecast zones,
+	// Great Lakes zones, and other inland products do not qualify.
+	oceanPrefix := false
+	for _, prefix := range []string{"PZZ", "PKZ", "PHZ", "PMZ", "ANZ", "AMZ", "GMZ"} {
+		if strings.HasPrefix(zoneID, prefix) {
+			oceanPrefix = true
+			break
+		}
+	}
+	if !oceanPrefix {
+		return false
+	}
+
+	// San Francisco/Monterey enclosed-water zones are marine forecast zones,
+	// but they are not "offshore" for this fishing-planning card.
+	switch zoneID {
+	case "PZZ530", // San Pablo Bay, Suisun Bay, West Delta, SF Bay north of Bay Bridge
+		"PZZ531", // San Francisco Bay south of Bay Bridge
+		"PZZ535": // Monterey Bay
+		return false
+	}
+
+	// Keep a defensive name check for the Bay/Delta wording used by NWS. This
+	// also protects against future zone renumbering around the inland estuary.
+	name := strings.ToLower(strings.TrimSpace(zoneName))
+	for _, phrase := range []string{
+		"san francisco bay",
+		"san pablo bay",
+		"suisun bay",
+		"west delta",
+		"sacramento-san joaquin delta",
+	} {
+		if strings.Contains(name, phrase) {
+			return false
+		}
+	}
+
+	return true
+}
+
+type offshoreBuoySnapshot struct {
+	Station              string  `json:"station"`
+	Name                 string  `json:"name,omitempty"`
+	DistanceNM           float64 `json:"distance_nm"`
+	ObservationTime      string  `json:"observation_time,omitempty"`
+	WindKT               float64 `json:"wind_kt,omitempty"`
+	GustKT               float64 `json:"gust_kt,omitempty"`
+	WaveFT               float64 `json:"wave_ft,omitempty"`
+	DominantPeriodSec    float64 `json:"dominant_period_sec,omitempty"`
+	AveragePeriodSec     float64 `json:"average_period_sec,omitempty"`
+	MeanWaveDirectionDeg float64 `json:"mean_wave_direction_deg,omitempty"`
+}
+
+func parseNDBCRealtimeSnapshot(
+	stationID string,
+	name string,
+	distanceNM float64,
+) (*offshoreBuoySnapshot, error) {
+	stationID = strings.ToUpper(strings.TrimSpace(stationID))
+	if !validStationID(stationID) {
+		return nil, fmt.Errorf("invalid NDBC station %q", stationID)
+	}
+
+	req, err := http.NewRequest(
+		http.MethodGet,
+		"https://www.ndbc.noaa.gov/data/realtime2/"+stationID+".txt",
+		nil,
+	)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "pittsburg-saildata/"+appVersion)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("NDBC %s returned HTTP %d", stationID, resp.StatusCode)
+	}
+
+	body, err := ioutil.ReadAll(io.LimitReader(resp.Body, 1024<<10))
+	if err != nil {
+		return nil, err
+	}
+
+	var header []string
+	for _, raw := range strings.Split(string(body), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "#") {
+			fields := strings.Fields(strings.TrimPrefix(line, "#"))
+			if len(fields) > 8 && strings.EqualFold(fields[0], "YY") {
+				header = fields
+			}
+			continue
+		}
+		if len(header) == 0 {
+			continue
+		}
+
+		fields := strings.Fields(line)
+		if len(fields) < len(header) {
+			continue
+		}
+
+		col := make(map[string]int, len(header))
+		for i, h := range header {
+			col[strings.ToUpper(h)] = i
+		}
+
+		value := func(key string) (float64, bool) {
+			i, ok := col[key]
+			if !ok || i >= len(fields) {
+				return 0, false
+			}
+			raw := strings.TrimSpace(fields[i])
+			if raw == "" || strings.EqualFold(raw, "MM") {
+				return 0, false
+			}
+			v, err := strconv.ParseFloat(raw, 64)
+			return v, err == nil
+		}
+
+		snapshot := &offshoreBuoySnapshot{
+			Station:    stationID,
+			Name:       strings.TrimSpace(name),
+			DistanceNM: distanceNM,
+		}
+
+		// The first five columns are always year, month, day, hour, minute.
+		if len(fields) >= 5 {
+			year, e1 := strconv.Atoi(fields[0])
+			month, e2 := strconv.Atoi(fields[1])
+			day, e3 := strconv.Atoi(fields[2])
+			hour, e4 := strconv.Atoi(fields[3])
+			minute, e5 := strconv.Atoi(fields[4])
+			if e1 == nil && e2 == nil && e3 == nil && e4 == nil && e5 == nil {
+				t := time.Date(year, time.Month(month), day, hour, minute, 0, 0, time.UTC)
+				snapshot.ObservationTime = t.Format(time.RFC3339)
+			}
+		}
+
+		if v, ok := value("WSPD"); ok {
+			snapshot.WindKT = v * 1.9438444924406
+		}
+		if v, ok := value("GST"); ok {
+			snapshot.GustKT = v * 1.9438444924406
+		}
+		if v, ok := value("WVHT"); ok {
+			snapshot.WaveFT = v * 3.2808398950131
+		}
+		if v, ok := value("DPD"); ok {
+			snapshot.DominantPeriodSec = v
+		}
+		if v, ok := value("APD"); ok {
+			snapshot.AveragePeriodSec = v
+		}
+		if v, ok := value("MWD"); ok {
+			snapshot.MeanWaveDirectionDeg = v
+		}
+
+		if snapshot.WaveFT <= 0 &&
+			snapshot.WindKT <= 0 &&
+			snapshot.GustKT <= 0 {
+			return nil, fmt.Errorf("NDBC %s has no usable wind/wave observation", stationID)
+		}
+		return snapshot, nil
+	}
+
+	return nil, fmt.Errorf("NDBC %s returned no usable realtime rows", stationID)
+}
+
+func fetchNearestOffshoreBuoySnapshot(
+	lat float64,
+	lon float64,
+) (*offshoreBuoySnapshot, error) {
+	stations, err := getActiveNDBCStations()
+	if err != nil {
+		return nil, err
+	}
+
+	type candidate struct {
+		ID       string
+		Name     string
+		Distance float64
+	}
+	candidates := make([]candidate, 0, len(stations))
+	for _, station := range stations {
+		d := distanceNM(lat, lon, station.Lat, station.Lon)
+		if d > 180 {
+			continue
+		}
+		candidates = append(candidates, candidate{
+			ID:       strings.ToUpper(strings.TrimSpace(station.ID)),
+			Name:     strings.TrimSpace(station.Name),
+			Distance: d,
+		})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].Distance < candidates[j].Distance
+	})
+	if len(candidates) > 12 {
+		candidates = candidates[:12]
+	}
+
+	var lastErr error
+	for _, c := range candidates {
+		snapshot, err := parseNDBCRealtimeSnapshot(c.ID, c.Name, c.Distance)
+		if err == nil && snapshot != nil {
+			return snapshot, nil
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("no active NDBC station found within 180 nmi")
+}
+
 func runServer(
 	port string,
 	defaultStation string,
@@ -987,6 +1401,55 @@ func runServer(
 		}
 	})
 
+	mux.HandleFunc("/fishing-reports", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		body, err := ioutil.ReadFile("assets/fishing_reports.json")
+		if err != nil {
+			http.Error(
+				w,
+				"fishing report feed is unavailable: assets/fishing_reports.json could not be read: "+err.Error(),
+				http.StatusServiceUnavailable,
+			)
+			return
+		}
+		if !json.Valid(body) {
+			http.Error(
+				w,
+				"fishing report feed is unavailable: assets/fishing_reports.json is not valid JSON",
+				http.StatusInternalServerError,
+			)
+			return
+		}
+
+		var payload struct {
+			SchemaVersion int               `json:"schema_version"`
+			Updated       string            `json:"updated"`
+			Reports       []json.RawMessage `json:"reports"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			http.Error(w, "fishing report feed validation failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if payload.SchemaVersion != 1 {
+			http.Error(w, "unsupported fishing report feed schema_version", http.StatusInternalServerError)
+			return
+		}
+		if len(payload.Reports) == 0 {
+			http.Error(w, "fishing report feed contains no reports", http.StatusServiceUnavailable)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
+		_, _ = w.Write(body)
+	})
+
 	mux.HandleFunc("/smoke-overlay", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1012,6 +1475,1078 @@ func runServer(
 		w.Header().Set("Cache-Control", "public, max-age=900")
 		if err := json.NewEncoder(w).Encode(payload); err != nil {
 			fmt.Println("smoke-overlay JSON encoding error:", err)
+		}
+	})
+
+	mux.HandleFunc("/sst-info", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		const metadataURL = "https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsstDNDaily.das"
+		req, err := http.NewRequest(http.MethodGet, metadataURL, nil)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		req.Header.Set("User-Agent", "pittsburg-saildata/"+appVersion)
+
+		client := &http.Client{Timeout: 8 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			http.Error(w, fmt.Sprintf("NOAA CoastWatch returned HTTP %d", resp.StatusCode), http.StatusBadGateway)
+			return
+		}
+
+		body, err := ioutil.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+
+		latest := ""
+		reCoverage := regexp.MustCompile(`String\s+time_coverage_end\s+"([^"]+)"`)
+		if match := reCoverage.FindSubmatch(body); len(match) == 2 {
+			latest = string(match[1])
+		}
+		if latest == "" {
+			reTimeRange := regexp.MustCompile(`(?s)time\s*\{.*?Float64\s+actual_range\s+[0-9.eE+\-]+,\s*([0-9.eE+\-]+);`)
+			if match := reTimeRange.FindSubmatch(body); len(match) == 2 {
+				if seconds, parseErr := strconv.ParseFloat(string(match[1]), 64); parseErr == nil {
+					latest = time.Unix(int64(seconds), 0).UTC().Format(time.RFC3339)
+				}
+			}
+		}
+		if latest == "" {
+			latest = "current"
+		}
+
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=900")
+		if err := json.NewEncoder(w).Encode(map[string]string{
+			"time":     latest,
+			"dataset":  "noaacwBLENDEDsstDNDaily",
+			"variable": "analysed_sst",
+		}); err != nil {
+			fmt.Println("sst-info JSON encoding error:", err)
+		}
+	})
+
+	mux.HandleFunc("/sst-overlay", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		q := r.URL.Query()
+		parseFloat := func(name string) (float64, error) {
+			raw := strings.TrimSpace(q.Get(name))
+			if raw == "" {
+				return 0, fmt.Errorf("%s is required", name)
+			}
+			v, err := strconv.ParseFloat(raw, 64)
+			if err != nil {
+				return 0, fmt.Errorf("invalid %s", name)
+			}
+			return v, nil
+		}
+
+		west, err := parseFloat("west")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		south, err := parseFloat("south")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		east, err := parseFloat("east")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		north, err := parseFloat("north")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if west < -180 || west > 180 || east < -180 || east > 180 ||
+			south < -89.9 || south > 89.9 || north < -89.9 || north > 89.9 ||
+			west >= east || south >= north {
+			http.Error(w, "invalid SST map bounds", http.StatusBadRequest)
+			return
+		}
+
+		width := 1200
+		height := 900
+		if raw := strings.TrimSpace(q.Get("width")); raw != "" {
+			if v, err := strconv.Atoi(raw); err == nil {
+				width = v
+			}
+		}
+		if raw := strings.TrimSpace(q.Get("height")); raw != "" {
+			if v, err := strconv.Atoi(raw); err == nil {
+				height = v
+			}
+		}
+		if width < 256 {
+			width = 256
+		}
+		if width > 2400 {
+			width = 2400
+		}
+		if height < 256 {
+			height = 256
+		}
+		if height > 1800 {
+			height = 1800
+		}
+
+		timeValue := strings.TrimSpace(q.Get("time"))
+		if timeValue == "" {
+			timeValue = "current"
+		}
+
+		// Use ERDDAP griddap instead of WMS so the SST color scale is fixed.
+		// The 45-75 F range (7.222-23.889 C) is intentionally fishing-oriented,
+		// and 30 discrete sections create approximately 1 F color bands so
+		// temperature breaks are easier to see and compare between map views.
+		timeSelector := "(last)"
+		if timeValue != "" && !strings.EqualFold(timeValue, "current") {
+			timeSelector = "(" + timeValue + ")"
+		}
+		dataRequest := fmt.Sprintf(
+			"analysed_sst[%s][(%.6f):(%.6f)][(%.6f):(%.6f)]",
+			timeSelector,
+			south,
+			north,
+			west,
+			east,
+		)
+
+		graphics := url.Values{}
+		graphics.Set(".draw", "surface")
+		graphics.Set(".vars", "longitude|latitude|analysed_sst")
+		graphics.Set(".colorBar", "Rainbow|D|Linear|7.222222|23.888889|30")
+		graphics.Set(".land", "off")
+		graphics.Set(".legend", "Off")
+		graphics.Set(".size", strconv.Itoa(width)+"|"+strconv.Itoa(height))
+
+		encodedDataRequest := url.QueryEscape(dataRequest)
+		encodedDataRequest = strings.ReplaceAll(encodedDataRequest, "+", "%20")
+
+		baseTransport, ok := http.DefaultTransport.(*http.Transport)
+		if !ok {
+			http.Error(w, "NOAA CoastWatch SST transport is unavailable", http.StatusInternalServerError)
+			return
+		}
+		transport := baseTransport.Clone()
+		dialer := &net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}
+		// CoastWatch was resolving to IPv6 on the local network, but the IPv6
+		// route timed out. Force SST traffic over IPv4 while leaving the rest of
+		// the application networking unchanged.
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "tcp4", address)
+		}
+		transport.TLSHandshakeTimeout = 30 * time.Second
+		transport.ResponseHeaderTimeout = 45 * time.Second
+
+		client := &http.Client{
+			Transport: transport,
+			Timeout:   75 * time.Second,
+		}
+
+		upstreams := []struct {
+			label string
+			base  string
+		}{
+			{
+				label: "CoastWatch Central ERDDAP",
+				base:  "https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsstDNDaily.transparentPng?",
+			},
+		}
+
+		var resp *http.Response
+		var body []byte
+		var upstreamLabel string
+		var attemptErrors []string
+
+		for _, upstream := range upstreams {
+			remoteURL := upstream.base + encodedDataRequest + "&" + graphics.Encode()
+			req, err := http.NewRequest(http.MethodGet, remoteURL, nil)
+			if err != nil {
+				attemptErrors = append(attemptErrors, upstream.label+": "+err.Error())
+				continue
+			}
+			req.Header.Set("User-Agent", "pittsburg-saildata/"+appVersion)
+
+			candidateResp, err := client.Do(req)
+			if err != nil {
+				attemptErrors = append(attemptErrors, upstream.label+": "+err.Error())
+				continue
+			}
+
+			candidateBody, readErr := ioutil.ReadAll(io.LimitReader(candidateResp.Body, 12<<20))
+			candidateResp.Body.Close()
+			if readErr != nil {
+				attemptErrors = append(attemptErrors, upstream.label+": response read failed: "+readErr.Error())
+				continue
+			}
+
+			resp = candidateResp
+			body = candidateBody
+			upstreamLabel = upstream.label
+			break
+		}
+
+		if resp == nil {
+			detail := strings.Join(attemptErrors, " | ")
+			if detail == "" {
+				detail = "all configured NOAA CoastWatch SST endpoints failed"
+			}
+			http.Error(w, "NOAA CoastWatch Sea Surface Temp request failed: "+detail, http.StatusBadGateway)
+			return
+		}
+
+		w.Header().Set("X-SST-Upstream", upstreamLabel)
+		if resp.StatusCode != http.StatusOK {
+			detail := strings.TrimSpace(string(body))
+			if len(detail) > 500 {
+				detail = detail[:500]
+			}
+			if detail == "" {
+				detail = http.StatusText(resp.StatusCode)
+			}
+			http.Error(
+				w,
+				fmt.Sprintf("NOAA CoastWatch SST returned HTTP %d: %s", resp.StatusCode, detail),
+				http.StatusBadGateway,
+			)
+			return
+		}
+		contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+		if !strings.Contains(contentType, "image/png") {
+			detail := strings.TrimSpace(string(body))
+			if len(detail) > 240 {
+				detail = detail[:240]
+			}
+			if detail == "" {
+				detail = "unexpected non-PNG response"
+			}
+			http.Error(w, "NOAA CoastWatch SST: "+detail, http.StatusBadGateway)
+			return
+		}
+
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "public, max-age=900")
+		_, _ = w.Write(body)
+	})
+
+	mux.HandleFunc("/chlorophyll-info", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		const metadataURL = "https://coastwatch.noaa.gov/erddap/griddap/noaacwNPPN20S3ASCIDINEOF2kmDaily.das"
+		req, err := http.NewRequest(http.MethodGet, metadataURL, nil)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		req.Header.Set("User-Agent", "pittsburg-saildata/"+appVersion)
+
+		client := &http.Client{Timeout: 12 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			http.Error(w, "NOAA chlorophyll metadata request failed: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+
+		body, err := ioutil.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if err != nil {
+			http.Error(w, "NOAA chlorophyll metadata read failed: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		if resp.StatusCode != http.StatusOK {
+			detail := strings.TrimSpace(string(body))
+			if len(detail) > 500 {
+				detail = detail[:500]
+			}
+			http.Error(
+				w,
+				fmt.Sprintf("NOAA chlorophyll metadata returned HTTP %d: %s", resp.StatusCode, detail),
+				http.StatusBadGateway,
+			)
+			return
+		}
+
+		// Prefer the time axis actual_range endpoint: it is the dataset's
+		// actual last indexed coordinate and is safer than time_coverage_end
+		// for constructing/displaying the latest field time.
+		latest := ""
+		reTimeRange := regexp.MustCompile(`(?s)time\s*\{.*?Float64\s+actual_range\s+[0-9.eE+\-]+,\s*([0-9.eE+\-]+);`)
+		if match := reTimeRange.FindSubmatch(body); len(match) == 2 {
+			if seconds, parseErr := strconv.ParseFloat(string(match[1]), 64); parseErr == nil {
+				latest = time.Unix(int64(seconds), 0).UTC().Format(time.RFC3339)
+			}
+		}
+		if latest == "" {
+			reCoverage := regexp.MustCompile(`String\s+time_coverage_end\s+"([^"]+)"`)
+			if match := reCoverage.FindSubmatch(body); len(match) == 2 {
+				latest = string(match[1])
+			}
+		}
+		if latest == "" {
+			latest = "current"
+		}
+
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=900")
+		if err := json.NewEncoder(w).Encode(map[string]string{
+			"time":     latest,
+			"dataset":  "noaacwNPPN20S3ASCIDINEOF2kmDaily",
+			"variable": "chlor_a",
+		}); err != nil {
+			fmt.Println("chlorophyll-info JSON encoding error:", err)
+		}
+	})
+
+	mux.HandleFunc("/chlorophyll-field", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		q := r.URL.Query()
+		parseFloat := func(name string) (float64, error) {
+			raw := strings.TrimSpace(q.Get(name))
+			if raw == "" {
+				return 0, fmt.Errorf("%s is required", name)
+			}
+			v, err := strconv.ParseFloat(raw, 64)
+			if err != nil {
+				return 0, fmt.Errorf("invalid %s", name)
+			}
+			return v, nil
+		}
+
+		west, err := parseFloat("west")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		south, err := parseFloat("south")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		east, err := parseFloat("east")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		north, err := parseFloat("north")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if west < -180 || west > 180 || east < -180 || east > 180 ||
+			south < -89.9 || south > 89.9 || north < -89.9 || north > 89.9 ||
+			west >= east || south >= north {
+			http.Error(w, "invalid chlorophyll map bounds", http.StatusBadRequest)
+			return
+		}
+
+		width := 1200
+		height := 900
+		if raw := strings.TrimSpace(q.Get("width")); raw != "" {
+			if v, err := strconv.Atoi(raw); err == nil {
+				width = v
+			}
+		}
+		if raw := strings.TrimSpace(q.Get("height")); raw != "" {
+			if v, err := strconv.Atoi(raw); err == nil {
+				height = v
+			}
+		}
+		if width < 256 {
+			width = 256
+		}
+		if width > 1800 {
+			width = 1800
+		}
+		if height < 256 {
+			height = 256
+		}
+		if height > 1400 {
+			height = 1400
+		}
+
+		dataRequest := fmt.Sprintf(
+			"chlor_a[last][0][(%.6f):(%.6f)][(%.6f):(%.6f)]",
+			south,
+			north,
+			west,
+			east,
+		)
+
+		graphics := url.Values{}
+		graphics.Set(".draw", "surface")
+		graphics.Set(".vars", "longitude|latitude|chlor_a")
+		graphics.Set(".colorBar", "Rainbow|C|Log|0.1|1|")
+		graphics.Set(".land", "off")
+		graphics.Set(".legend", "Off")
+		graphics.Set(".size", strconv.Itoa(width)+"|"+strconv.Itoa(height))
+
+		encodedDataRequest := url.QueryEscape(dataRequest)
+		encodedDataRequest = strings.ReplaceAll(encodedDataRequest, "+", "%20")
+		remoteURL := "https://coastwatch.noaa.gov/erddap/griddap/noaacwNPPN20S3ASCIDINEOF2kmDaily.transparentPng?" +
+			encodedDataRequest + "&" + graphics.Encode()
+
+		baseTransport, ok := http.DefaultTransport.(*http.Transport)
+		if !ok {
+			http.Error(w, "NOAA CoastWatch chlorophyll transport is unavailable", http.StatusInternalServerError)
+			return
+		}
+		transport := baseTransport.Clone()
+		dialer := &net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "tcp4", address)
+		}
+		transport.TLSHandshakeTimeout = 30 * time.Second
+		transport.ResponseHeaderTimeout = 45 * time.Second
+		client := &http.Client{Transport: transport, Timeout: 75 * time.Second}
+
+		req, err := http.NewRequest(http.MethodGet, remoteURL, nil)
+		if err != nil {
+			http.Error(w, "chlorophyll field request construction failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		req.Header.Set("User-Agent", "pittsburg-saildata/"+appVersion)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			http.Error(w, "NOAA CoastWatch chlorophyll field request failed: "+err.Error()+" | upstream="+remoteURL, http.StatusBadGateway)
+			return
+		}
+		body, readErr := ioutil.ReadAll(io.LimitReader(resp.Body, 12<<20))
+		resp.Body.Close()
+		if readErr != nil {
+			http.Error(w, "NOAA chlorophyll field response read failed: "+readErr.Error(), http.StatusBadGateway)
+			return
+		}
+		if resp.StatusCode != http.StatusOK {
+			detail := strings.TrimSpace(string(body))
+			if len(detail) > 1200 {
+				detail = detail[:1200]
+			}
+			http.Error(w, fmt.Sprintf("NOAA chlorophyll field returned HTTP %d: %s | upstream=%s", resp.StatusCode, detail, remoteURL), http.StatusBadGateway)
+			return
+		}
+		if !strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "image/png") {
+			http.Error(w, "NOAA chlorophyll field returned non-PNG content | upstream="+remoteURL, http.StatusBadGateway)
+			return
+		}
+
+		w.Header().Set("X-Chlorophyll-Upstream", "CoastWatch Central ERDDAP · DINEOF field")
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "public, max-age=900")
+		_, _ = w.Write(body)
+	})
+
+	mux.HandleFunc("/chlorophyll-overlay", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		q := r.URL.Query()
+		parseFloat := func(name string) (float64, error) {
+			raw := strings.TrimSpace(q.Get(name))
+			if raw == "" {
+				return 0, fmt.Errorf("%s is required", name)
+			}
+			v, err := strconv.ParseFloat(raw, 64)
+			if err != nil {
+				return 0, fmt.Errorf("invalid %s", name)
+			}
+			return v, nil
+		}
+
+		west, err := parseFloat("west")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		south, err := parseFloat("south")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		east, err := parseFloat("east")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		north, err := parseFloat("north")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if west < -180 || west > 180 || east < -180 || east > 180 ||
+			south < -89.9 || south > 89.9 || north < -89.9 || north > 89.9 ||
+			west >= east || south >= north {
+			http.Error(w, "invalid chlorophyll map bounds", http.StatusBadRequest)
+			return
+		}
+
+		width := 1200
+		height := 900
+		if raw := strings.TrimSpace(q.Get("width")); raw != "" {
+			if v, err := strconv.Atoi(raw); err == nil {
+				width = v
+			}
+		}
+		if raw := strings.TrimSpace(q.Get("height")); raw != "" {
+			if v, err := strconv.Atoi(raw); err == nil {
+				height = v
+			}
+		}
+		if width < 256 {
+			width = 256
+		}
+		if width > 1600 {
+			width = 1600
+		}
+		if height < 256 {
+			height = 256
+		}
+		if height > 1200 {
+			height = 1200
+		}
+
+		// The source grid is ~2 km. Limit the numeric request to roughly
+		// 220 samples per axis at large map extents by using ERDDAP stride.
+		latSpan := north - south
+		lonSpan := east - west
+		latPoints := int(math.Ceil(latSpan/0.018)) + 1
+		lonPoints := int(math.Ceil(lonSpan/0.018)) + 1
+		latStride := 1
+		lonStride := 1
+		if latPoints > 220 {
+			latStride = int(math.Ceil(float64(latPoints) / 220.0))
+		}
+		if lonPoints > 220 {
+			lonStride = int(math.Ceil(float64(lonPoints) / 220.0))
+		}
+
+		dataRequest := fmt.Sprintf(
+			"chlor_a[last][0][(%.6f):%d:(%.6f)][(%.6f):%d:(%.6f)]",
+			south,
+			latStride,
+			north,
+			west,
+			lonStride,
+			east,
+		)
+		encodedRequest := url.QueryEscape(dataRequest)
+		encodedRequest = strings.ReplaceAll(encodedRequest, "+", "%20")
+		remoteURL := "https://coastwatch.noaa.gov/erddap/griddap/noaacwNPPN20S3ASCIDINEOF2kmDaily.json?" + encodedRequest
+
+		baseTransport, ok := http.DefaultTransport.(*http.Transport)
+		if !ok {
+			http.Error(w, "NOAA CoastWatch chlorophyll transport is unavailable", http.StatusInternalServerError)
+			return
+		}
+		transport := baseTransport.Clone()
+		dialer := &net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "tcp4", address)
+		}
+		transport.TLSHandshakeTimeout = 30 * time.Second
+		transport.ResponseHeaderTimeout = 45 * time.Second
+
+		client := &http.Client{
+			Transport: transport,
+			Timeout:   75 * time.Second,
+		}
+
+		req, err := http.NewRequest(http.MethodGet, remoteURL, nil)
+		if err != nil {
+			http.Error(w, "chlorophyll contour request construction failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		req.Header.Set("User-Agent", "pittsburg-saildata/"+appVersion)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			http.Error(
+				w,
+				"NOAA CoastWatch chlorophyll numeric request failed: "+err.Error()+" | upstream="+remoteURL,
+				http.StatusBadGateway,
+			)
+			return
+		}
+		body, readErr := ioutil.ReadAll(io.LimitReader(resp.Body, 24<<20))
+		resp.Body.Close()
+		if readErr != nil {
+			http.Error(w, "NOAA chlorophyll numeric response read failed: "+readErr.Error(), http.StatusBadGateway)
+			return
+		}
+		if resp.StatusCode != http.StatusOK {
+			detail := strings.TrimSpace(string(body))
+			if len(detail) > 1200 {
+				detail = detail[:1200]
+			}
+			http.Error(
+				w,
+				fmt.Sprintf("NOAA chlorophyll numeric request returned HTTP %d: %s | upstream=%s", resp.StatusCode, detail, remoteURL),
+				http.StatusBadGateway,
+			)
+			return
+		}
+
+		var payload struct {
+			Table struct {
+				ColumnNames []string        `json:"columnNames"`
+				Rows        [][]interface{} `json:"rows"`
+			} `json:"table"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			http.Error(w, "NOAA chlorophyll JSON decode failed: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		if len(payload.Table.Rows) == 0 {
+			http.Error(w, "NOAA chlorophyll numeric request returned no rows", http.StatusBadGateway)
+			return
+		}
+
+		col := map[string]int{}
+		for i, name := range payload.Table.ColumnNames {
+			col[strings.ToLower(strings.TrimSpace(name))] = i
+		}
+		latCol, okLat := col["latitude"]
+		lonCol, okLon := col["longitude"]
+		valCol, okVal := col["chlor_a"]
+		timeCol, okTime := col["time"]
+		if !okLat || !okLon || !okVal {
+			http.Error(w, "NOAA chlorophyll JSON is missing latitude/longitude/chlor_a columns", http.StatusBadGateway)
+			return
+		}
+
+		asFloat := func(v interface{}) (float64, bool) {
+			switch n := v.(type) {
+			case float64:
+				return n, true
+			case string:
+				f, err := strconv.ParseFloat(strings.TrimSpace(n), 64)
+				return f, err == nil
+			default:
+				return 0, false
+			}
+		}
+
+		type gridPoint struct {
+			lat float64
+			lon float64
+			val float64
+		}
+		points := make([]gridPoint, 0, len(payload.Table.Rows))
+		latSet := map[float64]struct{}{}
+		lonSet := map[float64]struct{}{}
+		servedTime := ""
+
+		for _, row := range payload.Table.Rows {
+			if latCol >= len(row) || lonCol >= len(row) || valCol >= len(row) {
+				continue
+			}
+			lat, ok1 := asFloat(row[latCol])
+			lon, ok2 := asFloat(row[lonCol])
+			val, ok3 := asFloat(row[valCol])
+			if !ok1 || !ok2 || !ok3 || math.IsNaN(val) || math.IsInf(val, 0) {
+				continue
+			}
+			points = append(points, gridPoint{lat: lat, lon: lon, val: val})
+			latSet[lat] = struct{}{}
+			lonSet[lon] = struct{}{}
+			if servedTime == "" && okTime && timeCol < len(row) {
+				servedTime = fmt.Sprint(row[timeCol])
+			}
+		}
+		if len(points) == 0 {
+			http.Error(w, "NOAA chlorophyll numeric response contained no usable values", http.StatusBadGateway)
+			return
+		}
+
+		lats := make([]float64, 0, len(latSet))
+		for v := range latSet {
+			lats = append(lats, v)
+		}
+		lons := make([]float64, 0, len(lonSet))
+		for v := range lonSet {
+			lons = append(lons, v)
+		}
+		sort.Float64s(lats)
+		sort.Float64s(lons)
+		if len(lats) < 2 || len(lons) < 2 {
+			http.Error(w, "NOAA chlorophyll grid is too small for contours", http.StatusBadGateway)
+			return
+		}
+
+		latIndex := make(map[float64]int, len(lats))
+		for i, v := range lats {
+			latIndex[v] = i
+		}
+		lonIndex := make(map[float64]int, len(lons))
+		for i, v := range lons {
+			lonIndex[v] = i
+		}
+
+		grid := make([][]float64, len(lats))
+		for i := range grid {
+			grid[i] = make([]float64, len(lons))
+			for j := range grid[i] {
+				grid[i][j] = math.NaN()
+			}
+		}
+		for _, p := range points {
+			grid[latIndex[p.lat]][lonIndex[p.lon]] = p.val
+		}
+
+		canvas := image.NewNRGBA(image.Rect(0, 0, width, height))
+
+		type contourStyle struct {
+			level float64
+			halo  color.NRGBA
+			core  color.NRGBA
+			rHalo int
+			rCore int
+		}
+		styles := []contourStyle{
+			{level: 0.2, halo: color.NRGBA{R: 8, G: 40, B: 56, A: 235}, core: color.NRGBA{R: 99, G: 230, B: 255, A: 255}, rHalo: 2, rCore: 1},
+			{level: 0.3, halo: color.NRGBA{R: 8, G: 40, B: 56, A: 245}, core: color.NRGBA{R: 255, G: 253, B: 231, A: 255}, rHalo: 3, rCore: 2},
+			{level: 0.5, halo: color.NRGBA{R: 8, G: 40, B: 56, A: 235}, core: color.NRGBA{R: 255, G: 209, B: 102, A: 255}, rHalo: 2, rCore: 1},
+		}
+
+		putDisc := func(cx, cy, radius int, c color.NRGBA) {
+			for dy := -radius; dy <= radius; dy++ {
+				for dx := -radius; dx <= radius; dx++ {
+					if dx*dx+dy*dy > radius*radius {
+						continue
+					}
+					x := cx + dx
+					y := cy + dy
+					if x < 0 || x >= width || y < 0 || y >= height {
+						continue
+					}
+					canvas.SetNRGBA(x, y, c)
+				}
+			}
+		}
+		drawLine := func(x0, y0, x1, y1 float64, radius int, c color.NRGBA) {
+			dx := math.Abs(x1 - x0)
+			dy := math.Abs(y1 - y0)
+			steps := int(math.Ceil(math.Max(dx, dy)))
+			if steps < 1 {
+				putDisc(int(math.Round(x0)), int(math.Round(y0)), radius, c)
+				return
+			}
+			for step := 0; step <= steps; step++ {
+				t := float64(step) / float64(steps)
+				x := int(math.Round(x0 + (x1-x0)*t))
+				y := int(math.Round(y0 + (y1-y0)*t))
+				putDisc(x, y, radius, c)
+			}
+		}
+		toPixel := func(lat, lon float64) (float64, float64) {
+			x := (lon - west) / (east - west) * float64(width-1)
+			y := (north - lat) / (north - south) * float64(height-1)
+			return x, y
+		}
+		interp := func(a, b, level float64) float64 {
+			if a == b {
+				return 0.5
+			}
+			t := (level - a) / (b - a)
+			if t < 0 {
+				t = 0
+			}
+			if t > 1 {
+				t = 1
+			}
+			return t
+		}
+
+		type xy struct{ x, y float64 }
+		drawContour := func(style contourStyle) {
+			level := style.level
+			for iy := 0; iy < len(lats)-1; iy++ {
+				for ix := 0; ix < len(lons)-1; ix++ {
+					v00 := grid[iy][ix]
+					v10 := grid[iy][ix+1]
+					v11 := grid[iy+1][ix+1]
+					v01 := grid[iy+1][ix]
+					if math.IsNaN(v00) || math.IsNaN(v10) || math.IsNaN(v11) || math.IsNaN(v01) {
+						continue
+					}
+
+					var crossings []xy
+					// Bottom edge: (lat[iy], lon[ix]) -> (lat[iy], lon[ix+1])
+					if (v00 < level) != (v10 < level) {
+						t := interp(v00, v10, level)
+						lat := lats[iy]
+						lon := lons[ix] + (lons[ix+1]-lons[ix])*t
+						x, y := toPixel(lat, lon)
+						crossings = append(crossings, xy{x, y})
+					}
+					// Right edge.
+					if (v10 < level) != (v11 < level) {
+						t := interp(v10, v11, level)
+						lat := lats[iy] + (lats[iy+1]-lats[iy])*t
+						lon := lons[ix+1]
+						x, y := toPixel(lat, lon)
+						crossings = append(crossings, xy{x, y})
+					}
+					// Top edge.
+					if (v01 < level) != (v11 < level) {
+						t := interp(v01, v11, level)
+						lat := lats[iy+1]
+						lon := lons[ix] + (lons[ix+1]-lons[ix])*t
+						x, y := toPixel(lat, lon)
+						crossings = append(crossings, xy{x, y})
+					}
+					// Left edge.
+					if (v00 < level) != (v01 < level) {
+						t := interp(v00, v01, level)
+						lat := lats[iy] + (lats[iy+1]-lats[iy])*t
+						lon := lons[ix]
+						x, y := toPixel(lat, lon)
+						crossings = append(crossings, xy{x, y})
+					}
+
+					if len(crossings) == 2 {
+						drawLine(crossings[0].x, crossings[0].y, crossings[1].x, crossings[1].y, style.rHalo, style.halo)
+						drawLine(crossings[0].x, crossings[0].y, crossings[1].x, crossings[1].y, style.rCore, style.core)
+					} else if len(crossings) == 4 {
+						center := (v00 + v10 + v11 + v01) / 4
+						if center >= level {
+							drawLine(crossings[0].x, crossings[0].y, crossings[3].x, crossings[3].y, style.rHalo, style.halo)
+							drawLine(crossings[0].x, crossings[0].y, crossings[3].x, crossings[3].y, style.rCore, style.core)
+							drawLine(crossings[1].x, crossings[1].y, crossings[2].x, crossings[2].y, style.rHalo, style.halo)
+							drawLine(crossings[1].x, crossings[1].y, crossings[2].x, crossings[2].y, style.rCore, style.core)
+						} else {
+							drawLine(crossings[0].x, crossings[0].y, crossings[1].x, crossings[1].y, style.rHalo, style.halo)
+							drawLine(crossings[0].x, crossings[0].y, crossings[1].x, crossings[1].y, style.rCore, style.core)
+							drawLine(crossings[2].x, crossings[2].y, crossings[3].x, crossings[3].y, style.rHalo, style.halo)
+							drawLine(crossings[2].x, crossings[2].y, crossings[3].x, crossings[3].y, style.rCore, style.core)
+						}
+					}
+				}
+			}
+		}
+
+		for _, style := range styles {
+			drawContour(style)
+		}
+
+		var encoded bytes.Buffer
+		if err := png.Encode(&encoded, canvas); err != nil {
+			http.Error(w, "chlorophyll contour PNG encoding failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("X-Chlorophyll-Upstream", "CoastWatch Central ERDDAP · numeric DINEOF")
+		if servedTime != "" {
+			w.Header().Set("X-Chlorophyll-Time", servedTime)
+		}
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "public, max-age=900")
+		_, _ = w.Write(encoded.Bytes())
+	})
+
+	mux.HandleFunc("/fishing-water", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		lat, lon, ok, err := parseOptionalLatLon(r.URL.Query())
+		if err != nil || !ok {
+			if err == nil {
+				err = fmt.Errorf("lat and lon are required")
+			}
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// Roughly a 15 nmi neighborhood around the selected destination.
+		halfLat := 0.25
+		cosLat := math.Max(0.25, math.Cos(lat*math.Pi/180))
+		halfLon := math.Min(0.50, 0.25/cosLat)
+		south := math.Max(-89.8, lat-halfLat)
+		north := math.Min(89.8, lat+halfLat)
+		west := math.Max(-179.8, lon-halfLon)
+		east := math.Min(179.8, lon+halfLon)
+
+		sstRequest := fmt.Sprintf(
+			"analysed_sst[last][(%.6f):(%.6f)][(%.6f):(%.6f)]",
+			south, north, west, east,
+		)
+		chlRequest := fmt.Sprintf(
+			"chlor_a[last][0][(%.6f):(%.6f)][(%.6f):(%.6f)]",
+			south, north, west, east,
+		)
+
+		sstStats, sstErr := fetchCoastWatchWindowStats(
+			"noaacwBLENDEDsstDNDaily",
+			"analysed_sst",
+			sstRequest,
+			lat,
+			lon,
+		)
+		chlStats, chlErr := fetchCoastWatchWindowStats(
+			"noaacwNPPN20S3ASCIDINEOF2kmDaily",
+			"chlor_a",
+			chlRequest,
+			lat,
+			lon,
+		)
+
+		type sstPayload struct {
+			PointF  float64 `json:"point_f,omitempty"`
+			MinF    float64 `json:"min_f,omitempty"`
+			MaxF    float64 `json:"max_f,omitempty"`
+			SpreadF float64 `json:"spread_f,omitempty"`
+			Count   int     `json:"count,omitempty"`
+		}
+		type chlPayload struct {
+			Point float64 `json:"point_mg_m3,omitempty"`
+			Min   float64 `json:"min_mg_m3,omitempty"`
+			Max   float64 `json:"max_mg_m3,omitempty"`
+			Count int     `json:"count,omitempty"`
+		}
+		payload := struct {
+			SST         *sstPayload `json:"sst,omitempty"`
+			Chlorophyll *chlPayload `json:"chlorophyll,omitempty"`
+			Error       string      `json:"error,omitempty"`
+		}{}
+
+		var errs []string
+		if sstErr != nil {
+			errs = append(errs, "Sea Surface Temp: "+sstErr.Error())
+		} else {
+			toF := func(c float64) float64 { return c*9/5 + 32 }
+			payload.SST = &sstPayload{
+				PointF:  toF(sstStats.Point),
+				MinF:    toF(sstStats.Min),
+				MaxF:    toF(sstStats.Max),
+				SpreadF: (sstStats.Max - sstStats.Min) * 9 / 5,
+				Count:   sstStats.Count,
+			}
+		}
+		if chlErr != nil {
+			errs = append(errs, "Chlorophyll: "+chlErr.Error())
+		} else {
+			payload.Chlorophyll = &chlPayload{
+				Point: chlStats.Point,
+				Min:   chlStats.Min,
+				Max:   chlStats.Max,
+				Count: chlStats.Count,
+			}
+		}
+		if len(errs) > 0 {
+			payload.Error = strings.Join(errs, " | ")
+		}
+
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		if err := json.NewEncoder(w).Encode(payload); err != nil {
+			fmt.Println("fishing-water JSON encoding error:", err)
+		}
+	})
+
+	mux.HandleFunc("/offshore-trip", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		lat, lon, ok, err := parseOptionalLatLon(r.URL.Query())
+		if err != nil || !ok {
+			if err == nil {
+				err = fmt.Errorf("lat and lon are required")
+			}
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		zone, updated, periods, alerts, forecastErr :=
+			fetchMarineForecastForPoint(lat, lon, loc)
+		zoneName := fetchNWSForecastZoneName(zone)
+		isOffshore := isOffshoreTripZone(zone, zoneName)
+
+		payload := struct {
+			IsOffshore bool                       `json:"is_offshore"`
+			Zone       string                     `json:"zone,omitempty"`
+			ZoneName   string                     `json:"zone_name,omitempty"`
+			Updated    string                     `json:"updated,omitempty"`
+			Periods    []htmlMarineForecastPeriod `json:"periods,omitempty"`
+			Alerts     []string                   `json:"alerts,omitempty"`
+			Buoy       *offshoreBuoySnapshot      `json:"buoy,omitempty"`
+			Error      string                     `json:"error,omitempty"`
+		}{
+			IsOffshore: isOffshore,
+			Zone:       zone,
+			ZoneName:   zoneName,
+			Updated:    updated,
+			Periods:    periods,
+			Alerts:     alerts,
+		}
+
+		// Do not perform offshore buoy work for land, Delta, SF Bay, or other
+		// non-offshore selections. The browser will keep the entire card hidden.
+		if isOffshore {
+			buoy, buoyErr := fetchNearestOffshoreBuoySnapshot(lat, lon)
+			payload.Buoy = buoy
+
+			var errs []string
+			if forecastErr != nil {
+				errs = append(errs, "NWS marine forecast: "+forecastErr.Error())
+			}
+			if buoyErr != nil {
+				errs = append(errs, "NDBC observation: "+buoyErr.Error())
+			}
+			if len(errs) > 0 {
+				payload.Error = strings.Join(errs, " | ")
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		if err := json.NewEncoder(w).Encode(payload); err != nil {
+			fmt.Println("offshore-trip JSON encoding error:", err)
 		}
 	})
 
@@ -4474,7 +6009,7 @@ h3{margin:1.2rem 0 .35rem;color:var(--navy)}
 <p><strong>Wind:</strong> recent NOAA/NDBC observations, wind history, and nearby station alternatives.</p>
 <p><strong>Currents:</strong> NOAA CO-OPS ebb, flood, slack, maximum-current timing, and 1/3/7-day current graphs.</p>
 <p><strong>Weather:</strong> NWS local conditions/forecast context and forecast-zone information for a selected map point.</p>
-<p><strong>Map context:</strong> street, nautical, satellite, and hybrid basemaps plus forecast-zone, smoke, cloud-cover, and radar overlays.</p>
+<p><strong>Map context:</strong> street, nautical, satellite, and hybrid basemaps plus forecast-zone, smoke, sea-surface-temperature, cloud-cover, and radar overlays.</p>
 </section>
 
 <section class="card full qa">
@@ -4485,7 +6020,7 @@ h3{margin:1.2rem 0 .35rem;color:var(--navy)}
 <details><summary>What does Local Conditions show?</summary><p>For the selected map point, the app uses the NWS point forecast to show the nearby city/state label, current-hour forecast temperature, expected high/low, and a short forecast phrase.</p></details>
 <details><summary>Can I choose another wind station?</summary><p>Yes. Nearby wind-station candidates appear after you select a location. You can compare them on the map/table and choose the station you think best represents the water you care about.</p></details>
 <details><summary>Is this tide data or current data?</summary><p><strong>Current data.</strong> The graph is predicted speed and direction of moving water — flood above zero, ebb below zero, and crossings near slack. Tide height and current are related, but they are not the same thing.</p></details>
-<details><summary>What map choices are available?</summary><p>Planning and Details includes Street Map, Nautical Chart, Satellite, and Hybrid basemaps; independent forecast-zone, satellite-smoke, NOAA/NESDIS cloud-cover, and NEXRAD radar overlays; and Center Map actions for your location, entered coordinates, selected location, wind station, and currents station.</p></details>
+<details><summary>What map choices are available?</summary><p>Planning and Details includes Street Map, Nautical Chart, Satellite, and Hybrid basemaps; independent forecast-zone, satellite-smoke, NOAA CoastWatch Sea Surface Temp, NOAA/NESDIS cloud-cover, and NEXRAD radar overlays; and Center Map actions for your location, entered coordinates, selected location, wind station, and currents station.</p></details>
 <details><summary>Is this for navigation or safety decisions?</summary><p>No. It is a conditions-planning and exploration tool. Observations can be delayed or missing, station exposure differs, and current/forecast products have limitations. Use official marine forecasts, charts, notices, local knowledge, and prudent seamanship.</p></details>
 </section>
 
@@ -4733,8 +6268,8 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 @media(max-width:600px){.map-resize-handle{height:22px}}
 .map-location-info-grid{display:grid;grid-template-columns:minmax(290px,.9fr) minmax(360px,1.1fr);gap:14px;align-items:stretch;margin-top:10px}.map-location-info-grid .map-coordinate-entry{margin-top:0;align-self:start}.selected-location-weather{margin-top:0;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:var(--paper);min-height:128px}.selected-location-weather-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:4px}.selected-location-weather-head strong{color:var(--navy);font-size:.95rem}.selected-location-weather-place{font-size:.84rem;font-weight:750;color:var(--ink);margin:0 0 7px}.selected-location-weather-updated{color:var(--muted);font-size:.75rem}.selected-location-weather-metrics{display:flex;gap:14px;flex-wrap:wrap;align-items:baseline}.selected-location-weather-metric{font-size:.88rem;color:var(--ink)}@media(max-width:700px){.map-location-info-grid{grid-template-columns:1fr}.selected-location-weather{min-height:0}}.selected-location-weather-metric b{color:var(--navy)}.selected-location-weather-forecast{margin:7px 0 0;color:var(--ink);font-size:.9rem}.selected-location-weather-note{margin:6px 0 0;color:var(--muted);font-size:.75rem}.selected-location-weather-error{margin:6px 0 0;color:#8b2c2c;font-size:.82rem}.map-coordinate-entry{display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-top:10px}.map-coordinate-field{display:flex;flex-direction:column;gap:3px}.map-coordinate-field label{font-size:.72rem;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}.map-coordinate-field input{width:132px;padding:7px 9px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--ink);font:inherit}.map-coordinate-use{padding:8px 12px;border:1px solid #126b91;border-radius:9px;background:#126b91;color:#fff;font-weight:850;cursor:pointer}.map-coordinate-use:hover{filter:brightness(.97)}.map-coordinate-error{font-size:.8rem;color:#9b3027;min-height:1.2em}
-.map-station-list{margin-top:12px}.map-station-list-title{font-weight:850;color:var(--navy);margin:0 0 8px}.map-station-table-wrap{max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:14px;background:#fff}.map-station-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.86rem}.map-station-table th,.map-station-table td{padding:8px 10px;border-top:1px solid var(--line);text-align:left;vertical-align:top;background:#fff}.map-station-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc}.map-station-table th{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}.map-station-table tbody tr:first-child td{border-top:0}.map-station-table a{color:var(--blue);font-weight:800;text-decoration:none}.map-station-table a:hover{text-decoration:underline}.map-scale-status{background:rgba(255,255,255,.94);border:1px solid #9fb5bf;border-radius:8px;padding:5px 8px;color:#234654;font-size:.74rem;font-weight:800;line-height:1.25;box-shadow:0 1px 4px rgba(25,55,70,.18);white-space:nowrap}.map-nautical-zoom-note{position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:850;background:rgba(7,31,49,.92);color:#fff;border-radius:999px;padding:7px 12px;font-size:.78rem;font-weight:850;box-shadow:0 2px 8px rgba(0,0,0,.2);pointer-events:none;white-space:nowrap;max-width:calc(100% - 32px);overflow:hidden;text-overflow:ellipsis}.map-overlay-toggle.is-unavailable{opacity:.5}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#2f855a}.map-dot.current{background:#7d55a6}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}
-.marine-forecast-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap}
+.map-station-list{margin-top:12px}.map-station-list-title{font-weight:850;color:var(--navy);margin:0 0 8px}.map-station-table-wrap{max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:14px;background:#fff}.map-station-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.86rem}.map-station-table th,.map-station-table td{padding:8px 10px;border-top:1px solid var(--line);text-align:left;vertical-align:top;background:#fff}.map-station-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc}.map-station-table th{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}.map-station-table tbody tr:first-child td{border-top:0}.map-station-table a{color:var(--blue);font-weight:800;text-decoration:none}.map-station-table a:hover{text-decoration:underline}.map-scale-status{background:rgba(255,255,255,.94);border:1px solid #9fb5bf;border-radius:8px;padding:5px 8px;color:#234654;font-size:.74rem;font-weight:800;line-height:1.25;box-shadow:0 1px 4px rgba(25,55,70,.18);white-space:nowrap}.map-nautical-zoom-note{position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:850;background:rgba(7,31,49,.92);color:#fff;border-radius:999px;padding:7px 12px;font-size:.78rem;font-weight:850;box-shadow:0 2px 8px rgba(0,0,0,.2);pointer-events:none;white-space:nowrap;max-width:calc(100% - 32px);overflow:hidden;text-overflow:ellipsis}.map-overlay-toggle.is-unavailable{opacity:.5}.map-sst-legend{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-top:8px;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#f8fbfc;color:var(--muted);font-size:.76rem}.map-sst-bar{width:min(320px,60vw);height:12px;border-radius:999px;border:1px solid rgba(0,0,0,.16);background:linear-gradient(90deg,#263b9b 0%,#1677d2 18%,#1ccad8 36%,#65c94f 54%,#f0d63a 72%,#f28b2d 86%,#c9342f 100%)}.map-sst-scale{display:flex;gap:10px;align-items:center;justify-content:space-between;min-width:min(320px,60vw);font-weight:800;color:var(--ink)}.map-sst-note{flex:1 1 260px}.map-sst-legend[hidden]{display:none}.map-chl-field-legend{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-top:8px;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#f8fbfc;color:var(--muted);font-size:.76rem}.map-chl-field-bar{width:min(320px,60vw);height:12px;border-radius:999px;border:1px solid rgba(0,0,0,.16);background:linear-gradient(90deg,#334db3 0%,#2485c6 20%,#2fc6be 40%,#68ce63 60%,#d4dc45 80%,#e4b83f 100%)}.map-chl-field-scale{display:flex;gap:8px;align-items:center;justify-content:space-between;min-width:min(320px,60vw);font-weight:800;color:var(--ink)}.map-chl-field-note{flex:1 1 300px}.map-chl-field-legend[hidden]{display:none}.map-chl-field-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-chl-field-status[hidden]{display:none}.map-chl-legend{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:8px;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#f8fbfc;color:var(--muted);font-size:.76rem}.map-chl-contour-key{display:inline-flex;align-items:center;gap:5px;font-weight:800;color:var(--ink)}.map-chl-contour-line{display:inline-block;width:34px;height:0;border-top-style:solid;filter:drop-shadow(0 0 1px #102a38)}.map-chl-contour-line.c02{border-top-width:2px;border-top-color:#63e6ff}.map-chl-contour-line.c03{border-top-width:4px;border-top-color:#fffde7}.map-chl-contour-line.c05{border-top-width:2px;border-top-color:#ffd166}.map-chl-note{flex:1 1 320px}.map-chl-legend[hidden]{display:none}.map-chl-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-chl-status[hidden]{display:none}.map-structure-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-structure-status[hidden]{display:none}.map-fishing-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-fishing-status[hidden]{display:none}.map-fishing-legend{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:8px;padding:7px 9px;border:1px solid var(--line);border-radius:10px;background:#f8fbfc;color:var(--muted);font-size:.75rem}.map-fishing-legend[hidden]{display:none}.map-fishing-key{display:inline-flex;align-items:center;gap:5px}.map-fishing-dot{width:10px;height:10px;border-radius:50%;display:inline-block;border:2px solid #fff;box-shadow:0 0 0 1px #173645}.map-fishing-dot.albacore{background:#18a6a6}.map-fishing-dot.bluefin{background:#2658b8}.map-fishing-zone-key{width:18px;height:10px;border:2px dashed #2658b8;background:rgba(38,88,184,.12);display:inline-block}.map-undersea-feature-label{background:transparent!important;border:0!important;box-shadow:none!important;white-space:nowrap;pointer-events:none}.map-undersea-feature-label .undersea-dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;background:#ffd166;border:1px solid #20323c;vertical-align:1px;box-shadow:0 0 0 1px rgba(255,255,255,.75)}.map-undersea-feature-label .undersea-name{font-size:13px;font-weight:850;letter-spacing:.01em;color:#fff7d1;text-shadow:-2px -2px 0 #102a38,2px -2px 0 #102a38,-2px 2px 0 #102a38,2px 2px 0 #102a38,0 2px 3px rgba(0,0,0,.85)}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#2f855a}.map-dot.current{background:#7d55a6}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}
+.offshore-trip-card{border-left:5px solid #126b91}.offshore-trip-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap}.offshore-trip-coords{color:var(--muted);font-size:.82rem;font-weight:750}.offshore-trip-summary{margin:10px 0 12px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:#f7fbfc}.offshore-trip-summary strong{color:var(--navy)}.offshore-trip-metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:10px 0}.offshore-trip-metric{padding:9px 10px;border:1px solid var(--line);border-radius:11px;background:#fff}.offshore-trip-metric .label{font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:850}.offshore-trip-metric .value{margin-top:3px;color:var(--navy);font-weight:900;font-size:1rem}.offshore-trip-buoy{margin:4px 0 8px;color:var(--ink);font-size:.86rem}.offshore-trip-watch{margin:8px 0 0;padding-left:20px;color:var(--ink)}.offshore-trip-watch li{margin:3px 0}.offshore-trip-forecast{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px}.offshore-trip-period{padding:10px 12px;border:1px solid var(--line);border-radius:11px;background:#fbfdfe}.offshore-trip-period strong{display:block;color:var(--navy);margin-bottom:3px}.offshore-trip-period p{margin:0;line-height:1.42;font-size:.88rem}.offshore-trip-note{margin:9px 0 0;color:var(--muted);font-size:.78rem;line-height:1.45}.offshore-trip-error{color:#8b2c2c;font-size:.88rem}.offshore-trip-loading{color:var(--muted);font-weight:750}.fishing-planning{margin-top:18px;padding-top:16px;border-top:2px solid #dce8ed}.fishing-planning-head{display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap}.fishing-planning-head h3{margin:0;color:var(--navy);font-size:1.05rem}.fishing-planning-status{color:var(--muted);font-size:.78rem}.fishing-planning-summary{margin:10px 0;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:#fffdf5;line-height:1.45}.fishing-planning-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.fishing-planning-item{padding:10px 11px;border:1px solid var(--line);border-radius:11px;background:#fff}.fishing-planning-item .label{font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:850}.fishing-planning-item .value{margin-top:3px;color:var(--navy);font-weight:900;line-height:1.25}.fishing-planning-item .detail{margin-top:4px;color:var(--muted);font-size:.77rem;line-height:1.35}.fishing-planning-error{margin:8px 0 0;color:#8b2c2c;font-size:.82rem}@media(max-width:850px){.fishing-planning-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:520px){.fishing-planning-grid{grid-template-columns:1fr}}@media(max-width:800px){.offshore-trip-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:640px){.offshore-trip-forecast{grid-template-columns:1fr}}.marine-forecast-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap}
 .marine-forecast-zone{color:var(--muted);font-size:.84rem;font-weight:750}
 .marine-alerts{margin:8px 0 14px;display:flex;gap:7px;flex-wrap:wrap}
 .marine-alert{display:inline-block;border-radius:999px;padding:5px 9px;background:#fff0ef;border:1px solid #e0a39d;color:#9b3027;font-size:.78rem;font-weight:900}
@@ -4753,7 +6288,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 <section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Open the full planning dashboard for location, wind, currents, forecasts, map layers, and customization controls.</p></div><a id="planning-page-link" class="planning-page-link" href="{{.PlanningDetailsURL}}">Planning and Details →</a></section>
 {{else}}
 <section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Full planning dashboard and customization controls.</p></div><a class="planning-page-link" href="{{.ConditionsURL}}">← Back to Conditions Now</a></section>
-<section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map to choose a sailing location, then use Find stations near selected location. The latitude/longitude fields always show the current map center; you may edit them and use Center Map → Latitude & Longitude to pan there without changing the selected sailing location. My location also centers the map only. Panning changes the view, not the selected ★ location. Click a nearby wind station to pin its details and preview the associated currents station, then use the selection link in the map panel to commit the wind-station choice. Candidate stations and distances always refer to the selected location.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-nautical-zoom-note" class="map-nautical-zoom-note" hidden aria-live="polite">Nautical chart available at Zoom 9+.</div><div id="map-resize-handle" class="map-resize-handle" role="separator" aria-label="Resize map vertically" aria-orientation="horizontal" aria-valuemin="260" aria-valuemax="900" aria-valuenow="390" aria-grabbed="false" tabindex="0" title="Drag up or down to resize map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-state-controls" aria-label="Map controls"><details id="map-types-menu" class="map-overlays-menu"><summary>Map Types</summary><div class="map-overlays-panel"><label class="map-overlay-toggle"><input type="radio" name="map-type" value="map"> <span>Street Map</span></label><label id="map-type-nautical-label" class="map-overlay-toggle"><input id="map-type-nautical" type="radio" name="map-type" value="nautical"> <span>Nautical Chart <small>(Zoom 9+)</small></span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="satellite"> <span>Satellite</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="hybrid"> <span>Hybrid</span></label></div></details><details id="map-overlays-menu" class="map-overlays-menu"><summary>Map Overlays</summary><div class="map-overlays-panel"><label id="map-marine-zone-control" class="map-overlay-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-smoke"> <span>Satellite smoke (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-clouds"> <span>Satellite Cloud Cover (NOAA)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-radar"> <span>Weather radar (NOAA/NWS)</span></label><div class="map-overlay-note">Satellite Cloud Cover uses NOAA/NESDIS GOES imagery rendered for the current map view; daylight areas appear natural-color-like and nighttime areas use infrared imagery. Radar uses Iowa State IEM's Web-Mercator CONUS NEXRAD N0Q WMS layer; a clear/transparent radar layer can simply mean no precipitation echoes are present.</div></div></details><details id="map-center-menu" class="map-overlays-menu"><summary>Center Map</summary><div class="map-overlays-panel map-center-panel"><button type="button" id="map-geolocate" class="map-center-action" title="Center the map on your device location without changing the selected location">My location</button><button type="button" id="map-nav-coordinates" class="map-center-action" title="Center the map on the latitude and longitude shown below">Latitude &amp; Longitude</button><button type="button" id="map-nav-selected" class="map-center-action" {{if not .MapHasRequest}}disabled{{end}}>Selected location</button><button type="button" id="map-nav-wind" class="map-center-action" {{if not .MapHasWind}}disabled{{end}}>Selected wind station</button><button type="button" id="map-nav-current" class="map-center-action" {{if not .MapHasCurrent}}disabled{{end}}>Selected currents station</button></div></details><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}" {{if not .MapHasRequest}}disabled{{end}}>Clear selected location &amp; candidates</button></div><div class="map-location-info-grid"><div class="map-coordinate-entry" aria-label="Map center coordinates"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLat}}" aria-label="Map center latitude"></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLon}}" aria-label="Map center longitude"></div><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div id="selected-location-weather" class="selected-location-weather" aria-live="polite"><div class="selected-location-weather-head"><strong>Local Conditions</strong><span id="selected-location-weather-updated" class="selected-location-weather-updated">{{if .SelectedWeatherUpdated}}Updated {{.SelectedWeatherUpdated}}{{end}}</span></div><div id="selected-location-weather-place" class="selected-location-weather-place">{{if .MapHasRequest}}{{if .SelectedWeatherLocation}}{{.SelectedWeatherLocation}}{{else}}Near selected location{{end}}{{else}}Select a location for local conditions{{end}}</div><div id="selected-location-weather-content" {{if not .MapHasRequest}}hidden{{end}}><div class="selected-location-weather-metrics"><span class="selected-location-weather-metric"><b>Air temp:</b> <span id="selected-location-weather-air">{{if .SelectedWeatherAirTemp}}{{.SelectedWeatherAirTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>High:</b> <span id="selected-location-weather-high">{{if .SelectedWeatherHighTemp}}{{.SelectedWeatherHighTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>Low:</b> <span id="selected-location-weather-low">{{if .SelectedWeatherLowTemp}}{{.SelectedWeatherLowTemp}}{{else}}—{{end}}</span></span></div><p id="selected-location-weather-forecast" class="selected-location-weather-forecast" {{if not .SelectedWeatherShortForecast}}hidden{{end}}>{{.SelectedWeatherShortForecast}}</p><p id="selected-location-weather-error" class="selected-location-weather-error" {{if not .SelectedWeatherError}}hidden{{end}}>{{.SelectedWeatherError}}</p><p class="selected-location-weather-note">NWS point forecast near the selected location. Air temperature is the current-hour forecast, not a direct observation.</p></div></div></div><div class="map-controls"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Select a location to find stations</span><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-weather-overlay-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div class="map-layer-note">Drag the handle directly below the map to make the map taller or shorter. Keyboard users can focus the handle and use ↑/↓ (Shift for larger steps).</div><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
+<section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map to choose a sailing location, then use Find stations near selected location. The latitude/longitude fields always show the current map center; you may edit them and use Center Map → Latitude & Longitude to pan there without changing the selected sailing location. My location also centers the map only. Panning changes the view, not the selected ★ location. Click a nearby wind station to pin its details and preview the associated currents station, then use the selection link in the map panel to commit the wind-station choice. Candidate stations and distances always refer to the selected location.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-nautical-zoom-note" class="map-nautical-zoom-note" hidden aria-live="polite">Nautical chart available at Zoom 9+.</div><div id="map-resize-handle" class="map-resize-handle" role="separator" aria-label="Resize map vertically" aria-orientation="horizontal" aria-valuemin="260" aria-valuemax="900" aria-valuenow="390" aria-grabbed="false" tabindex="0" title="Drag up or down to resize map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-state-controls" aria-label="Map controls"><details id="map-types-menu" class="map-overlays-menu"><summary>Map Types</summary><div class="map-overlays-panel"><label class="map-overlay-toggle"><input type="radio" name="map-type" value="map"> <span>Street Map</span></label><label id="map-type-nautical-label" class="map-overlay-toggle"><input id="map-type-nautical" type="radio" name="map-type" value="nautical"> <span>Nautical Chart <small>(Zoom 9+)</small></span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="satellite"> <span>Satellite</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="hybrid"> <span>Hybrid</span></label></div></details><details id="map-overlays-menu" class="map-overlays-menu"><summary>Map Overlays</summary><div class="map-overlays-panel"><label id="map-marine-zone-control" class="map-overlay-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-smoke"> <span>Satellite smoke (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-sst"> <span>Sea Surface Temp (NOAA CoastWatch)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-chlorophyll-field"> <span>Chlorophyll Field (NOAA gap-filled 2 km)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-chlorophyll"> <span>Chlorophyll Contours (NOAA gap-filled 2 km)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-structure"> <span>Underwater Structure (NOAA bathymetry + names)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-fishing-reports"> <span>Fishing Reports (external data file)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-clouds"> <span>Satellite Cloud Cover (NOAA)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-radar"> <span>Weather radar (NOAA/NWS)</span></label><div class="map-overlay-note">Sea Surface Temp uses NOAA CoastWatch Geo-Polar Blended daily analysed sea-surface temperature imagery. The fixed fishing-oriented color scale emphasizes temperature breaks and boundaries between cooler and warmer water. It is a multi-satellite global Level-4 analysis at about 5 km resolution; near-shore and inland values should still be interpreted cautiously. Chlorophyll Field uses NOAA CoastWatch multi-sensor Level-4 DINEOF gap-filled daily chlorophyll-a at about 2 km as a restrained semi-transparent background raster so broad water-mass features remain visible. Chlorophyll Contours are a separate overlay derived from the same NOAA numeric grid and draw only three concentration contours: 0.2, 0.3, and 0.5 mg/m³. Use either layer independently or combine them with Sea Surface Temp and underwater structure. NOAA performs the cloud-gap filling upstream. Underwater Structure combines NOAA/NCEI ETOPO shaded relief with NOAA Marine Cadastre official undersea feature points. Fishing-relevant features such as seamounts, banks, ridges, hills, knolls, shoals, reefs, rises, plateaus, pinnacles, and escarpments are labeled locally for better contrast. It is intended for fishing-planning context, not navigation; smaller pinnacles may not appear in the global relief model. Fishing Reports is loaded from assets/fishing_reports.json so report updates do not require changing Go or map UI code. Exact positions are plotted only when the source provides them; fisherman shorthand such as “20×20” is shown as a derived approximate position with an uncertainty circle, and broad reports such as “Cordell to Monterey” are shown as regional zones rather than fake point coordinates. Satellite Cloud Cover uses NOAA/NESDIS GOES imagery rendered for the current map view; daylight areas appear natural-color-like and nighttime areas use infrared imagery. Radar uses Iowa State IEM's Web-Mercator CONUS NEXRAD N0Q WMS layer; a clear/transparent radar layer can simply mean no precipitation echoes are present.</div></div></details><details id="map-center-menu" class="map-overlays-menu"><summary>Center Map</summary><div class="map-overlays-panel map-center-panel"><button type="button" id="map-geolocate" class="map-center-action" title="Center the map on your device location without changing the selected location">My location</button><button type="button" id="map-nav-coordinates" class="map-center-action" title="Center the map on the latitude and longitude shown below">Latitude &amp; Longitude</button><button type="button" id="map-nav-selected" class="map-center-action" {{if not .MapHasRequest}}disabled{{end}}>Selected location</button><button type="button" id="map-nav-wind" class="map-center-action" {{if not .MapHasWind}}disabled{{end}}>Selected wind station</button><button type="button" id="map-nav-current" class="map-center-action" {{if not .MapHasCurrent}}disabled{{end}}>Selected currents station</button></div></details><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}" {{if not .MapHasRequest}}disabled{{end}}>Clear selected location &amp; candidates</button></div><div class="map-location-info-grid"><div class="map-coordinate-entry" aria-label="Map center coordinates"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLat}}" aria-label="Map center latitude"></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLon}}" aria-label="Map center longitude"></div><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div id="selected-location-weather" class="selected-location-weather" aria-live="polite"><div class="selected-location-weather-head"><strong>Local Conditions</strong><span id="selected-location-weather-updated" class="selected-location-weather-updated">{{if .SelectedWeatherUpdated}}Updated {{.SelectedWeatherUpdated}}{{end}}</span></div><div id="selected-location-weather-place" class="selected-location-weather-place">{{if .MapHasRequest}}{{if .SelectedWeatherLocation}}{{.SelectedWeatherLocation}}{{else}}Near selected location{{end}}{{else}}Select a location for local conditions{{end}}</div><div id="selected-location-weather-content" {{if not .MapHasRequest}}hidden{{end}}><div class="selected-location-weather-metrics"><span class="selected-location-weather-metric"><b>Air temp:</b> <span id="selected-location-weather-air">{{if .SelectedWeatherAirTemp}}{{.SelectedWeatherAirTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>High:</b> <span id="selected-location-weather-high">{{if .SelectedWeatherHighTemp}}{{.SelectedWeatherHighTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>Low:</b> <span id="selected-location-weather-low">{{if .SelectedWeatherLowTemp}}{{.SelectedWeatherLowTemp}}{{else}}—{{end}}</span></span></div><p id="selected-location-weather-forecast" class="selected-location-weather-forecast" {{if not .SelectedWeatherShortForecast}}hidden{{end}}>{{.SelectedWeatherShortForecast}}</p><p id="selected-location-weather-error" class="selected-location-weather-error" {{if not .SelectedWeatherError}}hidden{{end}}>{{.SelectedWeatherError}}</p><p class="selected-location-weather-note">NWS point forecast near the selected location. Air temperature is the current-hour forecast, not a direct observation.</p></div></div></div><div class="map-controls"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Select a location to find stations</span><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-weather-overlay-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div id="map-sst-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-structure-status" class="map-structure-status" hidden></div><div id="map-chl-field-legend" class="map-chl-field-legend" hidden><strong>Chlorophyll Field</strong><span class="map-chl-field-bar" aria-hidden="true"></span><span class="map-chl-field-scale"><span>0.1</span><span>0.2</span><span>0.3</span><span>0.5</span><span>0.7</span><span>1 mg/m³</span></span><span class="map-chl-field-note">Semi-transparent NOAA gap-filled chlorophyll background. Blue/cyan = lower chlorophyll / cleaner water; green/yellow = higher chlorophyll. Use this layer to see broad water-mass features such as pockets and eddies.</span></div><div id="map-chl-field-status" class="map-chl-field-status" hidden></div><div id="map-chl-legend" class="map-chl-legend" hidden><strong>Chlorophyll Contours</strong><span class="map-chl-contour-key"><i class="map-chl-contour-line c02"></i>0.2 mg/m³</span><span class="map-chl-contour-key"><i class="map-chl-contour-line c03"></i>0.3 mg/m³</span><span class="map-chl-contour-key"><i class="map-chl-contour-line c05"></i>0.5 mg/m³</span><span class="map-chl-note">Exact chlorophyll concentration contours from the NOAA numeric grid. The 0.3 mg/m³ line is emphasized as the primary clear-water transition reference; compare it with Sea Surface Temp breaks and offshore structure.</span></div><div id="map-chl-status" class="map-chl-status" hidden></div><div id="map-fishing-legend" class="map-fishing-legend" hidden><strong>Fishing Reports</strong><span class="map-fishing-key"><i class="map-fishing-dot albacore"></i>Albacore</span><span class="map-fishing-key"><i class="map-fishing-dot bluefin"></i>Bluefin</span><span class="map-fishing-key"><i class="map-fishing-zone-key"></i>Broad regional report</span><span>Dashed uncertainty circles = derived shorthand positions.</span></div><div id="map-fishing-status" class="map-fishing-status" hidden></div><div id="map-sst-legend" class="map-sst-legend" hidden><strong>Sea Surface Temp / Temp Breaks</strong><span class="map-sst-bar" aria-hidden="true"></span><span class="map-sst-scale"><span>45°F</span><span>50</span><span>55</span><span>60</span><span>65</span><span>70</span><span>75°F</span></span><span class="map-sst-note">Fixed 45–75°F NOAA sea-surface temperature scale in 1°F bands. Closely packed color changes make temperature breaks easier to see; values below/above the range saturate at the end colors. NOAA Geo-Polar Blended daily sea-surface temperature, about 5 km resolution.</span></div><div class="map-layer-note">Drag the handle directly below the map to make the map taller or shorter. Keyboard users can focus the handle and use ↑/↓ (Shift for larger steps).</div><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
 {{if .WindError}}<section class="card full error-card"><h2>Wind station selection unavailable</h2><p class="error-message">{{.WindError}}</p><p class="error-help">The page is still available so you can inspect the request and nearby station diagnostics. Try nearby coordinates or an explicit NDBC station ID.</p></section>{{end}}
 <section class="card full wind-card"><div class="wind-card-head"><h2>Wind</h2><label class="wind-unit-control" for="wind-unit-select">Wind speed<select id="wind-unit-select"><option value="kts" {{if eq .WindUnit "kts"}}selected{{end}}>Knots</option><option value="mph" {{if eq .WindUnit "mph"}}selected{{end}}>MPH</option></select></label></div>
 <div class="metrics">
@@ -4775,6 +6310,37 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 </div>{{end}}
 </section>
 
+<section id="offshore-trip-card" class="card full offshore-trip-card" hidden>
+<div class="offshore-trip-head"><div><h2>Offshore Trip Planning</h2><div id="offshore-trip-coords" class="offshore-trip-coords"></div></div></div>
+<div id="offshore-trip-loading" class="offshore-trip-loading">Select an offshore ★ destination to evaluate conditions.</div>
+<div id="offshore-trip-content" hidden>
+<div id="offshore-trip-summary" class="offshore-trip-summary"></div>
+<div id="offshore-trip-buoy" class="offshore-trip-buoy"></div>
+<div class="offshore-trip-metrics">
+<div class="offshore-trip-metric"><div class="label">Observed wind</div><div id="offshore-trip-wind" class="value">—</div></div>
+<div class="offshore-trip-metric"><div class="label">Gust</div><div id="offshore-trip-gust" class="value">—</div></div>
+<div class="offshore-trip-metric"><div class="label">Wave height</div><div id="offshore-trip-wave" class="value">—</div></div>
+<div class="offshore-trip-metric"><div class="label">Dominant period</div><div id="offshore-trip-period" class="value">—</div></div>
+<div class="offshore-trip-metric"><div class="label">Wave direction</div><div id="offshore-trip-direction" class="value">—</div></div>
+</div>
+<div id="offshore-trip-watch-wrap" hidden><strong>Watch items</strong><ul id="offshore-trip-watch" class="offshore-trip-watch"></ul></div>
+<div id="offshore-trip-forecast" class="offshore-trip-forecast"></div>
+<p class="offshore-trip-note">Observed values come from the nearest usable NDBC station found near the selected destination. Forecast text and alerts come from the NWS forecast zone for the selected point. The buoy may be tens of miles from the destination and the zone forecast covers a broad area; use this as planning context, not a point-specific guarantee.</p>
+<div id="fishing-planning" class="fishing-planning">
+<div class="fishing-planning-head"><h3>Fishing Planning</h3><span id="fishing-planning-status" class="fishing-planning-status">Loading water and fishing context…</span></div>
+<div id="fishing-planning-summary" class="fishing-planning-summary">Select a ★ destination to evaluate the fishing setup.</div>
+<div class="fishing-planning-grid">
+<div class="fishing-planning-item"><div class="label">Sea Surface Temp</div><div id="fishing-planning-sst" class="value">—</div><div id="fishing-planning-sst-detail" class="detail"></div></div>
+<div class="fishing-planning-item"><div class="label">Chlorophyll</div><div id="fishing-planning-chl" class="value">—</div><div id="fishing-planning-chl-detail" class="detail"></div></div>
+<div class="fishing-planning-item"><div class="label">Structure</div><div id="fishing-planning-structure" class="value">—</div><div id="fishing-planning-structure-detail" class="detail"></div></div>
+<div class="fishing-planning-item"><div class="label">Recent reports</div><div id="fishing-planning-reports" class="value">—</div><div id="fishing-planning-reports-detail" class="detail"></div></div>
+</div>
+<p id="fishing-planning-error" class="fishing-planning-error" hidden></p>
+</div>
+</div>
+<p id="offshore-trip-error" class="offshore-trip-error" hidden></p>
+</section>
+
 <section id="marine-forecast-card" class="card full marine-forecast-card" {{if not (or .MarineForecastPeriods .MarineForecastError)}}hidden{{end}}>
 <div class="marine-forecast-head"><div><h2 id="marine-forecast-title">NWS Forecast{{if .MarineForecastStation}}{{if eq .MarineForecastStation "selected location"}} — selected location{{else}} — near {{.MarineForecastStation}}{{end}}{{end}}</h2><div id="marine-forecast-zone" class="marine-forecast-zone" {{if not .MarineForecastZone}}hidden{{end}}>National Weather Service forecast zone {{.MarineForecastZone}}{{if .MarineForecastUpdated}} · Marine forecast updated {{.MarineForecastUpdated}}{{end}}</div></div></div>
 <div id="marine-forecast-alerts" class="marine-alerts" aria-label="Active National Weather Service alerts" {{if not .MarineForecastAlerts}}hidden{{end}}>{{range .MarineForecastAlerts}}<span class="marine-alert">⚠ NWS alert — {{.}}</span>{{end}}</div>
@@ -4787,7 +6353,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 
 
 {{if .CurrentChart}}<section id="current-chart-card" class="card full"><div class="current-chart-header"><div><h2>Tidal Current</h2>{{if .CurrentRangeLabel}}<div class="current-date-label">{{.CurrentRangeLabel}}</div>{{end}}</div></div><div class="current-range-toolbar" aria-label="Current graph date controls"><a class="current-date-nav" href="{{.CurrentPrevURL}}" aria-label="Previous date range">← Previous range</a><label class="current-control-label"><span>Start date</span><input id="current-date-picker" class="current-date-picker" type="date" value="{{.CurrentDateISO}}" aria-label="Choose starting date"></label><label class="current-control-label"><span>Range</span><select id="current-days-picker" class="current-date-picker" aria-label="Number of days"><option value="1" {{if eq .CurrentDays 1}}selected{{end}}>1 day</option><option value="3" {{if eq .CurrentDays 3}}selected{{end}}>3 days</option><option value="7" {{if eq .CurrentDays 7}}selected{{end}}>7 days</option></select></label><a class="current-date-nav {{if .CurrentIsToday}}is-current{{end}}" href="{{.CurrentTodayURL}}">Today</a><a class="current-date-nav" href="{{.CurrentNextURL}}" aria-label="Next date range">Next range →</a></div>{{if .CurrentWindow}}<div class="current-window-inline"><strong>{{if .CurrentWindowMode}}{{.CurrentWindowMode}}{{else}}Conditions window{{end}}</strong><span>{{.CurrentWindow}}</span></div>{{end}}<div class="chart-explainer"><strong>This is current, not tide height.</strong> Above zero = flood; below zero = ebb; crossings = slack water.</div>{{if .TideRangeOverlayAvailable}}<div class="tide-range-legend"><label class="tide-range-toggle"><input id="show-tide-range-overlay" type="checkbox" checked> Show daily tidal range on right axis</label><span class="tide-range-key"><span class="tide-range-swatch typical"></span>{{if .TideRangeLegendTypical}}{{.TideRangeLegendTypical}}{{else}}Normal-cycle (&lt; +15%){{end}}</span><span class="tide-range-key"><span class="tide-range-swatch elevated"></span>{{if .TideRangeLegendElevated}}{{.TideRangeLegendElevated}}{{else}}Elevated (≥ +15%){{end}}</span><span class="tide-range-key"><span class="tide-range-swatch large"></span>{{if .TideRangeLegendLarge}}{{.TideRangeLegendLarge}}{{else}}Large (≥ +30%){{end}}</span><span class="tide-range-key"><span class="tide-range-swatch exceptional"></span>{{if .TideRangeLegendExceptional}}{{.TideRangeLegendExceptional}}{{else}}Exceptional (≥ +45%){{end}}</span></div>{{end}}<div class="current-chart-wrap">{{.CurrentChart}}</div><div class="chart-note">NOAA 6-minute harmonic current predictions. The current-speed axis stays at ±3.5 kt for date-to-date comparison and expands only when needed. Darker bands are night; light areas are daylight; warm bands mark the configured preferred planning period. When enabled, thin daily markers use a stable 0–10 ft right axis for predicted high-to-low tidal range, expanding only above 10 ft when needed; marker color is classified relative to the surrounding lunar-cycle median, where Normal-cycle means less than 15% above that median. {{if eq .CurrentDays 1}}Max flood, max ebb, and slack events are labeled with their times.{{else}}Small dots mark max flood, max ebb, and slack across the displayed range.{{end}} {{if .CurrentIsToday}}Red line marks report time when it falls inside the displayed range.{{end}}{{if gt .CurrentDays 1}} Day boundaries are emphasized for multi-day planning.{{end}}</div><div class="current-events-integrated"><div class="current-events-head"><strong>Key current times{{if .CurrentDateLabel}} — {{.CurrentDateLabel}}{{end}}</strong>{{if gt .CurrentDays 1}}<span>Selected start date only; graph covers {{.CurrentDays}} days.</span>{{end}}</div><div class="current-key-times">{{range .CurrentEvents}}<div class="current-key-time"><div class="current-key-time-time">{{.Time}}</div><div class="current-key-time-label"><strong>{{.Label}}</strong>{{if .Speed}}<span class="current-key-time-meta">{{.Speed}} · {{.Direction}}</span>{{end}}</div></div>{{else}}<p>No key current times in the conditions window.</p>{{end}}</div></div>{{if .CurrentPlanningHints}}<div class="current-planning"><div class="current-planning-head"><strong>Preferred-period planning hint{{if eq .CurrentDays 1}} — today / selected day{{end}}</strong><span>Current strength has separate caution and red-flag thresholds; the time buffer also warns about strong current just outside the preferred period.</span></div><div class="planning-preferences"><div class="planning-preferences-row"><label><span>Start</span><input id="planning-start" type="time" value="{{.PlanningStart}}" aria-label="Preferred period start"></label><label><span>End</span><input id="planning-end" type="time" value="{{.PlanningEnd}}" aria-label="Preferred period end"></label></div><div class="planning-preferences-row"><label><span>Ebb caution</span><input id="planning-caution-ebb" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningCautionEbb}}" aria-label="Ebb caution threshold in knots"><b>kt</b></label><label><span>Ebb red</span><input id="planning-max-ebb" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningMaxEbb}}" aria-label="Ebb red flag threshold in knots"><b>kt</b></label></div><div class="planning-preferences-row"><label><span>Flood caution</span><input id="planning-caution-flood" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningCautionFlood}}" aria-label="Flood caution threshold in knots"><b>kt</b></label><label><span>Flood red</span><input id="planning-max-flood" type="number" min="0.1" max="10" step="0.1" value="{{.PlanningMaxFlood}}" aria-label="Flood red flag threshold in knots"><b>kt</b></label></div><div class="planning-preferences-row"><label><span>Caution time before/after period</span><input id="planning-buffer" type="number" min="0" max="360" step="15" value="{{.PlanningBuffer}}" aria-label="Caution time before or after preferred planning period in minutes"><b>min</b></label></div><div class="planning-preferences-row"><label><span>Currents station distance caution</span><input id="planning-current-distance-warning" type="number" min="0.1" max="{{.PlanningAutoCurrentLimit}}" step="0.1" value="{{.PlanningCurrentDistanceWarning}}" aria-label="Currents station distance caution threshold in nautical miles"><b>nmi</b></label></div></div><div class="planning-help"><strong>How these settings work:</strong> By default, ebb or flood below 2.0 kt is <strong>Preferred</strong>, 2.0 kt up to but not including 3.0 kt is <strong>Caution</strong>, and 3.0 kt or more during the preferred period is a <strong>Red flag</strong>. Ebb and flood thresholds can be adjusted independently. The caution time before/after period setting also warns when caution-level or stronger current occurs within that many minutes immediately before or after the preferred planning period; a threshold reached only there is reported as <strong>Caution</strong>. A currents station farther than the configured distance-caution threshold also makes the overall Conditions Now status <strong>Caution</strong>, without changing the current-strength classification. Automatic current-station selection will not use a station beyond {{.PlanningAutoCurrentLimit}} nmi.</div><div class="current-planning-days">{{range .CurrentPlanningHints}}<div class="planning-day {{.Class}}"><div class="planning-date">{{.Date}}</div><div class="planning-status">{{if eq .Class "preferred"}}✓{{else if eq .Class "redflag"}}⚠{{else}}△{{end}} {{.Status}}</div><div class="planning-detail">{{.Detail}}</div></div>{{end}}</div><div class="planning-disclaimer">Current-based planning hint only; wind, swell, weather, traffic, and local effects still matter.</div></div>{{end}}</section>{{end}}
-<section class="card full map-sources-card"><h2>Map &amp; Data Sources</h2><p class="map-sources-note">Base maps: <strong>Street Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service and is available at Zoom 9 or closer; <strong>Satellite</strong> uses Esri World Imagery; <strong>Hybrid</strong> combines Esri imagery with place/boundary labels. NWS forecast-zone, NOAA smoke, <strong>Satellite Cloud Cover</strong>, and radar layers remain independent overlays. The nautical chart layer is for planning/reference and does not replace official navigation products.</p></section>
+<section class="card full map-sources-card"><h2>Map &amp; Data Sources</h2><p class="map-sources-note">Base maps: <strong>Street Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service and is available at Zoom 9 or closer; <strong>Satellite</strong> uses Esri World Imagery; <strong>Hybrid</strong> combines Esri imagery with place/boundary labels. NWS forecast-zone, NOAA smoke, <strong>Sea Surface Temp</strong>, <strong>Satellite Cloud Cover</strong>, and radar layers remain independent overlays. The nautical chart layer is for planning/reference and does not replace official navigation products.</p></section>
 <section id="full-report-card" class="card full details-link-card"><div><h2>Need the details?</h2><p class="details-note">Open the complete text-style report, including diagnostic and supporting information.</p></div><a class="details-link" href="{{.FullDetailsURL}}">View full report details →</a></section>
 {{end}}</div>
 <div class="footer"><strong>Mauri's Weather & Water Conditions</strong><br>NOAA/NDBC observations + NWS forecast context + NOAA CO-OPS current predictions · Conditions-planning aid, not a navigation system<br>Version {{.AppVersion}} · Build {{.BuildVersion}}</div></main><div id="planning-loading-overlay" class="page-loading-overlay" aria-hidden="true"><div class="page-loading-box" role="status" aria-live="polite"><span class="page-loading-spinner" aria-hidden="true"></span><span>Loading Planning and Details…</span></div></div><script>
@@ -4844,6 +6410,30 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       formatMapScaleDistance(nauticalMiles) + " nmi / " +
       formatMapScaleDistance(statuteMiles) + " mi · Zoom " + map.getZoom();
   }
+  map.createPane("bathymetryOverlayPane");
+  map.getPane("bathymetryOverlayPane").style.zIndex = 410;
+  map.getPane("bathymetryOverlayPane").style.pointerEvents = "none";
+
+  map.createPane("underseaNamesPane");
+  map.getPane("underseaNamesPane").style.zIndex = 425;
+  map.getPane("underseaNamesPane").style.pointerEvents = "none";
+
+  map.createPane("fishingReportsPane");
+  map.getPane("fishingReportsPane").style.zIndex = 428;
+
+
+  map.createPane("sstOverlayPane");
+  map.getPane("sstOverlayPane").style.zIndex = 420;
+  map.getPane("sstOverlayPane").style.pointerEvents = "none";
+
+  map.createPane("chlorophyllFieldPane");
+  map.getPane("chlorophyllFieldPane").style.zIndex = 421;
+  map.getPane("chlorophyllFieldPane").style.pointerEvents = "none";
+
+  map.createPane("chlorophyllOverlayPane");
+  map.getPane("chlorophyllOverlayPane").style.zIndex = 423;
+  map.getPane("chlorophyllOverlayPane").style.pointerEvents = "none";
+
   map.createPane("cloudOverlayPane");
   map.getPane("cloudOverlayPane").style.zIndex = 430;
   map.getPane("cloudOverlayPane").style.pointerEvents = "none";
@@ -5065,6 +6655,9 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       input.checked = input.value === preferredMapLayerName;
     });
 
+    if (sstLayer && mapState.sstOverlayVisible && map.hasLayer(sstLayer)) {
+      sstLayer.bringToFront();
+    }
     if (cloudLayer && mapState.cloudOverlayVisible && map.hasLayer(cloudLayer)) {
       cloudLayer.bringToFront();
     }
@@ -5109,6 +6702,37 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 
   // These overlay objects must remain live for the checkbox handlers below.
   // Do not reinitialize cloudLayer or radarLayer to null later in this script.
+  var sstLatestTime = "";
+  var sstMetadataLoaded = false;
+  var sstMetadataLoading = false;
+  var sstLayer = null;
+  var sstObjectURL = "";
+  var sstRequestSerial = 0;
+  var sstRefreshTimer = null;
+
+  var chlLatestTime = "";
+  var chlMetadataLoaded = false;
+  var chlMetadataLoading = false;
+  var chlLayer = null;
+  var chlObjectURL = "";
+  var chlRequestSerial = 0;
+  var chlRefreshTimer = null;
+
+  var chlFieldLayer = null;
+  var chlFieldObjectURL = "";
+  var chlFieldRequestSerial = 0;
+  var chlFieldRefreshTimer = null;
+
+  var structureReliefLayer = null;
+  var structureNamesLayer = null;
+  var structureRequestSerial = 0;
+  var structureRefreshTimer = null;
+  var fishingReportsLayer = null;
+  var structureReliefServiceURL =
+    "https://gis.ngdc.noaa.gov/arcgis/rest/services/etopo1/MapServer/export";
+  var structureNamesServiceURL =
+    "https://coast.noaa.gov/arcgis/rest/services/MarineCadastre/UnderseaFeaturePlaceNames/MapServer/0/query";
+
   var cloudLayer = null;
   var cloudRequestSerial = 0;
   var cloudRefreshTimer = null;
@@ -5127,6 +6751,1161 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       attribution: "NWS NEXRAD radar via Iowa State IEM"
     }
   );
+
+  function setSSTStatus(message, isError) {
+    var status = document.getElementById("map-sst-status");
+    if (!status) return;
+    message = String(message || "").trim();
+    status.hidden = !message;
+    status.textContent = message;
+    status.style.color = isError ? "#9a352f" : "";
+  }
+
+  function setSSTLegendVisible(visible) {
+    var legend = document.getElementById("map-sst-legend");
+    if (legend) legend.hidden = !visible;
+  }
+
+  function formatSSTDatasetTime(value) {
+    var parsed = new Date(value);
+    if (!Number.isFinite(parsed.getTime())) return String(value || "");
+    return parsed.toLocaleString([], {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      timeZoneName: "short"
+    });
+  }
+
+  function ensureSSTMetadata(callback) {
+    if (sstMetadataLoaded) {
+      callback(true);
+      return;
+    }
+    if (sstMetadataLoading) {
+      window.setTimeout(function() { ensureSSTMetadata(callback); }, 120);
+      return;
+    }
+
+    sstMetadataLoading = true;
+    fetch("/sst-info", {headers: {"Accept":"application/json"}})
+      .then(function(response) {
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        return response.json();
+      })
+      .then(function(payload) {
+        sstMetadataLoading = false;
+        sstLatestTime = String(payload.time || "");
+        if (!sstLatestTime) throw new Error("missing dataset time");
+        sstMetadataLoaded = true;
+        callback(true);
+      })
+      .catch(function(err) {
+        sstMetadataLoading = false;
+        // ERDDAP defines time=current as the latest available field, so
+        // metadata failure must not prevent the SST image from rendering.
+        sstLatestTime = "current";
+        sstMetadataLoaded = true;
+        setSSTStatus("NOAA CoastWatch SST · using latest available daily field.", false);
+        callback(true);
+      });
+  }
+
+  function sstOverlayURL(bounds) {
+    var mapSize = map.getSize();
+    // ERDDAP renders this raster on demand. Keep the request modest and avoid
+    // Retina/device-pixel doubling so the overlay loads reliably.
+    var width = Math.max(256, Math.min(1200, Math.round(mapSize.x)));
+    var height = Math.max(256, Math.min(900, Math.round(mapSize.y)));
+    var params = new URLSearchParams();
+    params.set("west", bounds.getWest().toFixed(6));
+    params.set("south", bounds.getSouth().toFixed(6));
+    params.set("east", bounds.getEast().toFixed(6));
+    params.set("north", bounds.getNorth().toFixed(6));
+    params.set("width", String(width));
+    params.set("height", String(height));
+    if (sstLatestTime) params.set("time", sstLatestTime);
+    return "/sst-overlay?" + params.toString();
+  }
+
+  function refreshSSTOverlay() {
+    if (!mapState.sstOverlayVisible || !sstMetadataLoaded) return;
+
+    var bounds = map.getBounds();
+    if (bounds.getWest() < -180 || bounds.getEast() > 180) {
+      setSSTStatus(
+        "Satellite SST is unavailable while the map view crosses the international date line.",
+        true
+      );
+      return;
+    }
+
+    var requestSerial = ++sstRequestSerial;
+    var overlayURL = sstOverlayURL(bounds);
+
+    setSSTLegendVisible(false);
+    setSSTStatus("Loading NOAA CoastWatch SST image…", false);
+
+    var sstUpstreamLabel = "";
+    fetch(overlayURL, {
+      headers: {"Accept": "image/png"}
+    })
+      .then(function(response) {
+        sstUpstreamLabel = String(response.headers.get("X-SST-Upstream") || "").trim();
+        var contentType = String(response.headers.get("Content-Type") || "").toLowerCase();
+        if (!response.ok) {
+          return response.text().then(function(detail) {
+            detail = String(detail || "").trim();
+            if (detail.length > 1200) detail = detail.slice(0, 1200) + "…";
+            throw new Error(detail || ("HTTP " + response.status));
+          });
+        }
+        if (contentType.indexOf("image/png") === -1) {
+          return response.text().then(function(detail) {
+            detail = String(detail || "").trim();
+            if (detail.length > 1200) detail = detail.slice(0, 1200) + "…";
+            throw new Error(
+              "Expected PNG from SST proxy but received " +
+              (contentType || "an unknown content type") +
+              (detail ? ": " + detail : "")
+            );
+          });
+        }
+        return response.blob();
+      })
+      .then(function(blob) {
+        if (!mapState.sstOverlayVisible || requestSerial !== sstRequestSerial) return;
+
+        var objectURL = URL.createObjectURL(blob);
+        var nextLayer = L.imageOverlay(objectURL, bounds, {
+          opacity: 0.72,
+          pane: "sstOverlayPane",
+          interactive: false,
+          attribution: "NOAA CoastWatch Geo-Polar Blended SST"
+        });
+
+        nextLayer.once("load", function() {
+          if (!mapState.sstOverlayVisible || requestSerial !== sstRequestSerial) {
+            if (map.hasLayer(nextLayer)) map.removeLayer(nextLayer);
+            URL.revokeObjectURL(objectURL);
+            return;
+          }
+
+          var previousLayer = sstLayer;
+          var previousObjectURL = sstObjectURL;
+          sstLayer = nextLayer;
+          sstObjectURL = objectURL;
+          sstLayer.bringToFront();
+
+          if (previousLayer && previousLayer !== sstLayer && map.hasLayer(previousLayer)) {
+            map.removeLayer(previousLayer);
+          }
+          if (previousObjectURL && previousObjectURL !== sstObjectURL) {
+            URL.revokeObjectURL(previousObjectURL);
+          }
+
+          setSSTLegendVisible(true);
+          var sstTimeLabel = sstLatestTime === "current"
+            ? "latest available daily field"
+            : "latest daily field: " + formatSSTDatasetTime(sstLatestTime);
+          var upstreamSuffix = sstUpstreamLabel ? " · via " + sstUpstreamLabel : "";
+          setSSTStatus("NOAA CoastWatch Geo-Polar SST · fixed 45–75°F temp-break scale · " + sstTimeLabel + upstreamSuffix + " · IPv4", false);
+
+          if (cloudLayer && mapState.cloudOverlayVisible && map.hasLayer(cloudLayer)) cloudLayer.bringToFront();
+          if (radarLayer && mapState.radarOverlayVisible && map.hasLayer(radarLayer)) radarLayer.bringToFront();
+        });
+
+        nextLayer.once("error", function() {
+          if (map.hasLayer(nextLayer)) map.removeLayer(nextLayer);
+          URL.revokeObjectURL(objectURL);
+          if (requestSerial !== sstRequestSerial || !mapState.sstOverlayVisible) return;
+          setSSTLegendVisible(false);
+          setSSTStatus("SST PNG was received but could not be displayed by the map.", true);
+        });
+
+        nextLayer.addTo(map);
+        nextLayer.bringToFront();
+      })
+      .catch(function(err) {
+        if (requestSerial !== sstRequestSerial || !mapState.sstOverlayVisible) return;
+        setSSTLegendVisible(false);
+        var detail = String(err && err.message ? err.message : err || "unknown error").trim();
+        setSSTStatus("NOAA CoastWatch Sea Surface Temp request failed: " + detail, true);
+      });
+  }
+
+  function scheduleSSTRefresh() {
+    if (!mapState.sstOverlayVisible) return;
+    if (sstRefreshTimer) window.clearTimeout(sstRefreshTimer);
+    sstRefreshTimer = window.setTimeout(function() {
+      sstRefreshTimer = null;
+      if (!sstMetadataLoaded) {
+        setSSTStatus("Loading latest NOAA CoastWatch sea-surface temperature…", false);
+        ensureSSTMetadata(function(ok) {
+          if (!mapState.sstOverlayVisible || !ok) return;
+          refreshSSTOverlay();
+        });
+        return;
+      }
+      refreshSSTOverlay();
+    }, 180);
+  }
+
+  function setSSTOverlayVisible(visible) {
+    mapState.sstOverlayVisible = !!visible;
+    if (!mapState.sstOverlayVisible) {
+      sstRequestSerial++;
+      if (sstRefreshTimer) {
+        window.clearTimeout(sstRefreshTimer);
+        sstRefreshTimer = null;
+      }
+      if (sstLayer && map.hasLayer(sstLayer)) map.removeLayer(sstLayer);
+      sstLayer = null;
+      if (sstObjectURL) {
+        URL.revokeObjectURL(sstObjectURL);
+        sstObjectURL = "";
+      }
+      setSSTLegendVisible(false);
+      setSSTStatus("", false);
+      return;
+    }
+
+    setSSTStatus("Loading latest NOAA CoastWatch sea-surface temperature…", false);
+    ensureSSTMetadata(function(ok) {
+      if (!mapState.sstOverlayVisible || !ok) return;
+      refreshSSTOverlay();
+    });
+  }
+
+  function setChlorophyllFieldStatus(message, isError) {
+    var status = document.getElementById("map-chl-field-status");
+    if (!status) return;
+    message = String(message || "").trim();
+    status.hidden = !message;
+    status.textContent = message;
+    status.style.color = isError ? "#9a352f" : "";
+  }
+
+  function setChlorophyllFieldLegendVisible(visible) {
+    var legend = document.getElementById("map-chl-field-legend");
+    if (legend) legend.hidden = !visible;
+  }
+
+  function chlorophyllFieldRequest(bounds) {
+    var mapSize = map.getSize();
+    var width = Math.max(256, Math.min(1400, Math.round(mapSize.x)));
+    var height = Math.max(256, Math.min(1000, Math.round(mapSize.y)));
+    var params = new URLSearchParams();
+    params.set("west", bounds.getWest().toFixed(6));
+    params.set("south", bounds.getSouth().toFixed(6));
+    params.set("east", bounds.getEast().toFixed(6));
+    params.set("north", bounds.getNorth().toFixed(6));
+    params.set("width", String(width));
+    params.set("height", String(height));
+    return "/chlorophyll-field?" + params.toString();
+  }
+
+  function refreshChlorophyllField() {
+    if (!mapState.chlorophyllFieldVisible || !chlMetadataLoaded) return;
+
+    var bounds = map.getBounds();
+    if (bounds.getWest() < -180 || bounds.getEast() > 180) {
+      setChlorophyllFieldStatus(
+        "Satellite chlorophyll is unavailable while the map view crosses the international date line.",
+        true
+      );
+      return;
+    }
+
+    var requestSerial = ++chlFieldRequestSerial;
+    var fieldURL = chlorophyllFieldRequest(bounds);
+    setChlorophyllFieldLegendVisible(false);
+    setChlorophyllFieldStatus("Loading NOAA CoastWatch chlorophyll field…", false);
+
+    var upstreamLabel = "";
+    var servedTime = "";
+    fetch(fieldURL, {headers: {"Accept":"image/png"}})
+      .then(function(response) {
+        upstreamLabel = String(response.headers.get("X-Chlorophyll-Upstream") || "").trim();
+        servedTime = String(response.headers.get("X-Chlorophyll-Time") || "").trim();
+        var contentType = String(response.headers.get("Content-Type") || "").toLowerCase();
+        if (!response.ok) {
+          return response.text().then(function(detail) {
+            detail = String(detail || "").trim();
+            if (detail.length > 1200) detail = detail.slice(0, 1200) + "…";
+            throw new Error(detail || ("HTTP " + response.status));
+          });
+        }
+        if (contentType.indexOf("image/png") === -1) {
+          throw new Error("Expected PNG from chlorophyll field proxy but received " + contentType);
+        }
+        return response.blob();
+      })
+      .then(function(blob) {
+        if (!mapState.chlorophyllFieldVisible || requestSerial !== chlFieldRequestSerial) return;
+
+        var objectURL = URL.createObjectURL(blob);
+        var nextLayer = L.imageOverlay(objectURL, bounds, {
+          opacity: 0.34,
+          pane: "chlorophyllFieldPane",
+          interactive: false,
+          attribution: "NOAA CoastWatch DINEOF chlorophyll field"
+        });
+
+        nextLayer.once("load", function() {
+          if (!mapState.chlorophyllFieldVisible || requestSerial !== chlFieldRequestSerial) {
+            if (map.hasLayer(nextLayer)) map.removeLayer(nextLayer);
+            URL.revokeObjectURL(objectURL);
+            return;
+          }
+
+          var previousLayer = chlFieldLayer;
+          var previousObjectURL = chlFieldObjectURL;
+          chlFieldLayer = nextLayer;
+          chlFieldObjectURL = objectURL;
+
+          if (previousLayer && previousLayer !== chlFieldLayer && map.hasLayer(previousLayer)) {
+            map.removeLayer(previousLayer);
+          }
+          if (previousObjectURL && previousObjectURL !== chlFieldObjectURL) {
+            URL.revokeObjectURL(previousObjectURL);
+          }
+
+          setChlorophyllFieldLegendVisible(true);
+          var displayTime = servedTime || chlLatestTime;
+          var timeLabel = !displayTime || displayTime === "current"
+            ? "latest available daily field"
+            : "data field: " + formatChlorophyllDatasetTime(displayTime);
+          var upstreamSuffix = upstreamLabel ? " · via " + upstreamLabel : "";
+          setChlorophyllFieldStatus(
+            "NOAA DINEOF chlorophyll field · gap-filled 2 km · 0.1–1 mg/m³ display · " +
+            timeLabel + upstreamSuffix + " · IPv4",
+            false
+          );
+
+          if (chlLayer && mapState.chlorophyllOverlayVisible && map.hasLayer(chlLayer)) chlLayer.bringToFront();
+          if (structureNamesLayer && mapState.structureOverlayVisible && map.hasLayer(structureNamesLayer)) {
+            structureNamesLayer.eachLayer(function(layer) {
+              if (layer.bringToFront) layer.bringToFront();
+            });
+          }
+        });
+
+        nextLayer.once("error", function() {
+          if (map.hasLayer(nextLayer)) map.removeLayer(nextLayer);
+          URL.revokeObjectURL(objectURL);
+          if (requestSerial !== chlFieldRequestSerial || !mapState.chlorophyllFieldVisible) return;
+          setChlorophyllFieldLegendVisible(false);
+          setChlorophyllFieldStatus("Chlorophyll field PNG was received but could not be displayed by the map.", true);
+        });
+
+        nextLayer.addTo(map);
+      })
+      .catch(function(err) {
+        if (requestSerial !== chlFieldRequestSerial || !mapState.chlorophyllFieldVisible) return;
+        setChlorophyllFieldLegendVisible(false);
+        var detail = String(err && err.message ? err.message : err || "unknown error").trim();
+        setChlorophyllFieldStatus("NOAA CoastWatch chlorophyll field request failed: " + detail, true);
+      });
+  }
+
+  function scheduleChlorophyllFieldRefresh() {
+    if (!mapState.chlorophyllFieldVisible) return;
+    if (chlFieldRefreshTimer) window.clearTimeout(chlFieldRefreshTimer);
+    chlFieldRefreshTimer = window.setTimeout(function() {
+      chlFieldRefreshTimer = null;
+      if (!chlMetadataLoaded) {
+        ensureChlorophyllMetadata(function(ok) {
+          if (!mapState.chlorophyllFieldVisible || !ok) return;
+          refreshChlorophyllField();
+        });
+        return;
+      }
+      refreshChlorophyllField();
+    }, 180);
+  }
+
+  function setChlorophyllFieldVisible(visible) {
+    mapState.chlorophyllFieldVisible = !!visible;
+    if (!mapState.chlorophyllFieldVisible) {
+      chlFieldRequestSerial++;
+      if (chlFieldRefreshTimer) {
+        window.clearTimeout(chlFieldRefreshTimer);
+        chlFieldRefreshTimer = null;
+      }
+      if (chlFieldLayer && map.hasLayer(chlFieldLayer)) map.removeLayer(chlFieldLayer);
+      chlFieldLayer = null;
+      if (chlFieldObjectURL) {
+        URL.revokeObjectURL(chlFieldObjectURL);
+        chlFieldObjectURL = "";
+      }
+      setChlorophyllFieldLegendVisible(false);
+      setChlorophyllFieldStatus("", false);
+      return;
+    }
+
+    setChlorophyllFieldStatus("Loading latest NOAA CoastWatch chlorophyll field…", false);
+    ensureChlorophyllMetadata(function(ok) {
+      if (!mapState.chlorophyllFieldVisible || !ok) return;
+      refreshChlorophyllField();
+    });
+  }
+
+  function setChlorophyllStatus(message, isError) {
+    var status = document.getElementById("map-chl-status");
+    if (!status) return;
+    message = String(message || "").trim();
+    status.hidden = !message;
+    status.textContent = message;
+    status.style.color = isError ? "#9a352f" : "";
+  }
+
+  function setChlorophyllLegendVisible(visible) {
+    var legend = document.getElementById("map-chl-legend");
+    if (legend) legend.hidden = !visible;
+  }
+
+  function formatChlorophyllDatasetTime(value) {
+    var parsed = new Date(value);
+    if (!Number.isFinite(parsed.getTime())) return String(value || "");
+    return parsed.toLocaleString([], {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      timeZoneName: "short"
+    });
+  }
+
+  function ensureChlorophyllMetadata(callback) {
+    if (chlMetadataLoaded) {
+      callback(true);
+      return;
+    }
+    if (chlMetadataLoading) {
+      window.setTimeout(function() { ensureChlorophyllMetadata(callback); }, 120);
+      return;
+    }
+
+    chlMetadataLoading = true;
+    fetch("/chlorophyll-info", {headers: {"Accept":"application/json"}})
+      .then(function(response) {
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        return response.json();
+      })
+      .then(function(payload) {
+        chlMetadataLoading = false;
+        chlLatestTime = String(payload.time || "");
+        if (!chlLatestTime) throw new Error("missing dataset time");
+        chlMetadataLoaded = true;
+        callback(true);
+      })
+      .catch(function() {
+        chlMetadataLoading = false;
+        chlLatestTime = "current";
+        chlMetadataLoaded = true;
+        setChlorophyllStatus(
+          "NOAA CoastWatch chlorophyll · using latest available daily field.",
+          false
+        );
+        callback(true);
+      });
+  }
+
+  function chlorophyllOverlayRequest(bounds) {
+    var mapSize = map.getSize();
+    var width = Math.max(256, Math.min(1400, Math.round(mapSize.x)));
+    var height = Math.max(256, Math.min(1000, Math.round(mapSize.y)));
+    var params = new URLSearchParams();
+    params.set("west", bounds.getWest().toFixed(6));
+    params.set("south", bounds.getSouth().toFixed(6));
+    params.set("east", bounds.getEast().toFixed(6));
+    params.set("north", bounds.getNorth().toFixed(6));
+    params.set("width", String(width));
+    params.set("height", String(height));
+    return {
+      url: "/chlorophyll-overlay?" + params.toString(),
+      bounds: bounds
+    };
+  }
+
+  function refreshChlorophyllOverlay() {
+    if (!mapState.chlorophyllOverlayVisible || !chlMetadataLoaded) return;
+
+    var bounds = map.getBounds();
+    if (bounds.getWest() < -180 || bounds.getEast() > 180) {
+      setChlorophyllStatus(
+        "Satellite chlorophyll is unavailable while the map view crosses the international date line.",
+        true
+      );
+      return;
+    }
+
+    var request = chlorophyllOverlayRequest(bounds);
+    var requestSerial = ++chlRequestSerial;
+    var overlayURL = request.url;
+    var overlayBounds = request.bounds;
+
+    setChlorophyllLegendVisible(false);
+    setChlorophyllStatus("Loading NOAA CoastWatch chlorophyll image…", false);
+
+    var upstreamLabel = "";
+    var servedTime = "";
+    fetch(overlayURL, {headers: {"Accept":"image/png"}})
+      .then(function(response) {
+        upstreamLabel = String(response.headers.get("X-Chlorophyll-Upstream") || "").trim();
+        servedTime = String(response.headers.get("X-Chlorophyll-Time") || "").trim();
+        var contentType = String(response.headers.get("Content-Type") || "").toLowerCase();
+        if (!response.ok) {
+          return response.text().then(function(detail) {
+            detail = String(detail || "").trim();
+            if (detail.length > 500) detail = detail.slice(0, 500) + "…";
+            throw new Error(detail || ("HTTP " + response.status));
+          });
+        }
+        if (contentType.indexOf("image/png") === -1) {
+          return response.text().then(function(detail) {
+            detail = String(detail || "").trim();
+            if (detail.length > 500) detail = detail.slice(0, 500) + "…";
+            throw new Error(
+              "Expected PNG from chlorophyll proxy but received " +
+              (contentType || "an unknown content type") +
+              (detail ? ": " + detail : "")
+            );
+          });
+        }
+        return response.blob();
+      })
+      .then(function(blob) {
+        if (!mapState.chlorophyllOverlayVisible || requestSerial !== chlRequestSerial) return;
+
+        var objectURL = URL.createObjectURL(blob);
+        var nextLayer = L.imageOverlay(objectURL, overlayBounds, {
+          opacity: 0.98,
+          pane: "chlorophyllOverlayPane",
+          interactive: false,
+          attribution: "NOAA CoastWatch DINEOF chlorophyll contours"
+        });
+
+        nextLayer.once("load", function() {
+          if (!mapState.chlorophyllOverlayVisible || requestSerial !== chlRequestSerial) {
+            if (map.hasLayer(nextLayer)) map.removeLayer(nextLayer);
+            URL.revokeObjectURL(objectURL);
+            return;
+          }
+
+          var previousLayer = chlLayer;
+          var previousObjectURL = chlObjectURL;
+          chlLayer = nextLayer;
+          chlObjectURL = objectURL;
+          chlLayer.bringToFront();
+
+          if (previousLayer && previousLayer !== chlLayer && map.hasLayer(previousLayer)) {
+            map.removeLayer(previousLayer);
+          }
+          if (previousObjectURL && previousObjectURL !== chlObjectURL) {
+            URL.revokeObjectURL(previousObjectURL);
+          }
+
+          setChlorophyllLegendVisible(true);
+          var displayTime = servedTime || chlLatestTime;
+          var timeLabel = !displayTime || displayTime === "current"
+            ? "latest available daily field"
+            : "data field: " + formatChlorophyllDatasetTime(displayTime);
+          var upstreamSuffix = upstreamLabel ? " · via " + upstreamLabel : "";
+          setChlorophyllStatus(
+            "NOAA DINEOF chlorophyll contours · 0.2 / 0.3 / 0.5 mg/m³ · " +
+            timeLabel + upstreamSuffix + " · IPv4",
+            false
+          );
+
+          if (structureNamesLayer && mapState.structureOverlayVisible && map.hasLayer(structureNamesLayer)) {
+            structureNamesLayer.eachLayer(function(layer) {
+              if (layer.bringToFront) layer.bringToFront();
+            });
+          }
+          if (cloudLayer && mapState.cloudOverlayVisible && map.hasLayer(cloudLayer)) cloudLayer.bringToFront();
+          if (radarLayer && mapState.radarOverlayVisible && map.hasLayer(radarLayer)) radarLayer.bringToFront();
+        });
+
+        nextLayer.once("error", function() {
+          if (map.hasLayer(nextLayer)) map.removeLayer(nextLayer);
+          URL.revokeObjectURL(objectURL);
+          if (requestSerial !== chlRequestSerial || !mapState.chlorophyllOverlayVisible) return;
+          setChlorophyllLegendVisible(false);
+          setChlorophyllStatus("Chlorophyll contour PNG was received but could not be displayed by the map.", true);
+        });
+
+        nextLayer.addTo(map);
+        nextLayer.bringToFront();
+      })
+      .catch(function(err) {
+        if (requestSerial !== chlRequestSerial || !mapState.chlorophyllOverlayVisible) return;
+        setChlorophyllLegendVisible(false);
+        var detail = String(err && err.message ? err.message : err || "unknown error").trim();
+        setChlorophyllStatus("NOAA CoastWatch chlorophyll request failed: " + detail, true);
+      });
+  }
+
+  function scheduleChlorophyllRefresh() {
+    if (!mapState.chlorophyllOverlayVisible) return;
+    if (chlRefreshTimer) window.clearTimeout(chlRefreshTimer);
+    chlRefreshTimer = window.setTimeout(function() {
+      chlRefreshTimer = null;
+      if (!chlMetadataLoaded) {
+        setChlorophyllStatus("Loading latest NOAA CoastWatch chlorophyll…", false);
+        ensureChlorophyllMetadata(function(ok) {
+          if (!mapState.chlorophyllOverlayVisible || !ok) return;
+          refreshChlorophyllOverlay();
+        });
+        return;
+      }
+      refreshChlorophyllOverlay();
+    }, 180);
+  }
+
+  function setChlorophyllOverlayVisible(visible) {
+    mapState.chlorophyllOverlayVisible = !!visible;
+    if (!mapState.chlorophyllOverlayVisible) {
+      chlRequestSerial++;
+      if (chlRefreshTimer) {
+        window.clearTimeout(chlRefreshTimer);
+        chlRefreshTimer = null;
+      }
+      if (chlLayer && map.hasLayer(chlLayer)) map.removeLayer(chlLayer);
+      chlLayer = null;
+      if (chlObjectURL) {
+        URL.revokeObjectURL(chlObjectURL);
+        chlObjectURL = "";
+      }
+      setChlorophyllLegendVisible(false);
+      setChlorophyllStatus("", false);
+      return;
+    }
+
+    setChlorophyllStatus("Loading latest NOAA CoastWatch chlorophyll…", false);
+    ensureChlorophyllMetadata(function(ok) {
+      if (!mapState.chlorophyllOverlayVisible || !ok) return;
+      refreshChlorophyllOverlay();
+    });
+  }
+
+  var fishingReportsPayload = null;
+  var fishingReportsLoading = false;
+  var fishingReportsLoadCallbacks = [];
+
+  function loadFishingReports(callback) {
+    if (fishingReportsPayload) {
+      callback(true, fishingReportsPayload);
+      return;
+    }
+    fishingReportsLoadCallbacks.push(callback);
+    if (fishingReportsLoading) return;
+
+    fishingReportsLoading = true;
+    fetch("/fishing-reports", {headers: {"Accept":"application/json"}})
+      .then(function(response) {
+        if (!response.ok) {
+          return response.text().then(function(detail) {
+            detail = String(detail || "").trim();
+            throw new Error(detail || ("HTTP " + response.status));
+          });
+        }
+        return response.json();
+      })
+      .then(function(payload) {
+        if (!payload || !Array.isArray(payload.reports)) {
+          throw new Error("fishing report feed is missing reports[]");
+        }
+        fishingReportsPayload = payload;
+        fishingReportsLoading = false;
+        var callbacks = fishingReportsLoadCallbacks.slice();
+        fishingReportsLoadCallbacks = [];
+        callbacks.forEach(function(fn) { fn(true, fishingReportsPayload); });
+      })
+      .catch(function(err) {
+        fishingReportsLoading = false;
+        var callbacks = fishingReportsLoadCallbacks.slice();
+        fishingReportsLoadCallbacks = [];
+        callbacks.forEach(function(fn) { fn(false, err); });
+      });
+  }
+
+  function setFishingReportsStatus(message, isError) {
+    var status = document.getElementById("map-fishing-status");
+    if (!status) return;
+    message = String(message || "").trim();
+    status.hidden = !message;
+    status.textContent = message;
+    status.style.color = isError ? "#9a352f" : "";
+  }
+
+  function setFishingReportsLegendVisible(visible) {
+    var legend = document.getElementById("map-fishing-legend");
+    if (legend) legend.hidden = !visible;
+  }
+
+  function fishingSpeciesStyle(species) {
+    if (String(species || "").toLowerCase() === "bluefin") {
+      return {color:"#17366f", fillColor:"#2658b8"};
+    }
+    return {color:"#0b5b5b", fillColor:"#18a6a6"};
+  }
+
+  function fishingPopupHTML(report) {
+    var html = '<div style="min-width:220px">';
+    html += '<strong>' + escapeHTML(report.species) + ' · ' + escapeHTML(report.date) + '</strong>';
+    if (report.count) html += '<br>' + escapeHTML(report.count);
+    if (report.size) html += ' · ' + escapeHTML(report.size);
+    if (report.locationText) html += '<br><strong>Location:</strong> ' + escapeHTML(report.locationText);
+    if (report.position_type === "derived_point" || report.confidence === "derived") {
+      html += '<br><strong>Position:</strong> approximate, derived from report shorthand';
+    } else if (report.position_type === "region" || report.confidence === "regional") {
+      html += '<br><strong>Position:</strong> broad regional report';
+    }
+    if (report.notes) html += '<br><span style="color:#526a74">' + escapeHTML(report.notes) + '</span>';
+    if (report.sourceURL) {
+      html += '<br><a href="' + escapeHTML(report.sourceURL) + '" target="_blank" rel="noopener noreferrer">' +
+        escapeHTML(report.source || "Source report") + '</a>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function renderFishingReports(payload) {
+    if (fishingReportsLayer && map.hasLayer(fishingReportsLayer)) {
+      map.removeLayer(fishingReportsLayer);
+    }
+    fishingReportsLayer = L.layerGroup();
+
+    var reports = payload && Array.isArray(payload.reports) ? payload.reports : [];
+    var pointCount = 0;
+    var regionCount = 0;
+
+    reports.forEach(function(report) {
+      var style = fishingSpeciesStyle(report.species);
+      var positionType = String(report.position_type || "").toLowerCase();
+
+      if (positionType === "derived_point" || positionType === "exact_point") {
+        var lat = Number(report.lat);
+        var lon = Number(report.lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+
+        var marker = L.circleMarker([lat, lon], {
+          pane: "fishingReportsPane",
+          radius: 7,
+          color: style.color,
+          weight: 2,
+          fillColor: style.fillColor,
+          fillOpacity: 0.92
+        }).bindPopup(fishingPopupHTML(report));
+        marker.addTo(fishingReportsLayer);
+        pointCount++;
+
+        if (positionType === "derived_point" && Number(report.uncertaintyNM) > 0) {
+          L.circle([lat, lon], {
+            pane: "fishingReportsPane",
+            radius: Number(report.uncertaintyNM) * 1852,
+            color: style.color,
+            weight: 1.5,
+            opacity: 0.75,
+            dashArray: "5 5",
+            fillColor: style.fillColor,
+            fillOpacity: 0.045,
+            interactive: false
+          }).addTo(fishingReportsLayer);
+        }
+        return;
+      }
+
+      if (positionType === "region" && Array.isArray(report.polygon) && report.polygon.length >= 3) {
+        var polygon = report.polygon
+          .map(function(pair) {
+            return Array.isArray(pair) && pair.length >= 2
+              ? [Number(pair[0]), Number(pair[1])]
+              : null;
+          })
+          .filter(function(pair) {
+            return pair && Number.isFinite(pair[0]) && Number.isFinite(pair[1]);
+          });
+        if (polygon.length < 3) return;
+
+        L.polygon(polygon, {
+          pane: "fishingReportsPane",
+          color: style.color,
+          weight: 2,
+          opacity: 0.85,
+          dashArray: "7 6",
+          fillColor: style.fillColor,
+          fillOpacity: 0.07
+        }).bindPopup(fishingPopupHTML(report)).addTo(fishingReportsLayer);
+        regionCount++;
+      }
+    });
+
+    fishingReportsLayer.addTo(map);
+    setFishingReportsLegendVisible(true);
+
+    var updated = String(payload && payload.updated || "").trim();
+    var suffix = updated ? " · feed updated " + updated : "";
+    setFishingReportsStatus(
+      "Fishing Reports feed · " + pointCount + " point reports + " + regionCount +
+      " regional reports" + suffix + ". Approximate locations are explicitly marked.",
+      false
+    );
+  }
+
+  function setFishingReportsVisible(visible) {
+    mapState.fishingReportsVisible = !!visible;
+    if (!mapState.fishingReportsVisible) {
+      if (fishingReportsLayer && map.hasLayer(fishingReportsLayer)) map.removeLayer(fishingReportsLayer);
+      setFishingReportsLegendVisible(false);
+      setFishingReportsStatus("", false);
+      return;
+    }
+
+    setFishingReportsStatus("Loading fishing reports…", false);
+    loadFishingReports(function(ok, result) {
+      if (!mapState.fishingReportsVisible) return;
+      if (!ok) {
+        setFishingReportsLegendVisible(false);
+        var detail = String(result && result.message ? result.message : result || "unknown error");
+        setFishingReportsStatus("Fishing Reports feed failed: " + detail, true);
+        return;
+      }
+      renderFishingReports(result);
+    });
+  }
+
+  function setStructureStatus(message, isError) {
+    var status = document.getElementById("map-structure-status");
+    if (!status) return;
+    message = String(message || "").trim();
+    status.hidden = !message;
+    status.textContent = message;
+    status.style.color = isError ? "#9a352f" : "";
+  }
+
+  function structureReliefExportURL(bounds) {
+    var sw = map.options.crs.project(bounds.getSouthWest());
+    var ne = map.options.crs.project(bounds.getNorthEast());
+    var mapSize = map.getSize();
+    var width = Math.max(256, Math.min(1600, Math.round(mapSize.x)));
+    var height = Math.max(256, Math.min(1000, Math.round(mapSize.y)));
+
+    var params = new URLSearchParams();
+    params.set("f", "image");
+    params.set("bbox", [sw.x, sw.y, ne.x, ne.y].join(","));
+    params.set("bboxSR", "3857");
+    params.set("imageSR", "3857");
+    params.set("size", width + "," + height);
+    params.set("format", "png32");
+    params.set("transparent", "true");
+    params.set("dpi", "96");
+    params.set("layers", "show:0");
+    return structureReliefServiceURL + "?" + params.toString();
+  }
+
+  function structureFeatureQueryURL(bounds) {
+    var params = new URLSearchParams();
+    params.set("f", "geojson");
+    params.set("where", "1=1");
+    params.set(
+      "geometry",
+      [
+        bounds.getWest().toFixed(6),
+        bounds.getSouth().toFixed(6),
+        bounds.getEast().toFixed(6),
+        bounds.getNorth().toFixed(6)
+      ].join(",")
+    );
+    params.set("geometryType", "esriGeometryEnvelope");
+    params.set("inSR", "4326");
+    params.set("outSR", "4326");
+    params.set("spatialRel", "esriSpatialRelIntersects");
+    params.set("outFields", "name");
+    params.set("returnGeometry", "true");
+    return structureNamesServiceURL + "?" + params.toString();
+  }
+
+  function isFishingStructureName(name) {
+    return /\b(seamount|bank|ridge|hills?|knoll|shoal|reef|rise|plateau|pinnacle|escarpment)\b/i.test(
+      String(name || "")
+    );
+  }
+
+  function structureNamePriority(name) {
+    name = String(name || "");
+    if (/\b(seamount|bank|ridge|plateau)\b/i.test(name)) return 0;
+    if (/\b(rise|escarpment)\b/i.test(name)) return 1;
+    return 2;
+  }
+
+  function structureLabelLimitForZoom(zoom) {
+    if (zoom < 6) return 0;
+    if (zoom === 6) return 10;
+    if (zoom === 7) return 24;
+    if (zoom === 8) return 45;
+    if (zoom === 9) return 65;
+    return 85;
+  }
+
+  function structureLabelBoxesOverlap(a, b) {
+    return !(
+      a.right < b.left ||
+      a.left > b.right ||
+      a.bottom < b.top ||
+      a.top > b.bottom
+    );
+  }
+
+  function renderStructureNames(featureCollection) {
+    if (structureNamesLayer && map.hasLayer(structureNamesLayer)) {
+      map.removeLayer(structureNamesLayer);
+    }
+    structureNamesLayer = L.layerGroup();
+
+    var zoom = map.getZoom();
+    var limit = structureLabelLimitForZoom(zoom);
+    if (limit <= 0) {
+      structureNamesLayer.addTo(map);
+      return {shown:0, eligible:0, suppressed:true, limit:0};
+    }
+
+    var features = featureCollection && Array.isArray(featureCollection.features)
+      ? featureCollection.features
+      : [];
+    var center = map.getCenter();
+    var candidates = [];
+
+    features.forEach(function(feature) {
+      var name = String(feature && feature.properties && feature.properties.name || "").trim();
+      var coords = feature && feature.geometry && feature.geometry.coordinates;
+      if (!name || !isFishingStructureName(name) ||
+          !Array.isArray(coords) || coords.length < 2) return;
+
+      var lon = Number(coords[0]);
+      var lat = Number(coords[1]);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+
+      var latlng = L.latLng(lat, lon);
+      var point = map.latLngToLayerPoint(latlng);
+      var distance = center ? map.distance(center, latlng) : 0;
+
+      candidates.push({
+        name: name,
+        lat: lat,
+        lon: lon,
+        point: point,
+        priority: structureNamePriority(name),
+        distance: distance
+      });
+    });
+
+    candidates.sort(function(a, b) {
+      if (a.priority !== b.priority) return a.priority - b.priority;
+      if (a.distance !== b.distance) return a.distance - b.distance;
+      return a.name.localeCompare(b.name);
+    });
+
+    var occupied = [];
+    var shown = 0;
+    var padding = zoom <= 7 ? 8 : 5;
+
+    candidates.some(function(candidate) {
+      if (shown >= limit) return true;
+
+      // Estimate the rendered label footprint before adding it. The local
+      // label uses ~13 px bold text plus a dot, so 7.4 px/character is a
+      // conservative collision estimate without forcing DOM measurement.
+      var width = Math.min(260, Math.max(72, 18 + candidate.name.length * 7.4));
+      var height = 23;
+      var box = {
+        left: candidate.point.x - 5 - padding,
+        right: candidate.point.x + width + padding,
+        top: candidate.point.y - 12 - padding,
+        bottom: candidate.point.y + height - 12 + padding
+      };
+
+      for (var i = 0; i < occupied.length; i++) {
+        if (structureLabelBoxesOverlap(box, occupied[i])) return false;
+      }
+
+      var icon = L.divIcon({
+        className: "map-undersea-feature-label",
+        html:
+          '<span class="undersea-dot" aria-hidden="true"></span>' +
+          '<span class="undersea-name">' + escapeHTML(candidate.name) + "</span>",
+        iconSize: null,
+        iconAnchor: [3, 4]
+      });
+
+      L.marker([candidate.lat, candidate.lon], {
+        icon: icon,
+        pane: "underseaNamesPane",
+        interactive: false,
+        keyboard: false,
+        riseOnHover: false
+      }).addTo(structureNamesLayer);
+
+      occupied.push(box);
+      shown++;
+      return false;
+    });
+
+    structureNamesLayer.addTo(map);
+    return {
+      shown: shown,
+      eligible: candidates.length,
+      suppressed: false,
+      limit: limit
+    };
+  }
+
+  function refreshStructureOverlay() {
+    if (!mapState.structureOverlayVisible) return;
+
+    var bounds = map.getBounds();
+    var requestSerial = ++structureRequestSerial;
+    var reliefURL = structureReliefExportURL(bounds);
+    var featuresURL = structureFeatureQueryURL(bounds);
+
+    setStructureStatus("Loading NOAA underwater structure…", false);
+
+    var reliefImage = new Image();
+    var reliefReady = false;
+    var featureData = null;
+    var featuresReady = false;
+    var failed = false;
+
+    function finishIfReady() {
+      if (failed || !reliefReady || !featuresReady) return;
+      if (!mapState.structureOverlayVisible || requestSerial !== structureRequestSerial) return;
+
+      var nextRelief = L.imageOverlay(reliefURL, bounds, {
+        opacity: 0.52,
+        pane: "bathymetryOverlayPane",
+        interactive: false,
+        attribution: "NOAA/NCEI ETOPO shaded relief"
+      });
+
+      nextRelief.once("load", function() {
+        if (!mapState.structureOverlayVisible || requestSerial !== structureRequestSerial) {
+          if (map.hasLayer(nextRelief)) map.removeLayer(nextRelief);
+          return;
+        }
+
+        var oldRelief = structureReliefLayer;
+        structureReliefLayer = nextRelief;
+        if (oldRelief && oldRelief !== structureReliefLayer && map.hasLayer(oldRelief)) {
+          map.removeLayer(oldRelief);
+        }
+
+        var labelResult = renderStructureNames(featureData);
+
+        if (sstLayer && mapState.sstOverlayVisible && map.hasLayer(sstLayer)) {
+          sstLayer.bringToFront();
+        }
+        if (structureNamesLayer && map.hasLayer(structureNamesLayer)) {
+          structureNamesLayer.eachLayer(function(layer) {
+            if (layer.bringToFront) layer.bringToFront();
+          });
+        }
+
+        if (labelResult.suppressed) {
+          setStructureStatus(
+            "NOAA underwater structure · ETOPO shaded relief · feature names hidden below Zoom 6 to prevent map clutter · planning aid, not for navigation.",
+            false
+          );
+        } else {
+          setStructureStatus(
+            "NOAA underwater structure · ETOPO shaded relief + " +
+            labelResult.shown +
+            " label" +
+            (labelResult.shown === 1 ? "" : "s") +
+            " shown from " +
+            labelResult.eligible +
+            " fishing-relevant official features in view · Zoom " +
+            map.getZoom() +
+            " cap " +
+            labelResult.limit +
+            " with collision suppression · planning aid, not for navigation.",
+            false
+          );
+        }
+      });
+
+      nextRelief.once("error", function() {
+        if (requestSerial === structureRequestSerial) {
+          setStructureStatus("NOAA bathymetry relief could not be displayed.", true);
+        }
+      });
+
+      nextRelief.addTo(map);
+      nextRelief.bringToFront();
+    }
+
+    reliefImage.onload = function() {
+      reliefReady = true;
+      finishIfReady();
+    };
+    reliefImage.onerror = function() {
+      if (requestSerial !== structureRequestSerial) return;
+      failed = true;
+      setStructureStatus("NOAA/NCEI bathymetry could not be loaded.", true);
+    };
+
+    fetch(featuresURL, {headers: {"Accept":"application/geo+json, application/json"}})
+      .then(function(response) {
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        return response.json();
+      })
+      .then(function(payload) {
+        if (!mapState.structureOverlayVisible || requestSerial !== structureRequestSerial) return;
+        featureData = payload;
+        featuresReady = true;
+        finishIfReady();
+      })
+      .catch(function(err) {
+        if (!mapState.structureOverlayVisible || requestSerial !== structureRequestSerial) return;
+        failed = true;
+        setStructureStatus(
+          "NOAA undersea feature names could not be loaded: " +
+          String(err && err.message ? err.message : err || "unknown error"),
+          true
+        );
+      });
+
+    reliefImage.src = reliefURL;
+  }
+
+  function scheduleStructureRefresh() {
+    if (!mapState.structureOverlayVisible) return;
+    if (structureRefreshTimer) window.clearTimeout(structureRefreshTimer);
+    structureRefreshTimer = window.setTimeout(function() {
+      structureRefreshTimer = null;
+      refreshStructureOverlay();
+    }, 180);
+  }
+
+  function setStructureOverlayVisible(visible) {
+    mapState.structureOverlayVisible = !!visible;
+    if (!mapState.structureOverlayVisible) {
+      structureRequestSerial++;
+      if (structureRefreshTimer) {
+        window.clearTimeout(structureRefreshTimer);
+        structureRefreshTimer = null;
+      }
+      if (structureReliefLayer && map.hasLayer(structureReliefLayer)) map.removeLayer(structureReliefLayer);
+      if (structureNamesLayer && map.hasLayer(structureNamesLayer)) map.removeLayer(structureNamesLayer);
+      structureReliefLayer = null;
+      structureNamesLayer = null;
+      setStructureStatus("", false);
+      return;
+    }
+    refreshStructureOverlay();
+  }
 
   function setWeatherOverlayStatus(message, isError) {
     var status = document.getElementById("map-weather-overlay-status");
@@ -5390,6 +8169,11 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     marineZoneOverlayVisible: false,
     smokeOverlayVisible: false,
     smokeOverlayLoaded: false,
+    sstOverlayVisible: false,
+    chlorophyllFieldVisible: false,
+    chlorophyllOverlayVisible: false,
+    structureOverlayVisible: false,
+    fishingReportsVisible: false,
     cloudOverlayVisible: false,
     radarOverlayVisible: false
   };
@@ -5999,6 +8783,46 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     });
   });
 
+  var sstCheckbox = document.getElementById("map-show-sst");
+  if (sstCheckbox) {
+    sstCheckbox.checked = !!mapState.sstOverlayVisible;
+    sstCheckbox.addEventListener("change", function() {
+      setSSTOverlayVisible(!!sstCheckbox.checked);
+    });
+  }
+
+  var chlorophyllFieldCheckbox = document.getElementById("map-show-chlorophyll-field");
+  if (chlorophyllFieldCheckbox) {
+    chlorophyllFieldCheckbox.checked = !!mapState.chlorophyllFieldVisible;
+    chlorophyllFieldCheckbox.addEventListener("change", function() {
+      setChlorophyllFieldVisible(!!chlorophyllFieldCheckbox.checked);
+    });
+  }
+
+  var chlorophyllCheckbox = document.getElementById("map-show-chlorophyll");
+  if (chlorophyllCheckbox) {
+    chlorophyllCheckbox.checked = !!mapState.chlorophyllOverlayVisible;
+    chlorophyllCheckbox.addEventListener("change", function() {
+      setChlorophyllOverlayVisible(!!chlorophyllCheckbox.checked);
+    });
+  }
+
+  var structureCheckbox = document.getElementById("map-show-structure");
+  if (structureCheckbox) {
+    structureCheckbox.checked = !!mapState.structureOverlayVisible;
+    structureCheckbox.addEventListener("change", function() {
+      setStructureOverlayVisible(!!structureCheckbox.checked);
+    });
+  }
+
+  var fishingReportsCheckbox = document.getElementById("map-show-fishing-reports");
+  if (fishingReportsCheckbox) {
+    fishingReportsCheckbox.checked = !!mapState.fishingReportsVisible;
+    fishingReportsCheckbox.addEventListener("change", function() {
+      setFishingReportsVisible(!!fishingReportsCheckbox.checked);
+    });
+  }
+
   var cloudCheckbox = document.getElementById("map-show-clouds");
   if (cloudCheckbox) {
     cloudCheckbox.checked = !!mapState.cloudOverlayVisible;
@@ -6025,6 +8849,10 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   map.on("moveend", function() {
     syncCoordinateInputsToMapCenter();
     updateMapScaleStatus();
+    if (mapState.sstOverlayVisible) scheduleSSTRefresh();
+    if (mapState.chlorophyllFieldVisible) scheduleChlorophyllFieldRefresh();
+    if (mapState.chlorophyllOverlayVisible) scheduleChlorophyllRefresh();
+    if (mapState.structureOverlayVisible) scheduleStructureRefresh();
     if (mapState.cloudOverlayVisible) scheduleCloudRefresh();
 
     if (!mapState.smokeOverlayVisible || !smokeLayer) return;
@@ -6111,6 +8939,8 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   renderSearchControls();
 
   var marineForecastRequestSerial = 0;
+  var offshoreTripRequestSerial = 0;
+  var fishingPlanningRequestSerial = 0;
 
   function renderSelectedLocationWeather(weather) {
     weather = weather || {};
@@ -6155,6 +8985,485 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     }
 
     box.hidden = false;
+  }
+
+  function formatTripObservationTime(value) {
+    var parsed = new Date(value);
+    if (!Number.isFinite(parsed.getTime())) return String(value || "");
+    return parsed.toLocaleString([], {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      timeZoneName: "short"
+    });
+  }
+
+  function tripValue(value, digits, suffix) {
+    var n = Number(value);
+    if (!Number.isFinite(n)) return "—";
+    return n.toFixed(digits) + suffix;
+  }
+
+  function pointInFishingPolygon(lat, lon, polygon) {
+    if (!Array.isArray(polygon) || polygon.length < 3) return false;
+    var inside = false;
+    for (var i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      var yi = Number(polygon[i][0]);
+      var xi = Number(polygon[i][1]);
+      var yj = Number(polygon[j][0]);
+      var xj = Number(polygon[j][1]);
+      if (![yi, xi, yj, xj].every(Number.isFinite)) continue;
+      var intersects =
+        ((yi > lat) !== (yj > lat)) &&
+        (lon < (xj - xi) * (lat - yi) / ((yj - yi) || 1e-12) + xi);
+      if (intersects) inside = !inside;
+    }
+    return inside;
+  }
+
+  function fishingReportAgeDays(dateText) {
+    var d = new Date(String(dateText || "") + "T12:00:00Z");
+    if (!Number.isFinite(d.getTime())) return NaN;
+    return Math.max(0, Math.floor((Date.now() - d.getTime()) / 86400000));
+  }
+
+  function nearestFishingStructureForPoint(lat, lon) {
+    var halfLat = 1.0;
+    var cosLat = Math.max(0.25, Math.cos(lat * Math.PI / 180));
+    var halfLon = Math.min(2.0, 1.0 / cosLat);
+    var bounds = L.latLngBounds(
+      [Math.max(-89.9, lat - halfLat), Math.max(-179.9, lon - halfLon)],
+      [Math.min(89.9, lat + halfLat), Math.min(179.9, lon + halfLon)]
+    );
+    var requestURL = structureFeatureQueryURL(bounds);
+
+    return fetch(requestURL, {headers: {"Accept":"application/geo+json, application/json"}})
+      .then(function(response) {
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        return response.json();
+      })
+      .then(function(payload) {
+        var features = payload && Array.isArray(payload.features) ? payload.features : [];
+        var origin = L.latLng(lat, lon);
+        var best = null;
+        features.forEach(function(feature) {
+          var name = String(feature && feature.properties && feature.properties.name || "").trim();
+          var coords = feature && feature.geometry && feature.geometry.coordinates;
+          if (!name || !isFishingStructureName(name) ||
+              !Array.isArray(coords) || coords.length < 2) return;
+          var flon = Number(coords[0]);
+          var flat = Number(coords[1]);
+          if (!Number.isFinite(flat) || !Number.isFinite(flon)) return;
+          var nm = map.distance(origin, L.latLng(flat, flon)) / 1852;
+          if (!best || nm < best.distance_nm) {
+            best = {name:name, distance_nm:nm, lat:flat, lon:flon};
+          }
+        });
+        return best;
+      });
+  }
+
+  function fishingReportsNearPoint(lat, lon) {
+    return new Promise(function(resolve) {
+      loadFishingReports(function(ok, payload) {
+        if (!ok || !payload || !Array.isArray(payload.reports)) {
+          resolve({nearby:[], regional:[]});
+          return;
+        }
+
+        var origin = L.latLng(lat, lon);
+        var nearby = [];
+        var regional = [];
+
+        payload.reports.forEach(function(report) {
+          var type = String(report.position_type || "").toLowerCase();
+          if (type === "exact_point" || type === "derived_point") {
+            var rlat = Number(report.lat);
+            var rlon = Number(report.lon);
+            if (!Number.isFinite(rlat) || !Number.isFinite(rlon)) return;
+            var nm = map.distance(origin, L.latLng(rlat, rlon)) / 1852;
+            if (nm <= 100) {
+              nearby.push({
+                species: String(report.species || "Report"),
+                date: String(report.date || ""),
+                count: String(report.count || ""),
+                distance_nm: nm,
+                confidence: String(report.confidence || type)
+              });
+            }
+          } else if (type === "region" && pointInFishingPolygon(lat, lon, report.polygon)) {
+            regional.push({
+              species: String(report.species || "Report"),
+              date: String(report.date || ""),
+              locationText: String(report.locationText || ""),
+              confidence: String(report.confidence || "regional")
+            });
+          }
+        });
+
+        nearby.sort(function(a, b) {
+          var ageA = fishingReportAgeDays(a.date);
+          var ageB = fishingReportAgeDays(b.date);
+          if (Number.isFinite(ageA) && Number.isFinite(ageB) && ageA !== ageB) return ageA - ageB;
+          return a.distance_nm - b.distance_nm;
+        });
+
+        resolve({nearby:nearby, regional:regional});
+      });
+    });
+  }
+
+  function renderFishingPlanning(water, structure, reports) {
+    var status = document.getElementById("fishing-planning-status");
+    var summary = document.getElementById("fishing-planning-summary");
+    var sst = document.getElementById("fishing-planning-sst");
+    var sstDetail = document.getElementById("fishing-planning-sst-detail");
+    var chl = document.getElementById("fishing-planning-chl");
+    var chlDetail = document.getElementById("fishing-planning-chl-detail");
+    var structureValue = document.getElementById("fishing-planning-structure");
+    var structureDetail = document.getElementById("fishing-planning-structure-detail");
+    var reportValue = document.getElementById("fishing-planning-reports");
+    var reportDetail = document.getElementById("fishing-planning-reports-detail");
+    var errorBox = document.getElementById("fishing-planning-error");
+
+    var factors = [];
+    var caveats = [];
+
+    var sstPointF = Number(water && water.sst && water.sst.point_f);
+    var sstSpreadF = Number(water && water.sst && water.sst.spread_f);
+    if (sst) sst.textContent = Number.isFinite(sstPointF) ? sstPointF.toFixed(1) + "°F" : "Unavailable";
+    if (sstDetail) {
+      if (Number.isFinite(sstSpreadF)) {
+        var breakText = sstSpreadF >= 2.0
+          ? "pronounced local temp-break signal"
+          : (sstSpreadF >= 1.0 ? "moderate local temp-break signal" : "weak local temp gradient");
+        sstDetail.textContent =
+          breakText + " · " + sstSpreadF.toFixed(1) +
+          "°F spread in the nearby ~15 nmi sampling window";
+        if (sstSpreadF >= 1.0) factors.push("a useful Sea Surface Temp gradient");
+      } else {
+        sstDetail.textContent = "No local gradient estimate available.";
+      }
+    }
+
+    var chlPoint = Number(water && water.chlorophyll && water.chlorophyll.point_mg_m3);
+    var chlMin = Number(water && water.chlorophyll && water.chlorophyll.min_mg_m3);
+    var chlMax = Number(water && water.chlorophyll && water.chlorophyll.max_mg_m3);
+    if (chl) {
+      chl.textContent = Number.isFinite(chlPoint) ? chlPoint.toFixed(2) + " mg/m³" : "Unavailable";
+    }
+    if (chlDetail) {
+      if (Number.isFinite(chlPoint)) {
+        var waterClass = chlPoint <= 0.20 ? "clearer/blue water"
+          : (chlPoint <= 0.30 ? "clear-water transition"
+          : (chlPoint <= 0.50 ? "moderate chlorophyll" : "greener water"));
+        var edge = Number.isFinite(chlMin) && Number.isFinite(chlMax) && chlMin <= 0.30 && chlMax >= 0.30;
+        chlDetail.textContent = waterClass + (edge ? " · 0.30 mg/m³ transition crosses nearby window" : "");
+        if (chlPoint <= 0.30) factors.push("cleaner water");
+        if (edge) factors.push("a nearby chlorophyll edge");
+      } else {
+        chlDetail.textContent = "No chlorophyll value available.";
+      }
+    }
+
+    if (structure) {
+      if (structureValue) structureValue.textContent = structure.name;
+      if (structureDetail) structureDetail.textContent = structure.distance_nm.toFixed(1) + " nmi from selected destination";
+      if (structure.distance_nm <= 15) factors.push("nearby named structure");
+    } else {
+      if (structureValue) structureValue.textContent = "None nearby";
+      if (structureDetail) structureDetail.textContent = "No fishing-relevant NOAA named feature found in the search window.";
+    }
+
+    reports = reports || {nearby:[], regional:[]};
+    var nearby = Array.isArray(reports.nearby) ? reports.nearby : [];
+    var regional = Array.isArray(reports.regional) ? reports.regional : [];
+    if (nearby.length) {
+      var newest = nearby[0];
+      var age = fishingReportAgeDays(newest.date);
+      if (reportValue) reportValue.textContent = nearby.length + " within 100 nmi";
+      if (reportDetail) {
+        reportDetail.textContent =
+          newest.species + " · " + newest.distance_nm.toFixed(0) + " nmi away" +
+          (Number.isFinite(age) ? " · " + age + " day" + (age === 1 ? "" : "s") + " old" : "") +
+          (newest.count ? " · " + newest.count : "");
+      }
+      if (Number.isFinite(age) && age <= 14) factors.push("recent nearby fishing activity");
+    } else if (regional.length) {
+      var reg = regional[0];
+      if (reportValue) reportValue.textContent = "Regional report";
+      if (reportDetail) reportDetail.textContent =
+        reg.species + (reg.locationText ? " · " + reg.locationText : "") + " · broad location confidence";
+      factors.push("regional fishing activity");
+    } else {
+      if (reportValue) reportValue.textContent = "No nearby reports";
+      if (reportDetail) reportDetail.textContent = "No point report within 100 nmi and no regional report covering the selected destination.";
+    }
+
+    if (water && water.error) caveats.push(String(water.error));
+
+    if (summary) {
+      var unique = [];
+      factors.forEach(function(item) {
+        if (unique.indexOf(item) === -1) unique.push(item);
+      });
+      if (unique.length >= 3) {
+        summary.innerHTML = "<strong>Fishing setup:</strong> promising alignment of " +
+          escapeHTML(unique.slice(0, 4).join(", ")) + ".";
+      } else if (unique.length) {
+        summary.innerHTML = "<strong>Fishing setup:</strong> some favorable signals — " +
+          escapeHTML(unique.join(", ")) +
+          " — but the selected point does not yet show a full multi-factor convergence.";
+      } else {
+        summary.innerHTML = "<strong>Fishing setup:</strong> limited positive convergence detected from the currently available water, structure, and report data.";
+      }
+    }
+
+    if (status) status.textContent = "Selected-destination fishing context";
+    if (errorBox) {
+      errorBox.hidden = caveats.length === 0;
+      errorBox.textContent = caveats.join(" | ");
+    }
+  }
+
+  function refreshFishingPlanningForSelectedLocation() {
+    if (!mapState.selectedLocation) return;
+
+    var status = document.getElementById("fishing-planning-status");
+    var summary = document.getElementById("fishing-planning-summary");
+    var errorBox = document.getElementById("fishing-planning-error");
+    if (status) status.textContent = "Loading water, structure, and reports…";
+    if (summary) summary.textContent = "Evaluating the selected fishing destination…";
+    if (errorBox) errorBox.hidden = true;
+
+    var lat = Number(mapState.selectedLocation.lat);
+    var lon = Number(mapState.selectedLocation.lon);
+    var serial = ++fishingPlanningRequestSerial;
+
+    var waterPromise = fetch(
+      "/fishing-water?lat=" + encodeURIComponent(lat.toFixed(5)) +
+      "&lon=" + encodeURIComponent(lon.toFixed(5)),
+      {headers: {"Accept":"application/json"}, cache:"no-store"}
+    ).then(function(response) {
+      if (!response.ok) {
+        return response.text().then(function(detail) {
+          throw new Error(String(detail || "HTTP " + response.status).trim());
+        });
+      }
+      return response.json();
+    }).catch(function(err) {
+      return {error:"Water data: " + String(err && err.message ? err.message : err || "unavailable")};
+    });
+
+    Promise.all([
+      waterPromise,
+      nearestFishingStructureForPoint(lat, lon).catch(function() { return null; }),
+      fishingReportsNearPoint(lat, lon)
+    ]).then(function(results) {
+      if (serial !== fishingPlanningRequestSerial) return;
+      renderFishingPlanning(results[0], results[1], results[2]);
+    });
+  }
+
+  function renderOffshoreTrip(payload) {
+    payload = payload || {};
+    var card = document.getElementById("offshore-trip-card");
+    if (payload.is_offshore !== true) {
+      if (card) card.hidden = true;
+      return;
+    }
+    var loading = document.getElementById("offshore-trip-loading");
+    var content = document.getElementById("offshore-trip-content");
+    var errorBox = document.getElementById("offshore-trip-error");
+    var coords = document.getElementById("offshore-trip-coords");
+    var summary = document.getElementById("offshore-trip-summary");
+    var buoyLine = document.getElementById("offshore-trip-buoy");
+    var wind = document.getElementById("offshore-trip-wind");
+    var gust = document.getElementById("offshore-trip-gust");
+    var wave = document.getElementById("offshore-trip-wave");
+    var period = document.getElementById("offshore-trip-period");
+    var direction = document.getElementById("offshore-trip-direction");
+    var watchWrap = document.getElementById("offshore-trip-watch-wrap");
+    var watch = document.getElementById("offshore-trip-watch");
+    var forecast = document.getElementById("offshore-trip-forecast");
+
+    if (!card) return;
+    card.hidden = false;
+    if (loading) loading.hidden = true;
+
+    var err = String(payload.error || "").trim();
+    if (errorBox) {
+      errorBox.hidden = !err;
+      errorBox.textContent = err;
+    }
+
+    if (coords && mapState.selectedLocation) {
+      coords.textContent =
+        Number(mapState.selectedLocation.lat).toFixed(4) + ", " +
+        Number(mapState.selectedLocation.lon).toFixed(4);
+    }
+
+    var buoy = payload.buoy || null;
+    var periods = Array.isArray(payload.periods) ? payload.periods.slice(0, 4) : [];
+    var alerts = Array.isArray(payload.alerts) ? payload.alerts : [];
+    var watchItems = [];
+
+    if (buoy) {
+      var windKT = Number(buoy.wind_kt);
+      var gustKT = Number(buoy.gust_kt);
+      var waveFT = Number(buoy.wave_ft);
+      var dominantSEC = Number(buoy.dominant_period_sec);
+
+      if (wind) wind.textContent = tripValue(windKT, 1, " kt");
+      if (gust) gust.textContent = tripValue(gustKT, 1, " kt");
+      if (wave) wave.textContent = tripValue(waveFT, 1, " ft");
+      if (period) period.textContent = tripValue(dominantSEC, 0, " s");
+      if (direction) {
+        direction.textContent = Number.isFinite(Number(buoy.mean_wave_direction_deg))
+          ? Math.round(Number(buoy.mean_wave_direction_deg)) + "°"
+          : "—";
+      }
+
+      if (buoyLine) {
+        buoyLine.innerHTML =
+          "<strong>Observed buoy:</strong> " +
+          escapeHTML(String(buoy.station || "")) +
+          (buoy.name ? " — " + escapeHTML(String(buoy.name)) : "") +
+          (Number.isFinite(Number(buoy.distance_nm))
+            ? " · " + Number(buoy.distance_nm).toFixed(1) + " nmi from destination"
+            : "") +
+          (buoy.observation_time
+            ? " · observation " + escapeHTML(formatTripObservationTime(buoy.observation_time))
+            : "");
+      }
+
+      if (Number.isFinite(gustKT) && gustKT >= 25) {
+        watchItems.push("Observed gusts are at least 25 kt.");
+      } else if (Number.isFinite(windKT) && windKT >= 20) {
+        watchItems.push("Observed sustained wind is at least 20 kt.");
+      } else if (Number.isFinite(windKT) && windKT >= 15) {
+        watchItems.push("Observed sustained wind is at least 15 kt.");
+      }
+
+      if (Number.isFinite(waveFT) && waveFT >= 8) {
+        watchItems.push("Observed significant wave height is at least 8 ft.");
+      } else if (Number.isFinite(waveFT) && waveFT >= 6) {
+        watchItems.push("Observed significant wave height is at least 6 ft.");
+      }
+
+      if (Number.isFinite(waveFT) && Number.isFinite(dominantSEC) &&
+          waveFT >= 4 && dominantSEC <= 8) {
+        watchItems.push("Observed seas are short-period (8 s or less) with at least 4 ft significant wave height.");
+      }
+    } else {
+      if (buoyLine) buoyLine.innerHTML = "<strong>Observed buoy:</strong> no usable nearby NDBC wave observation found.";
+      if (wind) wind.textContent = "—";
+      if (gust) gust.textContent = "—";
+      if (wave) wave.textContent = "—";
+      if (period) period.textContent = "—";
+      if (direction) direction.textContent = "—";
+    }
+
+    alerts.forEach(function(alert) {
+      watchItems.push("NWS alert: " + String(alert));
+    });
+
+    if (summary) {
+      var zone = String(payload.zone || "").trim();
+      var summaryText = watchItems.length
+        ? "<strong>Planning snapshot:</strong> review the watch items below before committing to the run."
+        : "<strong>Planning snapshot:</strong> no threshold watch items were triggered by the current buoy observation or NWS alerts.";
+      if (zone) summaryText += " NWS zone " + escapeHTML(zone) + ".";
+      summary.innerHTML = summaryText;
+    }
+
+    if (watch && watchWrap) {
+      watch.innerHTML = watchItems.map(function(item) {
+        return "<li>" + escapeHTML(item) + "</li>";
+      }).join("");
+      watchWrap.hidden = watchItems.length === 0;
+    }
+
+    if (forecast) {
+      forecast.innerHTML = periods.map(function(item) {
+        var name = escapeHTML(String(item && item.name || ""));
+        var text = escapeHTML(String(item && item.forecast || ""));
+        return '<div class="offshore-trip-period">' +
+          (name ? "<strong>" + name + "</strong>" : "") +
+          (text ? "<p>" + text + "</p>" : "") +
+          "</div>";
+      }).join("");
+    }
+
+    if (content) content.hidden = false;
+  }
+
+  function refreshOffshoreTripForSelectedLocation() {
+    if (!mapState.selectedLocation) return;
+
+    var card = document.getElementById("offshore-trip-card");
+    var loading = document.getElementById("offshore-trip-loading");
+    var content = document.getElementById("offshore-trip-content");
+    var errorBox = document.getElementById("offshore-trip-error");
+    var coords = document.getElementById("offshore-trip-coords");
+
+    // Hide by default. The card is only revealed after the server confirms
+    // that the selected point belongs to an offshore/coastal-ocean NWS zone.
+    if (card) card.hidden = true;
+    if (loading) loading.hidden = false;
+    if (content) content.hidden = true;
+    if (errorBox) errorBox.hidden = true;
+    fishingPlanningRequestSerial++;
+
+    if (coords) {
+      coords.textContent =
+        Number(mapState.selectedLocation.lat).toFixed(4) + ", " +
+        Number(mapState.selectedLocation.lon).toFixed(4);
+    }
+
+    var serial = ++offshoreTripRequestSerial;
+    var requestURL =
+      "/offshore-trip?lat=" +
+      encodeURIComponent(Number(mapState.selectedLocation.lat).toFixed(5)) +
+      "&lon=" +
+      encodeURIComponent(Number(mapState.selectedLocation.lon).toFixed(5));
+
+    fetch(requestURL, {
+      method: "GET",
+      headers: {"Accept": "application/json"},
+      cache: "no-store"
+    })
+      .then(function(response) {
+        if (!response.ok) {
+          return response.text().then(function(detail) {
+            throw new Error(String(detail || "HTTP " + response.status).trim());
+          });
+        }
+        return response.json();
+      })
+      .then(function(payload) {
+        if (serial !== offshoreTripRequestSerial) return;
+
+        if (!payload || payload.is_offshore !== true) {
+          if (card) card.hidden = true;
+          if (content) content.hidden = true;
+          if (loading) loading.hidden = true;
+          return;
+        }
+
+        if (card) card.hidden = false;
+        refreshFishingPlanningForSelectedLocation();
+        renderOffshoreTrip(payload);
+      })
+      .catch(function() {
+        if (serial !== offshoreTripRequestSerial) return;
+        // Classification failure must not produce an inappropriate offshore
+        // card at a land, Delta, or Bay selection.
+        if (card) card.hidden = true;
+        if (loading) loading.hidden = true;
+        if (content) content.hidden = true;
+      });
   }
 
   function renderMarineForecast(payload) {
@@ -6326,6 +9635,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     updateRecenterControls();
     renderWindMarkers();
     refreshMarineForecastForSelectedLocation();
+    refreshOffshoreTripForSelectedLocation();
     return true;
   }
 
@@ -6660,6 +9970,13 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     }
   });
 
+  // A selected location may already be present when the Planning page loads
+  // from lat/lon carried in the URL. In that case selectSailingLocation() is
+  // not invoked, so explicitly initialize the offshore planning card.
+  if (mapState.selectedLocation) {
+    refreshOffshoreTripForSelectedLocation();
+  }
+
   if (reset) {
     reset.addEventListener("click", function() {
       if (!mapState.selectedLocation) return;
@@ -6670,6 +9987,10 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       setMarineZoneOverlay("", null);
       var marineForecastCard = document.getElementById("marine-forecast-card");
       if (marineForecastCard) marineForecastCard.hidden = true;
+      offshoreTripRequestSerial++;
+      fishingPlanningRequestSerial++;
+      var offshoreTripCard = document.getElementById("offshore-trip-card");
+      if (offshoreTripCard) offshoreTripCard.hidden = true;
       renderSelectedLocationWeather({});
       setStationSearchState(false, "", "");
 

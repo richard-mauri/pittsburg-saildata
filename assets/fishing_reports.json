@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "updated": "2026-09-14",
+  "note": "Curated prototype snapshot. Positions derived from fisherman shorthand are approximate and retain explicit uncertainty.",
+  "reports": [
+    {
+      "species": "Albacore",
+      "date": "2026-09-01",
+      "count": "about 20 fish",
+      "size": "about 22 lb average",
+      "locationText": "Most fish at the 27×35 zone",
+      "position_type": "derived_point",
+      "lat": 39.45,
+      "lon": -124.583333,
+      "confidence": "derived",
+      "uncertaintyNM": 5,
+      "notes": "Fort Bragg report. Position is derived from local degree-minute shorthand and should be treated as approximate.",
+      "source": "North Bay Fishing Charters",
+      "sourceURL": "https://northbayfishingcharters.com/wide-open-albacore-fort-bragg-fishing-report-week-of-9-6-26/"
+    },
+    {
+      "species": "Albacore",
+      "date": "2026-09-03",
+      "count": "70 fish",
+      "size": "about 8 lb average",
+      "locationText": "Started at 25×25; chased jumpers north toward the 32 N line",
+      "position_type": "derived_point",
+      "lat": 39.416667,
+      "lon": -124.416667,
+      "confidence": "derived",
+      "uncertaintyNM": 7,
+      "notes": "Wide-open action under birds. Position is derived from local degree-minute shorthand.",
+      "source": "North Bay Fishing Charters",
+      "sourceURL": "https://northbayfishingcharters.com/wide-open-albacore-fort-bragg-fishing-report-week-of-9-6-26/"
+    },
+    {
+      "species": "Albacore",
+      "date": "2026-09-04",
+      "count": "45 fish",
+      "size": "first 10 about 20 lb; later fish mostly about 10 lb",
+      "locationText": "Hot bite near the 24×37 zone",
+      "position_type": "derived_point",
+      "lat": 39.4,
+      "lon": -124.616667,
+      "confidence": "derived",
+      "uncertaintyNM": 5,
+      "notes": "Report described green water at 35×25, blue water inside and outside, then a strong bite under terns near 24×37.",
+      "source": "North Bay Fishing Charters",
+      "sourceURL": "https://northbayfishingcharters.com/wide-open-albacore-fort-bragg-fishing-report-week-of-9-6-26/"
+    },
+    {
+      "species": "Albacore",
+      "date": "2026-09-05",
+      "count": "31 fish",
+      "size": "25–37 lb; about 30 lb average",
+      "locationText": "20×20 area on a temp break closer to shore",
+      "position_type": "derived_point",
+      "lat": 39.333333,
+      "lon": -124.333333,
+      "confidence": "derived",
+      "uncertaintyNM": 5,
+      "notes": "Strong bite under mixed birds in rough weather after turning back from the 25-west line. This report explicitly referenced a temp break.",
+      "source": "North Bay Fishing Charters",
+      "sourceURL": "https://northbayfishingcharters.com/wide-open-albacore-fort-bragg-fishing-report-week-of-9-6-26/"
+    },
+    {
+      "species": "Bluefin",
+      "date": "2026-08-17",
+      "locationText": "Cordell to Monterey",
+      "position_type": "region",
+      "confidence": "regional",
+      "polygon": [
+        [
+          38.2,
+          -123.65
+        ],
+        [
+          38.25,
+          -123.25
+        ],
+        [
+          36.8,
+          -121.75
+        ],
+        [
+          36.45,
+          -122.1
+        ],
+        [
+          37.1,
+          -123.0
+        ]
+      ],
+      "notes": "Public report described bluefin as wide open from Cordell to Monterey. This is a broad regional report, not a precise fishing position.",
+      "source": "North Bay Fishing Charters",
+      "sourceURL": "https://northbayfishingcharters.com/good-salmon-fishing-continues-bodega-bay-fishing-report-week-of-8-17-26/"
+    }
+  ]
+}
