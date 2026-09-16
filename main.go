@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"encoding/xml"
 	"flag"
@@ -27,7 +28,7 @@ import (
 
 const (
 	appVersion                      = "1.9.3"
-	buildVersion                    = "v202"
+	buildVersion                    = "v211"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -1978,6 +1979,284 @@ func runServer(
 		w.Header().Set("Cache-Control", "no-store")
 		if err := json.NewEncoder(w).Encode(payload); err != nil {
 			fmt.Println("marine-forecast JSON encoding error:", err)
+		}
+	})
+
+	// Current inland observations come from Aviation Weather Center's complete
+	// METAR cache. AWC recommends its cache files for larger observation sets;
+	// keeping a short server-side cache avoids repeated full-feed downloads as
+	// the user pans the map.
+	type cachedMetarObservation struct {
+		Station string
+		Time    time.Time
+		Lat     float64
+		Lon     float64
+		Wdir    float64
+		HasWdir bool
+		Wspd    float64
+		Wgst    float64
+		HasWgst bool
+	}
+	var metarCacheMu sync.Mutex
+	var metarCacheAt time.Time
+	var metarCache []cachedMetarObservation
+
+	fetchCurrentMetars := func() ([]cachedMetarObservation, error) {
+		metarCacheMu.Lock()
+		if !metarCacheAt.IsZero() && time.Since(metarCacheAt) < 2*time.Minute && len(metarCache) > 0 {
+			cached := append([]cachedMetarObservation(nil), metarCache...)
+			metarCacheMu.Unlock()
+			return cached, nil
+		}
+		metarCacheMu.Unlock()
+
+		req, err := http.NewRequest(http.MethodGet, "https://aviationweather.gov/data/cache/metars.cache.xml.gz", nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Accept", "application/gzip, application/octet-stream, application/xml, text/xml")
+		req.Header.Set("User-Agent", "pittsburg-saildata/"+appVersion)
+		client := &http.Client{Timeout: 15 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			body, _ := ioutil.ReadAll(io.LimitReader(resp.Body, 512))
+			return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+
+		gz, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("gzip: %w", err)
+		}
+		defer gz.Close()
+
+		type metarXML struct {
+			Station string `xml:"station_id"`
+			ObsTime string `xml:"observation_time"`
+			Lat     string `xml:"latitude"`
+			Lon     string `xml:"longitude"`
+			Wdir    string `xml:"wind_dir_degrees"`
+			Wspd    string `xml:"wind_speed_kt"`
+			Wgst    string `xml:"wind_gust_kt"`
+		}
+		var payload struct {
+			Data struct {
+				METARs []metarXML `xml:"METAR"`
+			} `xml:"data"`
+		}
+		decoder := xml.NewDecoder(io.LimitReader(gz, 32<<20))
+		if err := decoder.Decode(&payload); err != nil {
+			return nil, fmt.Errorf("XML: %w", err)
+		}
+
+		result := make([]cachedMetarObservation, 0, len(payload.Data.METARs))
+		for _, m := range payload.Data.METARs {
+			station := strings.ToUpper(strings.TrimSpace(m.Station))
+			lat, latErr := strconv.ParseFloat(strings.TrimSpace(m.Lat), 64)
+			lon, lonErr := strconv.ParseFloat(strings.TrimSpace(m.Lon), 64)
+			wspd, speedErr := strconv.ParseFloat(strings.TrimSpace(m.Wspd), 64)
+			if station == "" || latErr != nil || lonErr != nil || speedErr != nil ||
+				math.IsNaN(lat) || math.IsNaN(lon) || math.IsNaN(wspd) ||
+				math.IsInf(lat, 0) || math.IsInf(lon, 0) || math.IsInf(wspd, 0) || wspd < 0 {
+				continue
+			}
+			obsTime, timeErr := time.Parse(time.RFC3339, strings.TrimSpace(m.ObsTime))
+			if timeErr != nil {
+				obsTime = time.Time{}
+			}
+			item := cachedMetarObservation{Station: station, Time: obsTime, Lat: lat, Lon: lon, Wspd: wspd}
+			if wdir, err := strconv.ParseFloat(strings.TrimSpace(m.Wdir), 64); err == nil &&
+				!math.IsNaN(wdir) && !math.IsInf(wdir, 0) && wdir >= 0 && wdir <= 360 {
+				item.Wdir = math.Mod(wdir+360, 360)
+				item.HasWdir = true
+			}
+			if wgst, err := strconv.ParseFloat(strings.TrimSpace(m.Wgst), 64); err == nil &&
+				!math.IsNaN(wgst) && !math.IsInf(wgst, 0) && wgst >= 0 {
+				item.Wgst = wgst
+				item.HasWgst = true
+			}
+			result = append(result, item)
+		}
+		if len(result) == 0 {
+			return nil, fmt.Errorf("cache contained no usable METAR observations")
+		}
+
+		metarCacheMu.Lock()
+		metarCacheAt = time.Now()
+		metarCache = append([]cachedMetarObservation(nil), result...)
+		metarCacheMu.Unlock()
+		return result, nil
+	}
+
+	mux.HandleFunc("/wind-barbs", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		q := r.URL.Query()
+		parseBound := func(key string) (float64, error) {
+			text := strings.TrimSpace(q.Get(key))
+			if text == "" {
+				return 0, fmt.Errorf("%s is required", key)
+			}
+			value, err := strconv.ParseFloat(text, 64)
+			if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
+				return 0, fmt.Errorf("invalid %s %q", key, text)
+			}
+			return value, nil
+		}
+
+		minLat, err := parseBound("min_lat")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		maxLat, err := parseBound("max_lat")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		minLon, err := parseBound("min_lon")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		maxLon, err := parseBound("max_lon")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if minLat < -90 || maxLat > 90 || minLat >= maxLat || minLon < -180 || maxLon > 180 || minLon >= maxLon {
+			http.Error(w, "invalid wind-barb bounds", http.StatusBadRequest)
+			return
+		}
+
+		includeMarine := q.Get("include_marine") != "0"
+		includeInland := q.Get("include_inland") == "1"
+
+		type windBarbObservation struct {
+			Station        string  `json:"station"`
+			Name           string  `json:"name"`
+			Wind           string  `json:"wind,omitempty"`
+			ObservationAge string  `json:"observation_age,omitempty"`
+			Lat            float64 `json:"lat"`
+			Lon            float64 `json:"lon"`
+			Class          string  `json:"class"`
+			Source         string  `json:"source,omitempty"`
+		}
+
+		items := make([]windBarbObservation, 0)
+		errorsOut := make([]string, 0, 2)
+		windUnit := parseWindUnit(q)
+
+		if includeMarine {
+			stations, stationErr := getActiveNDBCStations()
+			if stationErr != nil {
+				errorsOut = append(errorsOut, "NOAA/NDBC: "+stationErr.Error())
+			} else {
+				type stationResult struct {
+					item windBarbObservation
+					ok   bool
+				}
+				type windBarbNDBCCandidate struct {
+					ID   string
+					Name string
+					Lat  float64
+					Lon  float64
+				}
+				candidates := make([]windBarbNDBCCandidate, 0)
+				for _, station := range stations {
+					if station.Lat >= minLat && station.Lat <= maxLat && station.Lon >= minLon && station.Lon <= maxLon {
+						candidates = append(candidates, windBarbNDBCCandidate{ID: station.ID, Name: station.Name, Lat: station.Lat, Lon: station.Lon})
+					}
+				}
+				results := make(chan stationResult, len(candidates))
+				sem := make(chan struct{}, 6)
+				var wg sync.WaitGroup
+				for _, station := range candidates {
+					station := station
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						sem <- struct{}{}
+						stationID := strings.ToUpper(strings.TrimSpace(station.ID))
+						wind, age := latestNearbyStationWind(stationID, windUnit)
+						<-sem
+						if strings.TrimSpace(wind) == "" {
+							return
+						}
+						results <- stationResult{item: windBarbObservation{
+							Station: stationID, Name: station.Name, Wind: wind, ObservationAge: age,
+							Lat: station.Lat, Lon: station.Lon, Class: "marine", Source: "NOAA/NDBC",
+						}, ok: true}
+					}()
+				}
+				wg.Wait()
+				close(results)
+				for result := range results {
+					if result.ok {
+						items = append(items, result.item)
+					}
+				}
+			}
+		}
+
+		if includeInland {
+			metars, metarErr := fetchCurrentMetars()
+			if metarErr != nil {
+				errorsOut = append(errorsOut, "Aviation Weather Center METAR cache: "+metarErr.Error())
+			} else {
+				compass := []string{"N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"}
+				for _, m := range metars {
+					if m.Lat < minLat || m.Lat > maxLat || m.Lon < minLon || m.Lon > maxLon {
+						continue
+					}
+					if m.Wspd >= 3 && !m.HasWdir {
+						continue
+					}
+					directionDeg := 0.0
+					if m.HasWdir {
+						directionDeg = m.Wdir
+					}
+					idx := int(math.Floor((directionDeg+11.25)/22.5)) % len(compass)
+					windText := fmt.Sprintf("%s %.0f %s", compass[idx], windSpeedForDisplay(m.Wspd, windUnit), windUnitLabel(windUnit))
+					if m.HasWgst && m.Wgst > m.Wspd {
+						windText += fmt.Sprintf(" G%.0f", windSpeedForDisplay(m.Wgst, windUnit))
+					}
+					ageText := ""
+					if !m.Time.IsZero() {
+						ageMinutes := int(math.Round(time.Since(m.Time.UTC()).Minutes()))
+						if ageMinutes < 0 {
+							ageMinutes = 0
+						}
+						if ageMinutes < 60 {
+							ageText = fmt.Sprintf("%d min", ageMinutes)
+						} else {
+							ageText = fmt.Sprintf("%dh %02dm", ageMinutes/60, ageMinutes%60)
+						}
+					}
+					items = append(items, windBarbObservation{
+						Station: m.Station, Name: m.Station, Wind: windText, ObservationAge: ageText,
+						Lat: m.Lat, Lon: m.Lon, Class: "inland", Source: "Aviation Weather Center METAR",
+					})
+				}
+			}
+		}
+
+		sort.Slice(items, func(i, j int) bool {
+			if items[i].Class != items[j].Class {
+				return items[i].Class < items[j].Class
+			}
+			return items[i].Station < items[j].Station
+		})
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "private, max-age=60")
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{"observations": items, "errors": errorsOut}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 	})
 
@@ -5643,7 +5922,7 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 @media(max-width:600px){.map-resize-handle{height:22px}}
 .map-location-info-grid{display:grid;grid-template-columns:minmax(290px,.9fr) minmax(360px,1.1fr);gap:14px;align-items:stretch;margin-top:10px}.map-location-info-grid .map-coordinate-entry{margin-top:0;align-self:start}.selected-location-weather{margin-top:0;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:var(--paper);min-height:128px}.selected-location-weather-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:4px}.selected-location-weather-head strong{color:var(--navy);font-size:.95rem}.selected-location-weather-place{font-size:.84rem;font-weight:750;color:var(--ink);margin:0 0 7px}.selected-location-weather-updated{color:var(--muted);font-size:.75rem}.selected-location-weather-metrics{display:flex;gap:14px;flex-wrap:wrap;align-items:baseline}.selected-location-weather-metric{font-size:.88rem;color:var(--ink)}@media(max-width:700px){.map-location-info-grid{grid-template-columns:1fr}.selected-location-weather{min-height:0}}.selected-location-weather-metric b{color:var(--navy)}.selected-location-weather-forecast{margin:7px 0 0;color:var(--ink);font-size:.9rem}.selected-location-weather-note{margin:6px 0 0;color:var(--muted);font-size:.75rem}.selected-location-weather-error{margin:6px 0 0;color:#8b2c2c;font-size:.82rem}.map-coordinate-entry{display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-top:10px}.map-coordinate-field{display:flex;flex-direction:column;gap:3px}.map-coordinate-field label{font-size:.72rem;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}.map-coordinate-field input{width:132px;padding:7px 9px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--ink);font:inherit}.map-coordinate-use{padding:8px 12px;border:1px solid #126b91;border-radius:9px;background:#126b91;color:#fff;font-weight:850;cursor:pointer}.map-coordinate-use:hover{filter:brightness(.97)}.map-coordinate-error{font-size:.8rem;color:#9b3027;min-height:1.2em}
-.map-station-list{margin-top:12px}.map-station-list-title{font-weight:850;color:var(--navy);margin:0 0 8px}.map-station-table-wrap{max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:14px;background:#fff}.map-station-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.86rem}.map-station-table th,.map-station-table td{padding:8px 10px;border-top:1px solid var(--line);text-align:left;vertical-align:top;background:#fff}.map-station-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc}.map-station-table th{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}.map-station-table tbody tr:first-child td{border-top:0}.map-station-table a{color:var(--blue);font-weight:800;text-decoration:none}.map-station-table a:hover{text-decoration:underline}.map-scale-status{background:rgba(255,255,255,.94);border:1px solid #9fb5bf;border-radius:8px;padding:5px 8px;color:#234654;font-size:.74rem;font-weight:800;line-height:1.25;box-shadow:0 1px 4px rgba(25,55,70,.18);white-space:nowrap}.map-nautical-zoom-note{position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:850;background:rgba(7,31,49,.92);color:#fff;border-radius:999px;padding:7px 12px;font-size:.78rem;font-weight:850;box-shadow:0 2px 8px rgba(0,0,0,.2);pointer-events:none;white-space:nowrap;max-width:calc(100% - 32px);overflow:hidden;text-overflow:ellipsis}.map-overlay-toggle.is-unavailable{opacity:.5}.map-structure-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-structure-status[hidden]{display:none}.map-saildrone-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-saildrone-status[hidden]{display:none}.map-undersea-feature-label{background:transparent!important;border:0!important;box-shadow:none!important;white-space:nowrap;pointer-events:none}.map-undersea-feature-label .undersea-dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;background:#ffd166;border:1px solid #20323c;vertical-align:1px;box-shadow:0 0 0 1px rgba(255,255,255,.75)}.map-undersea-feature-label .undersea-name{font-size:13px;font-weight:850;letter-spacing:.01em;color:#fff7d1;text-shadow:-2px -2px 0 #102a38,2px -2px 0 #102a38,-2px 2px 0 #102a38,2px 2px 0 #102a38,0 2px 3px rgba(0,0,0,.85)}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#2f855a}.map-dot.current{background:#7d55a6}.map-dot.saildrone{width:12px;height:12px;background:#8d3fb0;border:2px solid #fff;box-shadow:0 0 0 1px #8d3fb0}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}
+.map-station-list{margin-top:12px}.map-station-list-title{font-weight:850;color:var(--navy);margin:0 0 8px}.map-station-table-wrap{max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:14px;background:#fff}.map-station-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.86rem}.map-station-table th,.map-station-table td{padding:8px 10px;border-top:1px solid var(--line);text-align:left;vertical-align:top;background:#fff}.map-station-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc}.map-station-table th{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}.map-station-table tbody tr:first-child td{border-top:0}.map-station-table a{color:var(--blue);font-weight:800;text-decoration:none}.map-station-table a:hover{text-decoration:underline}.map-scale-status{background:rgba(255,255,255,.94);border:1px solid #9fb5bf;border-radius:8px;padding:5px 8px;color:#234654;font-size:.74rem;font-weight:800;line-height:1.25;box-shadow:0 1px 4px rgba(25,55,70,.18);white-space:nowrap}.map-nautical-zoom-note{position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:850;background:rgba(7,31,49,.92);color:#fff;border-radius:999px;padding:7px 12px;font-size:.78rem;font-weight:850;box-shadow:0 2px 8px rgba(0,0,0,.2);pointer-events:none;white-space:nowrap;max-width:calc(100% - 32px);overflow:hidden;text-overflow:ellipsis}.map-overlay-toggle.is-unavailable{opacity:.5}.map-structure-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-structure-status[hidden]{display:none}.map-saildrone-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-saildrone-status[hidden]{display:none}.map-windbarb-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-windbarb-status[hidden]{display:none}.wind-barb-icon{background:transparent!important;border:0!important}.wind-barb-icon svg{overflow:visible;filter:drop-shadow(0 1px 1px rgba(255,255,255,.95))}.wind-barb-icon .barb-stroke{stroke:#102f44;stroke-width:2;fill:none;stroke-linecap:round;stroke-linejoin:round}.wind-barb-icon .barb-flag{fill:#102f44;stroke:#102f44;stroke-width:1}.wind-barb-icon.stale{opacity:.48}.map-undersea-feature-label{background:transparent!important;border:0!important;box-shadow:none!important;white-space:nowrap;pointer-events:none}.map-undersea-feature-label .undersea-dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;background:#ffd166;border:1px solid #20323c;vertical-align:1px;box-shadow:0 0 0 1px rgba(255,255,255,.75)}.map-undersea-feature-label .undersea-name{font-size:13px;font-weight:850;letter-spacing:.01em;color:#fff7d1;text-shadow:-2px -2px 0 #102a38,2px -2px 0 #102a38,-2px 2px 0 #102a38,2px 2px 0 #102a38,0 2px 3px rgba(0,0,0,.85)}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#2f855a}.map-dot.current{background:#7d55a6}.map-dot.saildrone{width:12px;height:12px;background:#8d3fb0;border:2px solid #fff;box-shadow:0 0 0 1px #8d3fb0}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}
 .offshore-trip-card{border-left:5px solid #126b91}.offshore-trip-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap}.offshore-trip-coords{color:var(--muted);font-size:.82rem;font-weight:750}.offshore-trip-summary{margin:10px 0 12px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:#f7fbfc}.offshore-trip-summary strong{color:var(--navy)}.offshore-trip-metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:10px 0}.offshore-trip-metric{padding:9px 10px;border:1px solid var(--line);border-radius:11px;background:#fff}.offshore-trip-metric .label{font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:850}.offshore-trip-metric .value{margin-top:3px;color:var(--navy);font-weight:900;font-size:1rem}.offshore-trip-buoy{margin:4px 0 8px;color:var(--ink);font-size:.86rem}.offshore-trip-watch{margin:8px 0 0;padding-left:20px;color:var(--ink)}.offshore-trip-watch li{margin:3px 0}.offshore-trip-forecast{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px}.offshore-trip-period{padding:10px 12px;border:1px solid var(--line);border-radius:11px;background:#fbfdfe}.offshore-trip-period strong{display:block;color:var(--navy);margin-bottom:3px}.offshore-trip-period p{margin:0;line-height:1.42;font-size:.88rem}.offshore-trip-note{margin:9px 0 0;color:var(--muted);font-size:.78rem;line-height:1.45}.offshore-trip-error{color:#8b2c2c;font-size:.88rem}.offshore-trip-loading{color:var(--muted);font-weight:750}.fishing-planning{margin-top:18px;padding-top:16px;border-top:2px solid #dce8ed}.fishing-planning-head{display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap}.fishing-planning-head h3{margin:0;color:var(--navy);font-size:1.05rem}.fishing-planning-status{color:var(--muted);font-size:.78rem}.fishing-planning-summary{margin:10px 0;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:#fffdf5;line-height:1.45}.fishing-planning-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.fishing-planning-item{padding:10px 11px;border:1px solid var(--line);border-radius:11px;background:#fff}.fishing-planning-item .label{font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:850}.fishing-planning-item .value{margin-top:3px;color:var(--navy);font-weight:900;line-height:1.25}.fishing-planning-item .detail{margin-top:4px;color:var(--muted);font-size:.77rem;line-height:1.35}.fishing-planning-error{margin:8px 0 0;color:#8b2c2c;font-size:.82rem}@media(max-width:850px){.fishing-planning-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:520px){.fishing-planning-grid{grid-template-columns:1fr}}@media(max-width:800px){.offshore-trip-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:640px){.offshore-trip-forecast{grid-template-columns:1fr}}.marine-forecast-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap}
 .marine-forecast-zone{color:var(--muted);font-size:.84rem;font-weight:750}
 .marine-alerts{margin:8px 0 14px;display:flex;gap:7px;flex-wrap:wrap}
@@ -5656,16 +5935,18 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 .marine-forecast-error{color:var(--muted);font-size:.9rem}
 @media(max-width:640px){.marine-periods{grid-template-columns:1fr}}
 .bottom-source-context{display:grid;gap:3px;margin:0 0 12px;padding:9px 11px;border:1px solid var(--line);border-radius:12px;background:#f7fbfc;color:var(--muted);font-size:.86rem}.bottom-source-context strong{color:var(--navy)}
-.error-card{border-left:5px solid #b64735;background:#fff7f4}.error-card h2{color:#8f3025}.error-message{font-weight:650;line-height:1.5}.error-help{color:var(--muted);font-size:.9rem}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}.bottom.planning-preferred{background:#eff8f1;border-color:#b8d8c0}.bottom.planning-caution{background:#fff8e6;border-color:#e6c66a}.bottom.planning-redflag{background:#fff0ef;border-color:#e0a39d}.bottom .planning-period-status{margin:0 0 10px;font-weight:900;font-size:1.05rem}.bottom .planning-period-status.preferred{color:#176246}.bottom .planning-period-status.caution{color:#8a5a00}.bottom .planning-period-status.redflag{color:#9b3027}.bottom-wind-summary{margin:10px 0 14px}.bottom-wind-summary .metrics{margin-bottom:7px}.conditions-now-heading{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}.conditions-now-heading .conditions-now-asof{font-size:.72em;font-weight:800;color:var(--muted);letter-spacing:.01em}.page-loading-overlay{position:fixed;inset:0;z-index:6000;display:flex;align-items:center;justify-content:center;background:rgba(245,250,252,.82);backdrop-filter:blur(2px);opacity:0;visibility:hidden;pointer-events:none;transition:opacity .12s ease,visibility .12s ease}.page-loading-overlay.active{opacity:1;visibility:visible;pointer-events:auto}.page-loading-box{display:flex;align-items:center;gap:12px;padding:15px 18px;border:1px solid var(--line);border-radius:16px;background:#fff;box-shadow:0 14px 38px rgba(8,43,69,.18);color:var(--navy);font-weight:850}.page-loading-spinner{width:30px;height:30px;border:4px solid #d8e7ed;border-top-color:var(--blue);border-radius:50%;animation:page-loading-spin .8s linear infinite}@keyframes page-loading-spin{to{transform:rotate(360deg)}}@media (prefers-reduced-motion:reduce){.page-loading-spinner{animation-duration:1.8s}}.map-sources-card h2{margin-bottom:7px}.map-sources-note{margin:0;color:var(--muted);font-size:.84rem;line-height:1.5}.planning-page-link-card{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}.planning-page-link-card h2{margin-bottom:4px}.planning-page-link-card p{margin:0;color:var(--muted)}.planning-page-link{display:inline-block;padding:11px 16px;border-radius:999px;background:var(--navy);color:#fff;text-decoration:none;font-weight:900}.planning-page-link:hover{filter:brightness(1.08)}@media(max-width:640px){.planning-page-link{width:100%;text-align:center}}</style></head><body><main class="shell">
-<section class="hero"><div class="eyebrow">Mauri's Weather & Water Conditions</div><h1>{{.Title}}</h1><div class="sub">{{.ReportTime}} · {{.Station}}</div>{{if .Historical}}<span class="badge">Historical · {{.RequestedTime}}</span>{{end}}{{if .Yogiism}}<div class="yogiism">“{{.Yogiism}}” — Yogi Berra</div>{{end}}</section><div class="grid">
+.error-card{border-left:5px solid #b64735;background:#fff7f4}.error-card h2{color:#8f3025}.error-message{font-weight:650;line-height:1.5}.error-help{color:var(--muted);font-size:.9rem}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}.bottom.planning-preferred{background:#eff8f1;border-color:#b8d8c0}.bottom.planning-caution{background:#fff8e6;border-color:#e6c66a}.bottom.planning-redflag{background:#fff0ef;border-color:#e0a39d}.bottom .planning-period-status{margin:0 0 10px;font-weight:900;font-size:1.05rem}.bottom .planning-period-status.preferred{color:#176246}.bottom .planning-period-status.caution{color:#8a5a00}.bottom .planning-period-status.redflag{color:#9b3027}.bottom-wind-summary{margin:10px 0 14px}.bottom-wind-summary .metrics{margin-bottom:7px}.conditions-now-heading{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}.conditions-now-heading .conditions-now-asof{font-size:.72em;font-weight:800;color:var(--muted);letter-spacing:.01em}.page-loading-overlay{position:fixed;inset:0;z-index:6000;display:flex;align-items:center;justify-content:center;background:rgba(245,250,252,.82);backdrop-filter:blur(2px);opacity:0;visibility:hidden;pointer-events:none;transition:opacity .12s ease,visibility .12s ease}.page-loading-overlay.active{opacity:1;visibility:visible;pointer-events:auto}.page-loading-box{display:flex;align-items:center;gap:12px;padding:15px 18px;border:1px solid var(--line);border-radius:16px;background:#fff;box-shadow:0 14px 38px rgba(8,43,69,.18);color:var(--navy);font-weight:850}.page-loading-spinner{width:30px;height:30px;border:4px solid #d8e7ed;border-top-color:var(--blue);border-radius:50%;animation:page-loading-spin .8s linear infinite}@keyframes page-loading-spin{to{transform:rotate(360deg)}}@media (prefers-reduced-motion:reduce){.page-loading-spinner{animation-duration:1.8s}}.map-sources-card h2{margin-bottom:7px}.map-sources-note{margin:0;color:var(--muted);font-size:.84rem;line-height:1.5}.planning-page-link-card{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}.planning-page-link-card h2{margin-bottom:4px}.planning-page-link-card p{margin:0;color:var(--muted)}.planning-page-link{display:inline-block;padding:11px 16px;border-radius:999px;background:var(--navy);color:#fff;text-decoration:none;font-weight:900}.planning-page-link:hover{filter:brightness(1.08)}@media(max-width:640px){.planning-page-link{width:100%;text-align:center}}.page-preferences{display:flex;justify-content:flex-end;align-items:center;margin:10px 0 0}.page-preferences .wind-unit-control{display:inline-flex;align-items:center;gap:8px;padding:7px 10px;border:1px solid var(--line);border-radius:12px;background:#fff;color:var(--navy);font-size:.82rem;font-weight:850}.page-preferences .wind-unit-control select{padding:5px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--ink);font:inherit;font-weight:800}@media(max-width:640px){.page-preferences{justify-content:stretch}.page-preferences .wind-unit-control{width:100%;justify-content:space-between}}</style></head><body><main class="shell">
+<section class="hero"><div class="eyebrow">Mauri's Weather & Water Conditions</div><h1>{{.Title}}</h1><div class="sub">{{.ReportTime}} · {{.Station}}</div>{{if .Historical}}<span class="badge">Historical · {{.RequestedTime}}</span>{{end}}{{if .Yogiism}}<div class="yogiism">“{{.Yogiism}}” — Yogi Berra</div>{{end}}</section>
+<div class="page-preferences" aria-label="Display preferences"><label class="wind-unit-control" for="wind-unit-select">Wind units<select id="wind-unit-select"><option value="kts" {{if eq .WindUnit "kts"}}selected{{end}}>Knots</option><option value="mph" {{if eq .WindUnit "mph"}}selected{{end}}>MPH</option></select></label></div>
+<div class="grid">
 {{if not .PlanningDetails}}
 <section id="bottom-line-card" class="card full bottom{{if .PlanningPeriodClass}} planning-{{.PlanningPeriodClass}}{{end}}"><h2 class="conditions-now-heading"><span>CONDITIONS NOW</span>{{if .WindObserved}}<span class="conditions-now-asof">AS OF {{.WindObserved}}{{if .WindObservedAge}} · {{.WindObservedAge}}{{end}}</span>{{end}}</h2><div class="bottom-source-context">{{if .BottomLineWindSource}}<div><strong>Wind station:</strong> {{.BottomLineWindSource}}</div>{{end}}{{if .BottomLineCurrentSource}}<div><strong>Currents station:</strong> {{.BottomLineCurrentSource}}</div>{{else}}<div><strong>Currents station:</strong> unavailable</div>{{end}}</div>{{if .PlanningPeriodCause}}<p><strong>{{.PlanningPeriodCause}}</strong></p>{{end}}{{if .PlanningPeriodDetail}}<p>{{.PlanningPeriodDetail}}</p>{{end}}{{if not .WindError}}<div class="bottom-wind-summary" aria-label="Latest wind observation"><div class="metrics"><div class="metric"><div class="label">Direction</div><div class="value">{{if .WindDirection}}{{.WindDirection}}{{else}}—{{end}}</div></div><div class="metric"><div class="label">Wind</div><div class="value">{{if .WindSpeed}}{{.WindSpeed}}{{else}}—{{end}}</div></div><div class="metric"><div class="label">Gust</div><div class="value">{{if .WindGust}}{{.WindGust}}{{else}}—{{end}}</div></div><div class="metric"><div class="label">Air temp</div><div class="value">{{if .WindAirTemp}}{{.WindAirTemp}}{{else}}—{{end}}</div></div></div></div>{{end}}{{if .BottomLineCurrentChart}}<div class="chart-explainer"><strong>1-day tidal current outlook.</strong> Above zero = flood; below zero = ebb; crossings = slack water.</div><div class="current-chart-wrap">{{.BottomLineCurrentChart}}</div>{{else}}{{range .BottomLineNarrative}}<p>{{.}}</p>{{else}}{{if .WindError}}<p>Summary unavailable.</p>{{end}}{{end}}{{end}}</section>
 <section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Open the full planning dashboard for location, wind, currents, forecasts, map layers, and customization controls.</p></div><a id="planning-page-link" class="planning-page-link" href="{{.PlanningDetailsURL}}">Planning and Details →</a></section>
 {{else}}
 <section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Full planning dashboard and customization controls.</p></div><a class="planning-page-link" href="{{.ConditionsURL}}">← Back to Conditions Now</a></section>
-<section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map to choose a sailing location, then use Find stations near selected location. The latitude/longitude fields always show the current map center; you may edit them and use Center Map → Latitude & Longitude to pan there without changing the selected sailing location. My location also centers the map only. Panning changes the view, not the selected ★ location. Click a nearby wind station to pin its details and preview the associated currents station, then use the selection link in the map panel to commit the wind-station choice. Candidate stations and distances always refer to the selected location.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-nautical-zoom-note" class="map-nautical-zoom-note" hidden aria-live="polite">Nautical chart available at Zoom 9+.</div><div id="map-resize-handle" class="map-resize-handle" role="separator" aria-label="Resize map vertically" aria-orientation="horizontal" aria-valuemin="260" aria-valuemax="900" aria-valuenow="390" aria-grabbed="false" tabindex="0" title="Drag up or down to resize map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-state-controls" aria-label="Map controls"><details id="map-types-menu" class="map-overlays-menu"><summary>Map Types</summary><div class="map-overlays-panel"><label class="map-overlay-toggle"><input type="radio" name="map-type" value="map"> <span>Street Map</span></label><label id="map-type-nautical-label" class="map-overlay-toggle"><input id="map-type-nautical" type="radio" name="map-type" value="nautical"> <span>Nautical Chart <small>(Zoom 9+)</small></span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="satellite"> <span>Satellite</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="hybrid"> <span>Hybrid</span></label></div></details><details id="map-overlays-menu" class="map-overlays-menu"><summary>Map Overlays</summary><div class="map-overlays-panel"><details class="map-overlay-group"><summary>Weather &amp; Hazards</summary><div class="map-overlay-group-body"><label id="map-marine-zone-control" class="map-overlay-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-smoke"> <span>Satellite smoke (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-clouds"> <span>Satellite Cloud Cover (NOAA)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-radar"> <span>Weather radar (NOAA/NWS)</span></label></div></details><details class="map-overlay-group" open><summary>Terrain &amp; Seafloor</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-structure"> <span>Topography &amp; Bathymetry (NOAA ETOPO + offshore feature names)</span></label></div></details><details class="map-overlay-group"><summary>Observations</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-saildrone"> <span>Saildrone Observations (NOAA PMEL)</span></label></div></details></div></details><details id="map-center-menu" class="map-overlays-menu"><summary>Center Map</summary><div class="map-overlays-panel map-center-panel"><button type="button" id="map-geolocate" class="map-center-action" title="Center the map on your device location without changing the selected location">My location</button><button type="button" id="map-nav-coordinates" class="map-center-action" title="Center the map on the latitude and longitude shown below">Latitude &amp; Longitude</button><button type="button" id="map-nav-selected" class="map-center-action" {{if not .MapHasRequest}}disabled{{end}}>Selected location</button><button type="button" id="map-nav-wind" class="map-center-action" {{if not .MapHasWind}}disabled{{end}}>Selected wind station</button><button type="button" id="map-nav-current" class="map-center-action" {{if not .MapHasCurrent}}disabled{{end}}>Selected currents station</button></div></details><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}" {{if not .MapHasRequest}}disabled{{end}}>Clear selected location &amp; candidates</button></div><div class="map-location-info-grid"><div class="map-coordinate-entry" aria-label="Map center coordinates"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLat}}" aria-label="Map center latitude"></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLon}}" aria-label="Map center longitude"></div><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div id="selected-location-weather" class="selected-location-weather" aria-live="polite"><div class="selected-location-weather-head"><strong>Local Conditions</strong><span id="selected-location-weather-updated" class="selected-location-weather-updated">{{if .SelectedWeatherUpdated}}Updated {{.SelectedWeatherUpdated}}{{end}}</span></div><div id="selected-location-weather-place" class="selected-location-weather-place">{{if .MapHasRequest}}{{if .SelectedWeatherLocation}}{{.SelectedWeatherLocation}}{{else}}Near selected location{{end}}{{else}}Select a location for local conditions{{end}}</div><div id="selected-location-weather-content" {{if not .MapHasRequest}}hidden{{end}}><div class="selected-location-weather-metrics"><span class="selected-location-weather-metric"><b>Air temp:</b> <span id="selected-location-weather-air">{{if .SelectedWeatherAirTemp}}{{.SelectedWeatherAirTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>High:</b> <span id="selected-location-weather-high">{{if .SelectedWeatherHighTemp}}{{.SelectedWeatherHighTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>Low:</b> <span id="selected-location-weather-low">{{if .SelectedWeatherLowTemp}}{{.SelectedWeatherLowTemp}}{{else}}—{{end}}</span></span></div><p id="selected-location-weather-forecast" class="selected-location-weather-forecast" {{if not .SelectedWeatherShortForecast}}hidden{{end}}>{{.SelectedWeatherShortForecast}}</p><p id="selected-location-weather-error" class="selected-location-weather-error" {{if not .SelectedWeatherError}}hidden{{end}}>{{.SelectedWeatherError}}</p><p class="selected-location-weather-note">NWS point forecast near the selected location. Air temperature is the current-hour forecast, not a direct observation.</p></div></div></div><div class="map-controls"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Select a location to find stations</span><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><details class="map-overlay-help"><summary>Map overlay details</summary><div class="map-overlay-help-body">Topography & Bathymetry combines NOAA/NCEI ETOPO land topography and seafloor bathymetry with NOAA Marine Cadastre official named offshore features. Fishing-relevant features such as seamounts, banks, ridges, hills, knolls, shoals, reefs, rises, plateaus, pinnacles, and escarpments are labeled locally for better contrast. It is intended for fishing-planning context, not navigation; smaller pinnacles may not appear in the global relief model. Saildrone Observations uses NOAA PMEL public ERDDAP mission data and plots the latest reported position and met-ocean readings from configured 2026 NOAA Saildrone missions; availability is mission-dependent and these moving platforms are not a fixed station network. Exact positions are plotted only when the source provides them; fisherman shorthand such as “20×20” is shown as a derived approximate position with an uncertainty circle, and broad reports such as “Cordell to Monterey” are shown as regional zones rather than fake point coordinates. Satellite Cloud Cover uses NOAA/NESDIS GOES imagery rendered for the current map view; daylight areas appear natural-color-like and nighttime areas use infrared imagery. Radar uses Iowa State IEM's Web-Mercator CONUS NEXRAD N0Q WMS layer; a clear/transparent radar layer can simply mean no precipitation echoes are present.</div></details><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-weather-overlay-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div id="map-structure-status" class="map-structure-status" hidden></div><div id="map-saildrone-status" class="map-saildrone-status" hidden></div><div class="map-layer-note">Drag the handle directly below the map to make the map taller or shorter. Keyboard users can focus the handle and use ↑/↓ (Shift for larger steps).</div><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span><span class="map-key"><span class="map-dot saildrone" aria-hidden="true"></span>Saildrone latest position</span></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
+<section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map to choose a sailing location, then use Find stations near selected location. The latitude/longitude fields always show the current map center; you may edit them and use Center Map → Latitude & Longitude to pan there without changing the selected sailing location. My location also centers the map only. Panning changes the view, not the selected ★ location. Click a nearby wind station to pin its details and preview the associated currents station, then use the selection link in the map panel to commit the wind-station choice. Candidate stations and distances always refer to the selected location.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-nautical-zoom-note" class="map-nautical-zoom-note" hidden aria-live="polite">Nautical chart available at Zoom 9+.</div><div id="map-resize-handle" class="map-resize-handle" role="separator" aria-label="Resize map vertically" aria-orientation="horizontal" aria-valuemin="260" aria-valuemax="900" aria-valuenow="390" aria-grabbed="false" tabindex="0" title="Drag up or down to resize map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-state-controls" aria-label="Map controls"><details id="map-types-menu" class="map-overlays-menu"><summary>Map Types</summary><div class="map-overlays-panel"><label class="map-overlay-toggle"><input type="radio" name="map-type" value="map"> <span>Street Map</span></label><label id="map-type-nautical-label" class="map-overlay-toggle"><input id="map-type-nautical" type="radio" name="map-type" value="nautical"> <span>Nautical Chart <small>(Zoom 9+)</small></span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="satellite"> <span>Satellite</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="hybrid"> <span>Hybrid</span></label></div></details><details id="map-overlays-menu" class="map-overlays-menu"><summary>Map Overlays</summary><div class="map-overlays-panel"><details class="map-overlay-group"><summary>Weather &amp; Hazards</summary><div class="map-overlay-group-body"><label id="map-marine-zone-control" class="map-overlay-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-smoke"> <span>Satellite smoke (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-clouds"> <span>Satellite Cloud Cover (NOAA)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-radar"> <span>Weather radar (NOAA/NWS)</span></label></div></details><details class="map-overlay-group" open><summary>Terrain &amp; Seafloor</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-structure"> <span>Topography &amp; Bathymetry (NOAA ETOPO + offshore feature names)</span></label></div></details><details class="map-overlay-group"><summary>Observations</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-wind-barbs"> <span>Marine / Bay Wind Barbs (NOAA/NDBC)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-inland-wind-barbs"> <span>Land / Inland Wind Barbs (METAR)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-saildrone"> <span>Saildrone Observations (NOAA PMEL)</span></label></div></details></div></details><details id="map-center-menu" class="map-overlays-menu"><summary>Center Map</summary><div class="map-overlays-panel map-center-panel"><button type="button" id="map-geolocate" class="map-center-action" title="Center the map on your device location without changing the selected location">My location</button><button type="button" id="map-nav-coordinates" class="map-center-action" title="Center the map on the latitude and longitude shown below">Latitude &amp; Longitude</button><button type="button" id="map-nav-selected" class="map-center-action" {{if not .MapHasRequest}}disabled{{end}}>Selected location</button><button type="button" id="map-nav-wind" class="map-center-action" {{if not .MapHasWind}}disabled{{end}}>Selected wind station</button><button type="button" id="map-nav-current" class="map-center-action" {{if not .MapHasCurrent}}disabled{{end}}>Selected currents station</button></div></details><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}" {{if not .MapHasRequest}}disabled{{end}}>Clear selected location &amp; candidates</button></div><div class="map-location-info-grid"><div class="map-coordinate-entry" aria-label="Map center coordinates"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLat}}" aria-label="Map center latitude"></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLon}}" aria-label="Map center longitude"></div><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div id="selected-location-weather" class="selected-location-weather" aria-live="polite"><div class="selected-location-weather-head"><strong>Local Conditions</strong><span id="selected-location-weather-updated" class="selected-location-weather-updated">{{if .SelectedWeatherUpdated}}Updated {{.SelectedWeatherUpdated}}{{end}}</span></div><div id="selected-location-weather-place" class="selected-location-weather-place">{{if .MapHasRequest}}{{if .SelectedWeatherLocation}}{{.SelectedWeatherLocation}}{{else}}Near selected location{{end}}{{else}}Select a location for local conditions{{end}}</div><div id="selected-location-weather-content" {{if not .MapHasRequest}}hidden{{end}}><div class="selected-location-weather-metrics"><span class="selected-location-weather-metric"><b>Air temp:</b> <span id="selected-location-weather-air">{{if .SelectedWeatherAirTemp}}{{.SelectedWeatherAirTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>High:</b> <span id="selected-location-weather-high">{{if .SelectedWeatherHighTemp}}{{.SelectedWeatherHighTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>Low:</b> <span id="selected-location-weather-low">{{if .SelectedWeatherLowTemp}}{{.SelectedWeatherLowTemp}}{{else}}—{{end}}</span></span></div><p id="selected-location-weather-forecast" class="selected-location-weather-forecast" {{if not .SelectedWeatherShortForecast}}hidden{{end}}>{{.SelectedWeatherShortForecast}}</p><p id="selected-location-weather-error" class="selected-location-weather-error" {{if not .SelectedWeatherError}}hidden{{end}}>{{.SelectedWeatherError}}</p><p class="selected-location-weather-note">NWS point forecast near the selected location. Air temperature is the current-hour forecast, not a direct observation.</p></div></div></div><div class="map-controls"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Select a location to find stations</span><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><details class="map-overlay-help"><summary>Map overlay details</summary><div class="map-overlay-help-body">Topography & Bathymetry combines NOAA/NCEI ETOPO land topography and seafloor bathymetry with NOAA Marine Cadastre official named offshore features. Fishing-relevant features such as seamounts, banks, ridges, hills, knolls, shoals, reefs, rises, plateaus, pinnacles, and escarpments are labeled locally for better contrast. It is intended for fishing-planning context, not navigation; smaller pinnacles may not appear in the global relief model. Marine / Bay Wind Barbs uses live NOAA/NDBC station observations from all active stations with usable wind inside the buffered map viewport; standard meteorological barbs show wind-from direction and speed, and stale observations are faded. Land / Inland Wind Barbs is a separate optional layer sourced from Aviation Weather Center’s complete current-METAR cache and filtered locally to the buffered viewport, including many ASOS/AWOS airport sites. Both controls are display-only and do not change the selected wind station or sailing location. Wind-barb tooltips follow the shared page Wind units preference; barb geometry remains based on standard knot increments. Saildrone Observations uses NOAA PMEL public ERDDAP mission data and plots the latest reported position and met-ocean readings from configured 2026 NOAA Saildrone missions; availability is mission-dependent and these moving platforms are not a fixed station network. Exact positions are plotted only when the source provides them; fisherman shorthand such as “20×20” is shown as a derived approximate position with an uncertainty circle, and broad reports such as “Cordell to Monterey” are shown as regional zones rather than fake point coordinates. Satellite Cloud Cover uses NOAA/NESDIS GOES imagery rendered for the current map view; daylight areas appear natural-color-like and nighttime areas use infrared imagery. Radar uses Iowa State IEM's Web-Mercator CONUS NEXRAD N0Q WMS layer; a clear/transparent radar layer can simply mean no precipitation echoes are present.</div></details><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-weather-overlay-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div id="map-structure-status" class="map-structure-status" hidden></div><div id="map-windbarb-status" class="map-windbarb-status" hidden></div><div id="map-saildrone-status" class="map-saildrone-status" hidden></div><div class="map-layer-note">Drag the handle directly below the map to make the map taller or shorter. Keyboard users can focus the handle and use ↑/↓ (Shift for larger steps).</div><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span><span class="map-key"><span class="map-dot saildrone" aria-hidden="true"></span>Saildrone latest position</span></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
 {{if .WindError}}<section class="card full error-card"><h2>Wind station selection unavailable</h2><p class="error-message">{{.WindError}}</p><p class="error-help">The page is still available so you can inspect the request and nearby station diagnostics. Try nearby coordinates or an explicit NDBC station ID.</p></section>{{end}}
-<section class="card full wind-card"><div class="wind-card-head"><h2>Wind</h2><label class="wind-unit-control" for="wind-unit-select">Wind speed<select id="wind-unit-select"><option value="kts" {{if eq .WindUnit "kts"}}selected{{end}}>Knots</option><option value="mph" {{if eq .WindUnit "mph"}}selected{{end}}>MPH</option></select></label></div>
+<section class="card full wind-card"><div class="wind-card-head"><h2>Wind</h2></div>
 <div class="metrics">
 <div class="metric"><div class="label">Direction</div><div class="value">{{if .WindDirection}}{{.WindDirection}}{{else}}—{{end}}</div></div>
 <div class="metric"><div class="label">Wind</div><div class="value">{{if .WindSpeed}}{{.WindSpeed}}{{else}}—{{end}}</div></div>
@@ -5792,6 +6073,9 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   map.createPane("underseaNamesPane");
   map.getPane("underseaNamesPane").style.zIndex = 425;
   map.getPane("underseaNamesPane").style.pointerEvents = "none";
+
+  map.createPane("windBarbPane");
+  map.getPane("windBarbPane").style.zIndex = 434;
 
   map.createPane("saildronePane");
   map.getPane("saildronePane").style.zIndex = 432;
@@ -6871,6 +7155,8 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     smokeOverlayVisible: false,
     smokeOverlayLoaded: false,
     structureOverlayVisible: false,
+    windBarbsVisible: false,
+    inlandWindBarbsVisible: false,
     saildroneVisible: false,
     cloudOverlayVisible: false,
     radarOverlayVisible: false
@@ -6878,6 +7164,14 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 
   var sourcePoints = [];
   var candidateLayer = L.layerGroup().addTo(map);
+  var windBarbLayer = L.layerGroup();
+  var windBarbObservations = [];
+  var windBarbObservationCache = Object.create(null);
+  var windBarbCacheMaxAgeMS = 20 * 60 * 1000;
+  var windBarbDataErrors = [];
+  var windBarbRequestSerial = 0;
+  var windBarbRefreshTimer = null;
+  var windBarbLoadedBounds = null;
   var marineZoneLayer = null;
   var marineZoneHaloLayer = null;
   var smokeLayer = null;
@@ -7354,6 +7648,302 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     return Object.keys(seen).length;
   }
 
+  function setWindBarbStatus(message, isError) {
+    var status = document.getElementById("map-windbarb-status");
+    if (!status) return;
+    message = String(message || "").trim();
+    status.hidden = !message;
+    status.textContent = message;
+    status.style.color = isError ? "#9a352f" : "";
+  }
+
+  function windDirectionDegrees(value) {
+    var key = String(value || "").trim().toUpperCase().replace(/[^A-Z]/g, "");
+    var points = {N:0,NNE:22.5,NE:45,ENE:67.5,E:90,ESE:112.5,SE:135,SSE:157.5,S:180,SSW:202.5,SW:225,WSW:247.5,W:270,WNW:292.5,NW:315,NNW:337.5};
+    return Object.prototype.hasOwnProperty.call(points, key) ? points[key] : null;
+  }
+
+  function parseCandidateWind(windText) {
+    var text = String(windText || "").trim();
+    if (!text) return null;
+    var parts = text.split(/\s+/);
+    if (parts.length < 2) return null;
+    var degrees = windDirectionDegrees(parts[0]);
+    var speed = Number(parts[1]);
+    if (degrees === null || !Number.isFinite(speed)) return null;
+    if (/\bmph\b/i.test(text)) speed = speed / 1.150779448;
+    return {direction:parts[0].toUpperCase(), degrees:degrees, speedKT:Math.max(0, speed)};
+  }
+
+  function windBarbSVG(speedKT, degrees) {
+    var rounded = Math.max(0, Math.round(Number(speedKT) / 5) * 5);
+    if (rounded < 3) {
+      return '<svg width="34" height="34" viewBox="-17 -17 34 34" aria-hidden="true"><circle class="barb-stroke" cx="0" cy="0" r="5"></circle></svg>';
+    }
+    var remaining = rounded;
+    var y = -13;
+    var marks = '';
+    while (remaining >= 50) {
+      marks += '<path class="barb-flag" d="M0 '+y+' L9 '+(y+4)+' L0 '+(y+7)+' Z"></path>';
+      y += 8;
+      remaining -= 50;
+    }
+    while (remaining >= 10) {
+      marks += '<path class="barb-stroke" d="M0 '+y+' L9 '+(y+4)+'"></path>';
+      y += 4;
+      remaining -= 10;
+    }
+    if (remaining >= 5) marks += '<path class="barb-stroke" d="M0 '+y+' L5 '+(y+2)+'"></path>';
+    return '<svg width="42" height="42" viewBox="-21 -21 42 42" aria-hidden="true"><g transform="rotate('+Number(degrees).toFixed(1)+')"><path class="barb-stroke" d="M0 12 L0 -14"></path>'+marks+'</g><circle cx="0" cy="0" r="2.2" fill="#102f44"></circle></svg>';
+  }
+
+  function windBarbSpacingPixels() {
+    var zoom = map.getZoom();
+    if (zoom <= 5) return 38;
+    if (zoom <= 6) return 34;
+    if (zoom <= 7) return 30;
+    if (zoom <= 8) return 26;
+    if (zoom <= 9) return 22;
+    return 18;
+  }
+
+  function windBarbAgeMinutes(value) {
+    var ageText = String(value || "");
+    var ageMinutes = 0;
+    var hourMatch = ageText.match(/(\d+)h/i);
+    var minuteMatch = ageText.match(/(\d+)\s*min/i);
+    if (hourMatch) ageMinutes += Number(hourMatch[1]) * 60;
+    if (minuteMatch) ageMinutes += Number(minuteMatch[1]);
+    if (!hourMatch && !minuteMatch) {
+      var simpleMatch = ageText.match(/(\d+)/);
+      if (simpleMatch) ageMinutes = Number(simpleMatch[1]);
+    }
+    return Number.isFinite(ageMinutes) ? ageMinutes : 999999;
+  }
+
+  function windBarbCacheKey(c) {
+    return String(c.class || "marine").toLowerCase() + ":" +
+      normalizeWindStationID(c.station || "");
+  }
+
+  function refreshWindBarbObservationArray() {
+    var now = Date.now();
+    var next = [];
+    Object.keys(windBarbObservationCache).forEach(function(key) {
+      var entry = windBarbObservationCache[key];
+      if (!entry || !Number.isFinite(entry.cachedAt) || now - entry.cachedAt > windBarbCacheMaxAgeMS) {
+        delete windBarbObservationCache[key];
+        return;
+      }
+      next.push(entry.observation);
+    });
+    windBarbObservations = next;
+  }
+
+  function mergeWindBarbObservations(observations) {
+    var now = Date.now();
+    observations.forEach(function(c) {
+      var observation = {
+        station: normalizeWindStationID(c.station),
+        name: String(c.name || c.station || ""),
+        wind: String(c.wind || ""),
+        observationAge: String(c.observation_age || ""),
+        class: String(c.class || "marine"),
+        source: String(c.source || ""),
+        lat: Number(c.lat),
+        lon: Number(c.lon)
+      };
+      var key = windBarbCacheKey(observation);
+      if (!observation.station || !key) return;
+      windBarbObservationCache[key] = {observation: observation, cachedAt: now};
+    });
+    refreshWindBarbObservationArray();
+  }
+
+  function renderWindBarbs() {
+    windBarbLayer.clearLayers();
+    if (!mapState.windBarbsVisible && !mapState.inlandWindBarbsVisible) return;
+    refreshWindBarbObservationArray();
+    var usable = 0;
+    var marineUsable = 0;
+    var inlandUsable = 0;
+    var stale = 0;
+    var thinned = 0;
+    var occupied = Object.create(null);
+    var spacing = windBarbSpacingPixels();
+    var zoom = map.getZoom();
+
+    // Use Leaflet world-pixel coordinates rather than viewport-relative pixels.
+    // At a fixed zoom, the same station always belongs to the same thinning cell
+    // no matter how the user pans the map. This prevents small pans from swapping
+    // one nearby barb for another.
+    var ordered = windBarbObservations.slice().sort(function(a, b) {
+      var ac = String(a.class || "marine").toLowerCase() === "inland" ? 1 : 0;
+      var bc = String(b.class || "marine").toLowerCase() === "inland" ? 1 : 0;
+      if (ac !== bc) return ac - bc;
+      var ageDiff = windBarbAgeMinutes(a.observationAge) - windBarbAgeMinutes(b.observationAge);
+      if (ageDiff !== 0) return ageDiff;
+      return normalizeWindStationID(a.station).localeCompare(normalizeWindStationID(b.station));
+    });
+
+    ordered.forEach(function(c) {
+      var stationClass = String(c.class || "marine").toLowerCase();
+      if (stationClass === "inland" && !mapState.inlandWindBarbsVisible) return;
+      if (stationClass !== "inland" && !mapState.windBarbsVisible) return;
+      var parsed = parseCandidateWind(c.wind);
+      var lat = Number(c.lat), lon = Number(c.lon);
+      if (!parsed || !Number.isFinite(lat) || !Number.isFinite(lon)) return;
+
+      var p = map.project(L.latLng(lat, lon), zoom);
+      var cell = Math.floor(p.x / spacing) + ":" + Math.floor(p.y / spacing);
+      if (occupied[cell]) {
+        thinned++;
+        return;
+      }
+      occupied[cell] = true;
+
+      var ageMinutes = windBarbAgeMinutes(c.observationAge);
+      var isStale = ageMinutes > 90;
+      if (isStale) stale++;
+      var icon = L.divIcon({
+        className:"wind-barb-icon" + (isStale ? " stale" : ""),
+        html:windBarbSVG(parsed.speedKT, parsed.degrees),
+        iconSize:[42,42], iconAnchor:[21,21]
+      });
+      var marker = L.marker([lat,lon], {icon:icon,pane:"windBarbPane",keyboard:false,zIndexOffset:80});
+      var sourceLabel = c.source ? " · " + c.source : "";
+      marker.bindTooltip(String(c.station || "") + " · " + String(c.wind || "") + (c.observationAge ? " · " + c.observationAge + " old" : "") + sourceLabel);
+      marker.addTo(windBarbLayer);
+      usable++;
+      if (stationClass === "inland") inlandUsable++; else marineUsable++;
+    });
+    if (!map.hasLayer(windBarbLayer)) windBarbLayer.addTo(map);
+    if (!usable) {
+      var emptyMessage = "Wind barbs · no usable observations returned for the enabled layers in the current map view.";
+      if (windBarbDataErrors.length) emptyMessage += " " + windBarbDataErrors.join(" | ");
+      setWindBarbStatus(emptyMessage, windBarbDataErrors.length > 0);
+    } else {
+      var parts = ["Observed wind barbs", usable + " shown"];
+      if (mapState.windBarbsVisible) parts.push(marineUsable + " NOAA/NDBC marine/Bay");
+      if (mapState.inlandWindBarbsVisible) parts.push(inlandUsable + " METAR land/inland");
+      if (thinned) parts.push(thinned + " hidden at this zoom to reduce overlap");
+      if (stale) parts.push(stale + " older than 90 min faded");
+      if (windBarbDataErrors.length) parts.push(windBarbDataErrors.length + " source warning" + (windBarbDataErrors.length === 1 ? "" : "s"));
+      setWindBarbStatus(parts.join(" · "), false);
+    }
+  }
+
+  function windBarbBoundsContain(outer, inner) {
+    if (!outer || !inner) return false;
+    return outer.getSouth() <= inner.getSouth() &&
+      outer.getNorth() >= inner.getNorth() &&
+      outer.getWest() <= inner.getWest() &&
+      outer.getEast() >= inner.getEast();
+  }
+
+  function bufferedWindBarbBounds(bounds) {
+    var latPad = Math.max(0.08, (bounds.getNorth() - bounds.getSouth()) * 0.70);
+    var lonPad = Math.max(0.08, (bounds.getEast() - bounds.getWest()) * 0.70);
+    return L.latLngBounds(
+      [Math.max(-90, bounds.getSouth() - latPad), Math.max(-180, bounds.getWest() - lonPad)],
+      [Math.min(90, bounds.getNorth() + latPad), Math.min(180, bounds.getEast() + lonPad)]
+    );
+  }
+
+  function loadWindBarbsForViewport(force) {
+    if (!mapState.windBarbsVisible && !mapState.inlandWindBarbsVisible) return;
+
+    var visibleBounds = map.getBounds();
+    if (!visibleBounds || !visibleBounds.isValid()) {
+      setWindBarbStatus("Wind barbs · map bounds unavailable.", true);
+      return;
+    }
+    if (!force && windBarbBoundsContain(windBarbLoadedBounds, visibleBounds)) {
+      renderWindBarbs();
+      return;
+    }
+
+    var requestBounds = bufferedWindBarbBounds(visibleBounds);
+    var requestSerial = ++windBarbRequestSerial;
+    setWindBarbStatus("Loading wind observations for buffered map view…", false);
+
+    var endpoint =
+      "/wind-barbs?min_lat=" + encodeURIComponent(requestBounds.getSouth().toFixed(5)) +
+      "&max_lat=" + encodeURIComponent(requestBounds.getNorth().toFixed(5)) +
+      "&min_lon=" + encodeURIComponent(requestBounds.getWest().toFixed(5)) +
+      "&max_lon=" + encodeURIComponent(requestBounds.getEast().toFixed(5)) +
+      "&wind_unit={{.WindUnit}}" +
+      "&include_marine=" + (mapState.windBarbsVisible ? "1" : "0") +
+      "&include_inland=" + (mapState.inlandWindBarbsVisible ? "1" : "0");
+
+    fetch(endpoint, {headers:{"Accept":"application/json"}})
+      .then(function(response) {
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        return response.json();
+      })
+      .then(function(payload) {
+        if ((!mapState.windBarbsVisible && !mapState.inlandWindBarbsVisible) || requestSerial !== windBarbRequestSerial) return;
+        var observations = payload && Array.isArray(payload.observations) ? payload.observations : [];
+        windBarbDataErrors = payload && Array.isArray(payload.errors) ? payload.errors.map(String) : [];
+        mergeWindBarbObservations(observations);
+        windBarbLoadedBounds = requestBounds;
+        renderWindBarbs();
+      })
+      .catch(function(err) {
+        if ((!mapState.windBarbsVisible && !mapState.inlandWindBarbsVisible) || requestSerial !== windBarbRequestSerial) return;
+        setWindBarbStatus("Wind barbs unavailable: " + err.message, true);
+      });
+  }
+
+  function scheduleWindBarbRefresh() {
+    if (!mapState.windBarbsVisible && !mapState.inlandWindBarbsVisible) return;
+    if (windBarbRefreshTimer) window.clearTimeout(windBarbRefreshTimer);
+    windBarbRefreshTimer = window.setTimeout(function() {
+      windBarbRefreshTimer = null;
+      loadWindBarbsForViewport();
+    }, 250);
+  }
+
+  function setWindBarbsVisible(visible) {
+    mapState.windBarbsVisible = !!visible;
+    if (!mapState.windBarbsVisible && !mapState.inlandWindBarbsVisible) {
+      windBarbRequestSerial++;
+      if (windBarbRefreshTimer) {
+        window.clearTimeout(windBarbRefreshTimer);
+        windBarbRefreshTimer = null;
+      }
+      windBarbObservations = [];
+      windBarbObservationCache = Object.create(null);
+      windBarbDataErrors = [];
+      windBarbLoadedBounds = null;
+      windBarbLayer.clearLayers();
+      if (map.hasLayer(windBarbLayer)) map.removeLayer(windBarbLayer);
+      setWindBarbStatus("", false);
+      return;
+    }
+    if (mapState.windBarbsVisible) loadWindBarbsForViewport(true); else renderWindBarbs();
+  }
+
+  function setInlandWindBarbsVisible(visible) {
+    mapState.inlandWindBarbsVisible = !!visible;
+    if (!mapState.windBarbsVisible && !mapState.inlandWindBarbsVisible) {
+      windBarbRequestSerial++;
+      if (windBarbRefreshTimer) {
+        window.clearTimeout(windBarbRefreshTimer);
+        windBarbRefreshTimer = null;
+      }
+      windBarbObservations = [];
+      windBarbObservationCache = Object.create(null);
+      windBarbDataErrors = [];
+      windBarbLoadedBounds = null;
+      windBarbLayer.clearLayers();
+      if (map.hasLayer(windBarbLayer)) map.removeLayer(windBarbLayer);
+      setWindBarbStatus("", false);
+      return;
+    }
+    if (mapState.inlandWindBarbsVisible) loadWindBarbsForViewport(true); else renderWindBarbs();
+  }
+
   function renderWindMarkers() {
     // The candidate layer is a pure rendering of authoritative candidate state.
     candidateLayer.clearLayers();
@@ -7394,6 +7984,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       );
     });
 
+    // Wind barbs are loaded independently for the current viewport.
   }
 
   renderWindMarkers();
@@ -7489,6 +8080,22 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     });
   }
 
+  var windBarbCheckbox = document.getElementById("map-show-wind-barbs");
+  if (windBarbCheckbox) {
+    windBarbCheckbox.checked = !!mapState.windBarbsVisible;
+    windBarbCheckbox.addEventListener("change", function() {
+      setWindBarbsVisible(!!windBarbCheckbox.checked);
+    });
+  }
+
+  var inlandWindBarbCheckbox = document.getElementById("map-show-inland-wind-barbs");
+  if (inlandWindBarbCheckbox) {
+    inlandWindBarbCheckbox.checked = !!mapState.inlandWindBarbsVisible;
+    inlandWindBarbCheckbox.addEventListener("change", function() {
+      setInlandWindBarbsVisible(!!inlandWindBarbCheckbox.checked);
+    });
+  }
+
   var saildroneCheckbox = document.getElementById("map-show-saildrone");
   if (saildroneCheckbox) {
     saildroneCheckbox.checked = !!mapState.saildroneVisible;
@@ -7525,6 +8132,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     updateMapScaleStatus();
     if (mapState.structureOverlayVisible) scheduleStructureRefresh();
     if (mapState.cloudOverlayVisible) scheduleCloudRefresh();
+    if (mapState.windBarbsVisible || mapState.inlandWindBarbsVisible) scheduleWindBarbRefresh();
     if (mapState.saildroneVisible && saildroneLayer) updateSaildroneViewportStatus();
 
     if (!mapState.smokeOverlayVisible || !smokeLayer) return;

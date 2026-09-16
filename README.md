@@ -7,7 +7,7 @@ The default wind station is **PSBC1**.
 ## Current release
 
 **Public version: 1.9.3**  
-**Generated source lineage: v202**
+**Generated source lineage: v211**
 
 **Current SST status:** deferred/disabled in v195; see **Deferred SST — future approach** below.
 **Current chlorophyll status:** both Chlorophyll Field and Chlorophyll Contours are deferred/disabled in v198.
@@ -82,7 +82,7 @@ Browser wind features include:
 - adaptive time-axis labels
 - draggable/tappable inspection cursor that snaps to actual observations
 - compact Latest Wind Readings table with a sticky header and roughly three visible rows
-- selectable wind units: knots or MPH
+- shared page-level wind units control: knots or MPH, synchronized between Conditions Now and Planning and Details
 
 The recent-wind selector uses:
 
@@ -92,7 +92,7 @@ wind_hours=1|4|8|12|16|20|24
 
 The default history window is 4 hours.
 
-Wind data remain internally represented in knots. MPH conversion is display-only. Existing JSON fields such as `wind_kt` and `gust_kt` retain knot semantics.
+Wind data remain internally represented in knots. MPH conversion is display-only. The shared `wind_unit` preference appears near the top of both Conditions Now and Planning and Details, carries across navigation, and also controls wind-barb tooltip values. Wind-barb geometry remains based on standard knot increments. Existing JSON fields such as `wind_kt` and `gust_kt` retain knot semantics.
 
 ## Currents
 
@@ -456,6 +456,7 @@ Primary data providers include:
 - NOAA Hazard Mapping System for qualitative smoke analysis
 - NOAA/NESDIS for merged GOES GeoColor cloud imagery
 - NWS NEXRAD data through Iowa State IEM for radar display
+- NOAA/NWS Aviation Weather Center METAR observations for the optional land/inland wind-barb layer
 
 ## Useful Bay and Delta wind stations
 
@@ -468,6 +469,99 @@ These are reference stations, not a hard-coded application whitelist. Active sta
 `main.go` remains intentionally large and contains substantial browser HTML, CSS, JavaScript, Leaflet behavior, HTTP orchestration, and report presentation logic.
 
 A future refactor should be treated as a separate behavior-preserving project after the current UI and release behavior are stable. The safest direction would be to move browser templates/static assets out of `main.go` first, then separate HTTP/report orchestration while preserving the existing `wind.go` and `currents.go` data-source boundaries.
+
+## v211 / 1.9.3 changes
+
+- Moves the shared **Wind units: Knots / MPH** display preference from above the hero image to immediately below the large hero image on both **Conditions Now** and **Planning and Details**.
+- Keeps the v210 synchronized `wind_unit` behavior unchanged: the selected unit continues to carry between the two browser pages and controls wind-card values, history displays, nearby-station values, and wind-barb tooltip units.
+- Keeps wind-barb geometry internally knot-based and leaves all v209 wind-barb stability/caching behavior unchanged.
+- This build is a presentation-placement refinement only; it does not change data sources, calculations, station selection, map behavior, or report semantics.
+- Advanced runtime identity to **Version 1.9.3 · Build v211**.
+
+## v210 / 1.9.3 changes
+
+- Moves the Wind Units selector out of the Wind card and into a shared page-level display-preferences control near the top of the browser page.
+- Shows the same **Wind units: Knots / MPH** preference on both **Conditions Now** and **Planning and Details**. Both pages use the existing `wind_unit` query parameter, so the setting stays synchronized when navigating between them.
+- Makes wind-barb data requests use the active page wind-unit preference instead of forcing knots. NOAA/NDBC marine/Bay tooltip text and Aviation Weather Center METAR land/inland tooltip text now follow the selected display unit.
+- Keeps wind-barb geometry meteorologically standard: symbols are still constructed from internally normalized knot speeds even when the tooltip is displayed in MPH.
+- Removes the duplicate unit selector from the Wind card so wind units are clearly an application-wide display preference rather than a card-local setting.
+- Retains v209 deterministic world-grid thinning, station caching, and buffered panning behavior unchanged.
+- Advanced runtime identity to **Version 1.9.3 · Build v210**.
+
+## v209 / 1.9.3 changes
+
+- Stabilizes wind-barb thinning during map panning. The browser now assigns stations to a fixed Leaflet world-pixel grid at the current zoom instead of using viewport-relative screen coordinates, so a small pan at the same zoom does not cause nearby stations to trade places.
+- Makes thinning deterministic inside each world-grid cell: marine/NDBC observations retain priority when both layers are enabled, then newer observations are preferred, then station ID provides a stable tie-breaker.
+- Adds a browser-side observation cache keyed by layer class and station ID. New buffered viewport fetches are merged into the cache instead of replacing the entire wind-barb observation array. Cached entries expire after 20 minutes.
+- Expands the wind-barb geographic prefetch buffer from 35% to 70% beyond each side of the visible map. This increases panning hysteresis so ordinary pans stay within already-loaded coverage and do not trigger unnecessary replacement fetches.
+- Panning at a fixed zoom now preserves barb selection; changes are expected only when stations naturally enter/leave the visible area, observations update or expire, a source is enabled/disabled, or zoom changes enough to alter density.
+- Retains the v208 Aviation Weather Center METAR cache source for land/inland observations, unrestricted viewport-based NOAA/NDBC marine observations, stale-observation fading, and independent marine and inland checkboxes.
+- Advanced runtime identity to **Version 1.9.3 · Build v209**.
+
+## v208 / 1.9.3 changes
+
+- Fixes the v207 land-wind failure by replacing the unsupported custom Aviation Weather Center METAR bounding-box request with AWC’s complete current-METAR cache (`/data/cache/metars.cache.xml.gz`). AWC recommends cache files for larger observation sets; the Go server downloads the gzip-compressed XML feed, keeps a short two-minute in-memory cache, and filters observations locally to the buffered map viewport.
+- Parses current METAR station ID, observation time, latitude/longitude, wind direction, sustained wind, and gust directly from the AWC cache. Variable/unknown wind direction is omitted when sustained wind is strong enough that a directional barb would be misleading; calm/light observations can still render as a calm circle.
+- Removes the v206/v207 hard-coded Bay/coast geographic mask from the NOAA/NDBC marine layer. Every active NDBC station inside the buffered viewport with a usable latest wind observation can now participate.
+- Fetches eligible NOAA/NDBC station observations concurrently with a bounded six-request worker limit so wider map views do not require strictly serial station retrieval.
+- Reduces screen-space thinning from 58/50/42/34/26 px to 38/34/30/26/22/18 px across zoom levels, retaining substantially more marine and land barbs at statewide and regional views while still suppressing direct symbol collisions.
+- Surfaces upstream wind-source warnings in the wind-barb status line instead of silently reporting only that no observations were returned.
+- Retains the v205 buffered viewport loading model, independent marine and land checkboxes, source tooltips, and stale-observation fading after 90 minutes. Neither layer changes selected sailing location, wind station, currents station, or report calculations.
+- Advanced runtime identity to **Version 1.9.3 · Build v208**.
+
+## v207 / 1.9.3 changes
+
+- Replaces the misleading v206 NDBC-based **Inland Wind Barbs** classification with a genuine land-station feed: **Land / Inland Wind Barbs (METAR)**.
+- The land/inland layer is sourced server-side from the NOAA/NWS Aviation Weather Center Data API using current METAR observations from airport weather stations, including many ASOS/AWOS sites. It is independent of the NOAA/NDBC marine network.
+- Extends `/wind-barbs` with independent `include_marine` and `include_inland` controls. Marine/Bay observations remain NOAA/NDBC; land/inland observations are Aviation Weather Center METARs.
+- Keeps browser access server-side because the Aviation Weather Center Data API does not permit cross-origin browser access. Requests use the buffered map bounds and a project-specific User-Agent.
+- METAR wind speed remains in knots. Numeric METAR wind directions are converted to the same 16-point compass labels used by the existing barb renderer; variable/unknown directions are omitted when a directional barb would be misleading. Calm observations can still render as the calm-wind circle.
+- Adds source names to barb tooltips so NOAA/NDBC and Aviation Weather Center METAR observations can be distinguished directly on the map.
+- Adds zoom-dependent collision thinning for the combined barb field. Wider views keep one observation per screen-space cell, with progressively denser display at higher zooms, reducing the overlapping coastal clusters visible at statewide scale. Marine/Bay observations are given collision priority when both layers are enabled.
+- Retains the v205 buffered viewport loading model, stale-observation fading after 90 minutes, and display-only behavior: neither barb layer changes selected sailing location, wind station, currents station, or report calculations.
+- Advanced runtime identity to **Version 1.9.3 · Build v207**.
+
+## v206 / 1.9.3 changes
+
+- Splits NOAA/NDBC observed wind barbs into two independent controls under **Map Overlays → Observations**: **Marine / Bay Wind Barbs (NOAA/NDBC)** and **Inland Wind Barbs**.
+- Marine / Bay barbs remain the normal sailing-oriented display; inland barbs are opt-in so observations over land do not clutter the default Bay/Delta view.
+- Adds a display-only station classification to `/wind-barbs`. The marine mask covers San Francisco Bay, San Pablo/Suisun Bay, the western/central Delta sailing corridor, Golden Gate approaches, and the immediate north-central California coast; observations outside that mask are tagged inland.
+- The classification does not alter NOAA/NDBC data, selected wind station, selected sailing location, currents, or any report calculations.
+- Both categories share the v205 buffered viewport cache, so enabling or disabling Inland Wind Barbs does not trigger unnecessary station re-selection or re-centering.
+- The wind-barb status line reports the number of marine/Bay and inland observations currently shown, with stale observations still faded after 90 minutes.
+- Advanced runtime identity to **Version 1.9.3 · Build v206**.
+
+## v205 / 1.9.3 changes
+
+- Fixes the v204 wind-barb clustering/pop-in behavior caused by reusing the nearest-station `/wind-stations` candidate endpoint.
+- Adds a dedicated `/wind-barbs` endpoint that accepts geographic map bounds and returns every active NOAA/NDBC station inside that bounded region that has a usable latest wind observation.
+- The browser requests a map area padded by roughly 35% beyond the visible viewport, with a small minimum geographic margin, so ordinary panning remains inside an already-loaded observation field instead of replacing whole nearest-station groups.
+- The loaded wind-barb bounds are cached in browser state. A new request is made only when the visible map moves outside that buffered area; panning inside the buffer simply reuses the existing barb set.
+- Wind-barb loading remains independent of the selected sailing location, committed wind station, and **Find stations** candidate list.
+- Disabling the layer clears the buffered-bounds cache and observation layer; re-enabling forces a fresh bounded request.
+- Standard meteorological barb rendering, knot-based feather increments, station tooltips, and stale-observation fading are retained.
+- Advanced runtime identity to **Version 1.9.3 · Build v205**.
+
+## v204 / 1.9.3 changes
+
+- Fixes the initial v203 **Observed Wind Barbs (NOAA/NDBC)** implementation so the overlay no longer depends on the selected-location **Find stations** candidate list.
+- Enabling the wind-barb overlay now requests nearby NDBC observations using the **current map viewport center**, even when no sailing location has been selected.
+- Wind-barb observations are kept in independent overlay state and do not alter the committed wind station, selected sailing location, or nearby-station candidate list.
+- The overlay refreshes after map movement with a short debounce so panning/zooming updates the displayed observation set without issuing a request for every intermediate map event.
+- Disabling the overlay cancels pending refreshes, clears its observation state, and removes the barb layer.
+- Retains the v203 standard meteorological barb rendering, knot-based speed feathers, observation-age tooltips, and fading of observations older than 90 minutes.
+- Advanced runtime identity to **Version 1.9.3 · Build v204**.
+
+## v203 / 1.9.3 changes
+
+- Added an optional **Observed Wind Barbs (NOAA/NDBC)** layer under **Map Overlays → Observations**.
+- Wind barbs are drawn from the latest observations already returned for nearby discovered NDBC wind stations, so the overlay does not change the selected sailing location or committed wind station.
+- Barb shafts point toward the direction the wind comes from; feathers encode sustained wind speed in standard 5/10/50-knot increments. Calm/light observations use a small circle.
+- The overlay accepts the browser's knots or MPH display text but converts MPH back to knots before constructing the meteorological barb, keeping the symbol convention independent of display units.
+- Station tooltips show station ID, formatted observed wind, and observation age. Observations older than 90 minutes are faded and counted in the overlay status line.
+- If no nearby candidates have been loaded yet, the status directs the user to select a location and use **Find stations**; enabling the layer does not recenter the map or initiate station selection.
+- Saildrone, terrain/seafloor, weather/hazard overlays, station-selection behavior, currents, SST, and chlorophyll behavior are unchanged.
+- Advanced runtime identity to **Version 1.9.3 · Build v203**.
 
 ## v202 / 1.9.3 changes
 
@@ -865,17 +959,17 @@ This section is the authoritative development handoff for this repository. A new
 <!-- PROJECT-STATE:BEGIN -->
 
 - Public app version: **1.9.3**
-- Generated source build: **v202**
-- Next generated source build: **v203**
+- Generated source build: **v211**
+- Next generated source build: **v212**
 - Authoritative repository: **https://github.com/richard-mauri/pittsburg-saildata**
 - Authoritative branch: **main**
-- Release status: **v202 / 1.9.3 release candidate**
+- Release status: **v211 / 1.9.3 release candidate**
 
 ### Managed-file checkpoints
 
 | Repository file | SHA-256 |
 | --- | --- |
-| `main.go` | `b3d13708d2e0b073b6e10f7f56f19e3c1dd2ae865eb2b509a557b172399c94d8` |
+| `main.go` | `731da9d163fa8ac73d2864b7a88a3ae7002577811fbd9010e88351e53284497d` |
 | `assets/yogiisms.txt` | `4ebf00217e194ee26a8e8fe38237b298800b36ead0c64accdbb82f623c142371` |
 | `assets/fishing_reports.json` | `02b01de77784153157c6a4a60d6ad21e286f7c191bbe204fed605659ea15ca5e` |
 | `check-project-state.sh` | `85fa5062e2ae4509174b6843ebc0066f4a94e2f2e90001230ca74c07aeb500dc` |
@@ -892,7 +986,7 @@ The generated build number is immutable. Any change to generated Go source bytes
 
 The public application version and generated build are separate identities. The current runtime identity is expected to render as:
 
-`Version 1.9.3 · Build v202`
+`Version 1.9.3 · Build v211`
 
 For future public pushes, increment the patch/micro version (`1.9.2` → `1.9.3` → `1.9.4`, and so on). Existing Git release tags are immutable: never reuse or move an existing version tag.
 
@@ -938,6 +1032,8 @@ The current browser architecture is intentionally split into two pages. **Condit
 
 Conditions Now displays the active wind/current station context, compact wind metrics, a one-day tidal-current graph, and the latest actual wind-observation timestamp plus freshness age in the heading: `CONDITIONS NOW — AS OF <time> · <age>`.
 
+The shared **Wind units: Knots / MPH** control appears immediately below the hero image on both Conditions Now and Planning and Details. It uses the same `wind_unit` query state on both pages so the preference remains synchronized during navigation.
+
 Planning and Details includes location selection, nearby wind-station discovery, current-station context, 1/3/7-day current planning, wind history from 1h through 24h, NWS forecast context, Local Conditions at a selected point, map types, independent map overlays, and Center Map controls.
 
 The **Choose Location** card treats selected sailing location and map viewport center as separate state. Latitude/Longitude display the viewport center and can be edited without side effects; **Center Map → Latitude & Longitude** explicitly applies those values. Candidate wind stations appear only after an actual selected location exists.
@@ -954,7 +1050,7 @@ Map controls place **Map Types**, **Map Overlays**, and **Center Map** on one ro
 
 NOAA Nautical Chart is considered practical at **Zoom 9+**. If Nautical is the preferred basemap and the user zooms below 9, Street Map is shown temporarily with a notice; Nautical automatically returns at Zoom 9+. Legitimate inland/no-chart blank areas at supported zooms are left unchanged.
 
-Map overlays include NWS forecast zone, NOAA HMS qualitative smoke, **Sea Surface Temp**, NOAA/NESDIS cloud cover, and NEXRAD radar. Sea Surface Temp is deferred/disabled in v195; the future approach is documented in this README, variable `analysed_sst`, a daily global Level-4 blended SST field at about 5 km resolution. v191 uses the PFEL/ERD host and its matching `nesdis...` dataset identifier for the primary path, with a matching Central-host fallback only for SST imagery. v189 uses the current NOAA NESDIS ERDDAP identifier after the older `noaacwBLENDEDsstDNDaily` path stopped serving the deployed overlay. `/sst-info` resolves the latest available dataset time and `/sst-overlay` renders the current map bounds through ERDDAP `griddap` as a transparent PNG using a fixed **35–95°F** wide-area fishing-oriented scale. Because the ERDDAP source image is linear in latitude while Leaflet is EPSG:3857 Web Mercator, v180 server-side reprojects the SST scanlines into Web Mercator before returning the PNG. The browser displays that reprojected PNG as a normal Leaflet image overlay at 0.50 opacity. CoastWatch's native transparent/no-data edge is preserved and no secondary coastline mask is applied. The wider fixed range avoids painting most warm tropical/subtropical water with one saturated hottest color while preserving cross-view comparability. At low zooms, Leaflet world wrapping can extend the viewport outside -180°/+180°. v183 keeps the reliable single-image path: it clips the visible viewport to the one 360° world copy containing the map center, translates that interval into NOAA's canonical longitude range, and displays the returned SST image over only that clipped interval. The projection fix improves geographic alignment at wide map extents; the approximately 5 km source grid still limits shoreline-scale detail. Saildrone Observations is a separate optional moving-platform layer backed by NOAA PMEL public ERDDAP; it displays the latest available position and met-ocean readings from configured 2026 missions and is not treated as a persistent local station network. v187 discovers each mission's ERDDAP schema before requesting data, requires only time/position for plotting, and treats wind, SST, salinity, currents, and wave measurements as optional enrichments. HMS smoke uses the current warm yellow → amber → burnt-orange light/medium/heavy palette. Smoke is qualitative satellite analysis, not AQI or measured PM2.5.
+Map overlays include NWS forecast zone, NOAA HMS qualitative smoke, NOAA/NDBC Marine / Bay wind barbs, Aviation Weather Center METAR Land / Inland wind barbs, **Sea Surface Temp**, NOAA/NESDIS cloud cover, and NEXRAD radar. The two wind-barb layers share buffered viewport loading but use independent observation networks; zoom-dependent collision thinning keeps wide-area views readable. Sea Surface Temp is deferred/disabled in v195; the future approach is documented in this README, variable `analysed_sst`, a daily global Level-4 blended SST field at about 5 km resolution. v191 uses the PFEL/ERD host and its matching `nesdis...` dataset identifier for the primary path, with a matching Central-host fallback only for SST imagery. v189 uses the current NOAA NESDIS ERDDAP identifier after the older `noaacwBLENDEDsstDNDaily` path stopped serving the deployed overlay. `/sst-info` resolves the latest available dataset time and `/sst-overlay` renders the current map bounds through ERDDAP `griddap` as a transparent PNG using a fixed **35–95°F** wide-area fishing-oriented scale. Because the ERDDAP source image is linear in latitude while Leaflet is EPSG:3857 Web Mercator, v180 server-side reprojects the SST scanlines into Web Mercator before returning the PNG. The browser displays that reprojected PNG as a normal Leaflet image overlay at 0.50 opacity. CoastWatch's native transparent/no-data edge is preserved and no secondary coastline mask is applied. The wider fixed range avoids painting most warm tropical/subtropical water with one saturated hottest color while preserving cross-view comparability. At low zooms, Leaflet world wrapping can extend the viewport outside -180°/+180°. v183 keeps the reliable single-image path: it clips the visible viewport to the one 360° world copy containing the map center, translates that interval into NOAA's canonical longitude range, and displays the returned SST image over only that clipped interval. The projection fix improves geographic alignment at wide map extents; the approximately 5 km source grid still limits shoreline-scale detail. Saildrone Observations is a separate optional moving-platform layer backed by NOAA PMEL public ERDDAP; it displays the latest available position and met-ocean readings from configured 2026 missions and is not treated as a persistent local station network. v187 discovers each mission's ERDDAP schema before requesting data, requires only time/position for plotting, and treats wind, SST, salinity, currents, and wave measurements as optional enrichments. HMS smoke uses the current warm yellow → amber → burnt-orange light/medium/heavy palette. Smoke is qualitative satellite analysis, not AQI or measured PM2.5.
 
 The Welcome page reflects the current Conditions Now / Planning and Details workflow and retains the randomized Yogi Berra quotation. `assets/yogiisms.txt` currently contains the expanded 59-line quote set.
 
@@ -970,7 +1066,7 @@ When migrating development to a new conversation, provide or point the assistant
 
 > Read the **Development State and Chat Handoff** section of README.md, treat GitHub `main` as authoritative, and continue from the recorded generated build. Generate complete `main-updated-vNN.go` candidates, never overwrite `main.go`, run `gofmt`, and provide SHA-256 hashes and download links.
 
-The next source candidate should therefore be **v203** unless a newer local candidate is supplied.
+The next source candidate should therefore be **v212** unless a newer local candidate is supplied.
 
 
 
