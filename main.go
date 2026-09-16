@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"encoding/xml"
 	"flag"
@@ -15,7 +14,6 @@ import (
 	"io/ioutil"
 	"math"
 	"math/rand"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -29,7 +27,7 @@ import (
 
 const (
 	appVersion                      = "1.9.3"
-	buildVersion                    = "v183"
+	buildVersion                    = "v202"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -88,6 +86,443 @@ type CompactCurrent struct {
 	StationName  string    `json:"station_name,omitempty"`
 	DistanceNM   float64   `json:"distance_nm,omitempty"`
 	Error        string    `json:"error,omitempty"`
+}
+
+type SaildroneObservation struct {
+	DatasetID        string  `json:"dataset_id"`
+	DroneID          string  `json:"drone_id"`
+	Mission          string  `json:"mission"`
+	Time             string  `json:"time"`
+	Latitude         float64 `json:"latitude"`
+	Longitude        float64 `json:"longitude"`
+	WindDirectionDeg float64 `json:"wind_direction_deg,omitempty"`
+	WindSpeedMPS     float64 `json:"wind_speed_mps,omitempty"`
+	WaterTempC       float64 `json:"water_temp_c,omitempty"`
+	SalinityPSU      float64 `json:"salinity_psu,omitempty"`
+	CurrentSpeedMPS  float64 `json:"current_speed_mps,omitempty"`
+	CurrentDirDeg    float64 `json:"current_direction_deg,omitempty"`
+	WaveHeightM      float64 `json:"wave_height_m,omitempty"`
+	WavePeriodS      float64 `json:"wave_period_s,omitempty"`
+	AgeHours         float64 `json:"age_hours,omitempty"`
+}
+
+type SaildroneFeed struct {
+	Updated      string                 `json:"updated"`
+	Source       string                 `json:"source"`
+	Observations []SaildroneObservation `json:"observations"`
+	Errors       []string               `json:"errors,omitempty"`
+}
+
+var (
+	saildroneCacheMu      sync.Mutex
+	saildroneCacheAt      time.Time
+	saildroneCachePayload SaildroneFeed
+)
+
+func saildroneFloat(v interface{}) (float64, bool) {
+	switch x := v.(type) {
+	case float64:
+		return x, !math.IsNaN(x) && !math.IsInf(x, 0)
+	case json.Number:
+		f, err := x.Float64()
+		return f, err == nil && !math.IsNaN(f) && !math.IsInf(f, 0)
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(x), 64)
+		return f, err == nil && !math.IsNaN(f) && !math.IsInf(f, 0)
+	default:
+		return 0, false
+	}
+}
+
+func fetchSaildroneVariableNames(client *http.Client, datasetID string) (map[string]bool, error) {
+	remoteURL := "https://data.pmel.noaa.gov/generic/erddap/info/" +
+		url.PathEscape(datasetID) + "/index.json"
+
+	req, err := http.NewRequest(http.MethodGet, remoteURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "pittsburg-saildata/"+appVersion)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := ioutil.ReadAll(io.LimitReader(resp.Body, 3<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		detail := strings.TrimSpace(string(body))
+		if len(detail) > 240 {
+			detail = detail[:240]
+		}
+		return nil, fmt.Errorf("metadata HTTP %d: %s", resp.StatusCode, detail)
+	}
+
+	var payload struct {
+		Table struct {
+			ColumnNames []string        `json:"columnNames"`
+			Rows        [][]interface{} `json:"rows"`
+		} `json:"table"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, err
+	}
+
+	rowTypeIndex := -1
+	variableNameIndex := -1
+	for i, name := range payload.Table.ColumnNames {
+		switch strings.TrimSpace(strings.ToLower(name)) {
+		case "row type":
+			rowTypeIndex = i
+		case "variable name":
+			variableNameIndex = i
+		}
+	}
+	if variableNameIndex < 0 {
+		return nil, fmt.Errorf("metadata response has no Variable Name column")
+	}
+
+	names := make(map[string]bool)
+	for _, row := range payload.Table.Rows {
+		if variableNameIndex >= len(row) || row[variableNameIndex] == nil {
+			continue
+		}
+		if rowTypeIndex >= 0 && rowTypeIndex < len(row) && row[rowTypeIndex] != nil {
+			rowType := strings.ToLower(strings.TrimSpace(fmt.Sprint(row[rowTypeIndex])))
+			if rowType != "variable" {
+				continue
+			}
+		}
+		name := strings.TrimSpace(fmt.Sprint(row[variableNameIndex]))
+		if name != "" {
+			names[name] = true
+		}
+	}
+	if len(names) == 0 {
+		return nil, fmt.Errorf("metadata response listed no variables")
+	}
+	return names, nil
+}
+
+func firstSaildroneVariable(available map[string]bool, candidates ...string) string {
+	for _, candidate := range candidates {
+		if available[candidate] {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func fetchLatestSaildroneObservation(client *http.Client, datasetID, mission string) (SaildroneObservation, error) {
+	var result SaildroneObservation
+	result.DatasetID = datasetID
+	result.Mission = mission
+
+	available, metadataErr := fetchSaildroneVariableNames(client, datasetID)
+	if metadataErr != nil {
+		// Keep the platform position useful even if the metadata endpoint has a
+		// temporary problem. The ERDDAP coordinate/time variables are standard.
+		available = map[string]bool{
+			"time":      true,
+			"latitude":  true,
+			"longitude": true,
+		}
+	}
+
+	required := []string{"time", "latitude", "longitude"}
+	for _, name := range required {
+		if !available[name] {
+			return result, fmt.Errorf("dataset schema is missing required variable %q", name)
+		}
+	}
+
+	droneIDVar := firstSaildroneVariable(
+		available,
+		"drone_id",
+		"saildrone_id",
+		"platform_id",
+	)
+
+	windDirectionVar := firstSaildroneVariable(
+		available,
+		"wind_direction_world_filtered",
+		"wind_direction",
+		"WIND_DIRECTION_MEAN",
+		"wind_dir",
+	)
+	windSpeedVar := firstSaildroneVariable(
+		available,
+		"wind_speed_world_filtered",
+		"wind_speed",
+		"WIND_SPEED_MEAN",
+	)
+	waterTempVar := firstSaildroneVariable(
+		available,
+		"sbe37_temperature_filtered",
+		"sea_water_temperature",
+		"water_temperature",
+		"TEMP_CTD_MEAN",
+	)
+	salinityVar := firstSaildroneVariable(
+		available,
+		"sbe37_practical_salinity_filtered",
+		"sea_water_practical_salinity",
+		"practical_salinity",
+		"SAL_CTD_MEAN",
+	)
+	currentSpeedVar := firstSaildroneVariable(
+		available,
+		"water_current_speed_filtered",
+		"water_current_speed",
+		"current_speed",
+	)
+	currentDirectionVar := firstSaildroneVariable(
+		available,
+		"water_current_direction_filtered",
+		"water_current_direction",
+		"current_direction",
+	)
+	waveHeightVar := firstSaildroneVariable(
+		available,
+		"wave_significant_height",
+		"significant_wave_height",
+		"WAVE_SIGNIFICANT_HEIGHT",
+	)
+	wavePeriodVar := firstSaildroneVariable(
+		available,
+		"wave_dominant_period",
+		"dominant_wave_period",
+		"WAVE_DOMINANT_PERIOD",
+	)
+
+	vars := []string{"time", "latitude", "longitude"}
+	for _, name := range []string{
+		droneIDVar,
+		windDirectionVar,
+		windSpeedVar,
+		waterTempVar,
+		salinityVar,
+		currentSpeedVar,
+		currentDirectionVar,
+		waveHeightVar,
+		wavePeriodVar,
+	} {
+		if name != "" {
+			vars = append(vars, name)
+		}
+	}
+
+	remoteURL := "https://data.pmel.noaa.gov/generic/erddap/tabledap/" +
+		url.PathEscape(datasetID) + ".json?" +
+		strings.Join(vars, ",") +
+		"&orderByMax(%22time%22)"
+
+	req, err := http.NewRequest(http.MethodGet, remoteURL, nil)
+	if err != nil {
+		return result, err
+	}
+	req.Header.Set("User-Agent", "pittsburg-saildata/"+appVersion)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return result, err
+	}
+	defer resp.Body.Close()
+
+	body, err := ioutil.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return result, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		detail := strings.TrimSpace(string(body))
+		if len(detail) > 320 {
+			detail = detail[:320]
+		}
+		if metadataErr != nil {
+			return result, fmt.Errorf(
+				"data HTTP %d after metadata fallback (%v): %s",
+				resp.StatusCode,
+				metadataErr,
+				detail,
+			)
+		}
+		return result, fmt.Errorf("data HTTP %d: %s", resp.StatusCode, detail)
+	}
+
+	var payload struct {
+		Table struct {
+			ColumnNames []string        `json:"columnNames"`
+			Rows        [][]interface{} `json:"rows"`
+		} `json:"table"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return result, err
+	}
+	if len(payload.Table.Rows) == 0 {
+		return result, fmt.Errorf("no observations returned")
+	}
+
+	columns := map[string]int{}
+	for i, name := range payload.Table.ColumnNames {
+		columns[strings.TrimSpace(name)] = i
+	}
+	row := payload.Table.Rows[len(payload.Table.Rows)-1]
+
+	stringAt := func(name string) string {
+		if name == "" {
+			return ""
+		}
+		i, ok := columns[name]
+		if !ok || i < 0 || i >= len(row) || row[i] == nil {
+			return ""
+		}
+		return strings.TrimSpace(fmt.Sprint(row[i]))
+	}
+	floatAt := func(name string) (float64, bool) {
+		if name == "" {
+			return 0, false
+		}
+		i, ok := columns[name]
+		if !ok || i < 0 || i >= len(row) || row[i] == nil {
+			return 0, false
+		}
+		return saildroneFloat(row[i])
+	}
+
+	result.Time = stringAt("time")
+	result.DroneID = stringAt(droneIDVar)
+	if result.DroneID == "" {
+		if m := regexp.MustCompile(`^sd([0-9]+)_`).FindStringSubmatch(datasetID); len(m) == 2 {
+			result.DroneID = m[1]
+		} else {
+			result.DroneID = datasetID
+		}
+	}
+
+	lat, okLat := floatAt("latitude")
+	lon, okLon := floatAt("longitude")
+	if !okLat || !okLon {
+		return result, fmt.Errorf("latest row is missing latitude/longitude")
+	}
+	result.Latitude = lat
+	result.Longitude = lon
+
+	if v, ok := floatAt(windDirectionVar); ok {
+		result.WindDirectionDeg = v
+	}
+	if v, ok := floatAt(windSpeedVar); ok {
+		result.WindSpeedMPS = v
+	}
+	if v, ok := floatAt(waterTempVar); ok {
+		result.WaterTempC = v
+	}
+	if v, ok := floatAt(salinityVar); ok {
+		result.SalinityPSU = v
+	}
+	if v, ok := floatAt(currentSpeedVar); ok {
+		result.CurrentSpeedMPS = v
+	}
+	if v, ok := floatAt(currentDirectionVar); ok {
+		result.CurrentDirDeg = v
+	}
+	if v, ok := floatAt(waveHeightVar); ok {
+		result.WaveHeightM = v
+	}
+	if v, ok := floatAt(wavePeriodVar); ok {
+		result.WavePeriodS = v
+	}
+
+	if t, err := time.Parse(time.RFC3339Nano, result.Time); err == nil {
+		age := time.Since(t.UTC()).Hours()
+		if age < 0 {
+			age = 0
+		}
+		result.AgeHours = age
+	}
+
+	return result, nil
+}
+
+func fetchNOAASaildroneFeed() SaildroneFeed {
+	saildroneCacheMu.Lock()
+	if !saildroneCacheAt.IsZero() && time.Since(saildroneCacheAt) < 15*time.Minute {
+		cached := saildroneCachePayload
+		saildroneCacheMu.Unlock()
+		return cached
+	}
+	saildroneCacheMu.Unlock()
+
+	datasets := []struct {
+		ID      string
+		Mission string
+	}{
+		{"sd1033_tpos_2026", "TPOS Niño 3.4"},
+		{"sd1077_tpos_2026", "TPOS Niño 3.4"},
+		{"sd1080_tpos_2026", "TPOS Niño 3.4"},
+		{"sd1090_tpos_2026", "TPOS Niño 3.4"},
+		{"sd1030_hurricane_2026", "Atlantic Hurricane Monitoring"},
+		{"sd1040_hurricane_2026", "Atlantic Hurricane Monitoring"},
+		{"sd1045_hurricane_2026", "Atlantic Hurricane Monitoring"},
+		{"sd1057_hurricane_2026", "Atlantic Hurricane Monitoring"},
+		{"sd1068_hurricane_2026", "Atlantic Hurricane Monitoring"},
+		{"sd1069_hurricane_2026", "Atlantic Hurricane Monitoring"},
+		{"sd1074_hurricane_2026", "Atlantic Hurricane Monitoring"},
+		{"sd1083_hurricane_2026", "Atlantic Hurricane Monitoring"},
+		{"sd1084_hurricane_2026", "Atlantic Hurricane Monitoring"},
+		{"sd1091_hurricane_2026", "Atlantic Hurricane Monitoring"},
+	}
+
+	client := &http.Client{Timeout: 18 * time.Second}
+	type item struct {
+		obs SaildroneObservation
+		err error
+	}
+	ch := make(chan item, len(datasets))
+	sem := make(chan struct{}, 4)
+	var wg sync.WaitGroup
+
+	for _, ds := range datasets {
+		ds := ds
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			obs, err := fetchLatestSaildroneObservation(client, ds.ID, ds.Mission)
+			<-sem
+			ch <- item{obs: obs, err: err}
+		}()
+	}
+	wg.Wait()
+	close(ch)
+
+	feed := SaildroneFeed{
+		Updated: time.Now().UTC().Format(time.RFC3339),
+		Source:  "NOAA PMEL public ERDDAP Saildrone datasets",
+	}
+	for entry := range ch {
+		if entry.err != nil {
+			feed.Errors = append(feed.Errors, entry.obs.DatasetID+": "+entry.err.Error())
+			continue
+		}
+		feed.Observations = append(feed.Observations, entry.obs)
+	}
+	sort.Slice(feed.Observations, func(i, j int) bool {
+		if feed.Observations[i].Mission != feed.Observations[j].Mission {
+			return feed.Observations[i].Mission < feed.Observations[j].Mission
+		}
+		return feed.Observations[i].DroneID < feed.Observations[j].DroneID
+	})
+	sort.Strings(feed.Errors)
+
+	saildroneCacheMu.Lock()
+	saildroneCacheAt = time.Now()
+	saildroneCachePayload = feed
+	saildroneCacheMu.Unlock()
+	return feed
 }
 
 func main() {
@@ -998,268 +1433,6 @@ func applyNOAACoastlineMask(
 	return encoded.Bytes(), nil
 }
 
-func webMercatorY(latDegrees float64) float64 {
-	const maxMercatorLat = 85.0511287798066
-	if latDegrees > maxMercatorLat {
-		latDegrees = maxMercatorLat
-	}
-	if latDegrees < -maxMercatorLat {
-		latDegrees = -maxMercatorLat
-	}
-	latRadians := latDegrees * math.Pi / 180
-	return math.Log(math.Tan(math.Pi/4 + latRadians/2))
-}
-
-func inverseWebMercatorY(y float64) float64 {
-	latRadians := 2*math.Atan(math.Exp(y)) - math.Pi/2
-	return latRadians * 180 / math.Pi
-}
-
-func reprojectLatLonPNGToWebMercator(
-	sourcePNG []byte,
-	south float64,
-	north float64,
-) ([]byte, error) {
-	if len(sourcePNG) == 0 {
-		return nil, fmt.Errorf("empty SST source PNG")
-	}
-	if south >= north {
-		return nil, fmt.Errorf("invalid SST latitude bounds")
-	}
-
-	sourceImage, err := png.Decode(bytes.NewReader(sourcePNG))
-	if err != nil {
-		return nil, fmt.Errorf("SST source PNG decode failed: %w", err)
-	}
-	b := sourceImage.Bounds()
-	width := b.Dx()
-	height := b.Dy()
-	if width <= 0 || height <= 0 {
-		return nil, fmt.Errorf("SST source PNG has invalid dimensions")
-	}
-
-	mercatorNorth := webMercatorY(north)
-	mercatorSouth := webMercatorY(south)
-	if mercatorNorth <= mercatorSouth {
-		return nil, fmt.Errorf("invalid SST Web Mercator latitude span")
-	}
-
-	output := image.NewNRGBA(image.Rect(0, 0, width, height))
-	sourceMaxY := float64(height - 1)
-
-	for dy := 0; dy < height; dy++ {
-		// Leaflet's EPSG:3857 map is linear in Web Mercator Y, while ERDDAP's
-		// griddap image is linear in latitude. Convert each destination scanline
-		// back to latitude, then sample the corresponding source scanline.
-		t := (float64(dy) + 0.5) / float64(height)
-		mercatorY := mercatorNorth + t*(mercatorSouth-mercatorNorth)
-		lat := inverseWebMercatorY(mercatorY)
-		sourceY := (north-lat)/(north-south)*float64(height) - 0.5
-		if sourceY < 0 {
-			sourceY = 0
-		}
-		if sourceY > sourceMaxY {
-			sourceY = sourceMaxY
-		}
-		y0 := int(math.Floor(sourceY))
-		y1 := y0 + 1
-		if y1 >= height {
-			y1 = height - 1
-		}
-		fy := sourceY - float64(y0)
-
-		for dx := 0; dx < width; dx++ {
-			c0 := color.NRGBAModel.Convert(sourceImage.At(b.Min.X+dx, b.Min.Y+y0)).(color.NRGBA)
-			c1 := color.NRGBAModel.Convert(sourceImage.At(b.Min.X+dx, b.Min.Y+y1)).(color.NRGBA)
-
-			// Interpolate in premultiplied-alpha space so transparent land/no-data
-			// cells do not bleed opaque SST colors across the shoreline.
-			a0 := float64(c0.A) / 255
-			a1 := float64(c1.A) / 255
-			a := a0 + (a1-a0)*fy
-			pr := float64(c0.R)*a0 + (float64(c1.R)*a1-float64(c0.R)*a0)*fy
-			pg := float64(c0.G)*a0 + (float64(c1.G)*a1-float64(c0.G)*a0)*fy
-			pb := float64(c0.B)*a0 + (float64(c1.B)*a1-float64(c0.B)*a0)*fy
-
-			var r, g, bl uint8
-			if a > 1e-6 {
-				r = uint8(math.Round(math.Max(0, math.Min(255, pr/a))))
-				g = uint8(math.Round(math.Max(0, math.Min(255, pg/a))))
-				bl = uint8(math.Round(math.Max(0, math.Min(255, pb/a))))
-			}
-			alpha := uint8(math.Round(math.Max(0, math.Min(255, a*255))))
-			output.SetNRGBA(dx, dy, color.NRGBA{R: r, G: g, B: bl, A: alpha})
-		}
-	}
-
-	var encoded bytes.Buffer
-	encoder := png.Encoder{CompressionLevel: png.BestSpeed}
-	if err := encoder.Encode(&encoded, output); err != nil {
-		return nil, fmt.Errorf("SST Web Mercator PNG encoding failed: %w", err)
-	}
-	return encoded.Bytes(), nil
-}
-
-type coastWatchWindowStats struct {
-	Point float64
-	Min   float64
-	Max   float64
-	Count int
-}
-
-func coastWatchIPv4Client(timeout time.Duration) (*http.Client, error) {
-	baseTransport, ok := http.DefaultTransport.(*http.Transport)
-	if !ok {
-		return nil, fmt.Errorf("default HTTP transport is unavailable")
-	}
-	transport := baseTransport.Clone()
-	dialer := &net.Dialer{
-		Timeout:   20 * time.Second,
-		KeepAlive: 30 * time.Second,
-	}
-	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-		return dialer.DialContext(ctx, "tcp4", address)
-	}
-	transport.TLSHandshakeTimeout = 20 * time.Second
-	transport.ResponseHeaderTimeout = 35 * time.Second
-	return &http.Client{Transport: transport, Timeout: timeout}, nil
-}
-
-func fetchCoastWatchWindowStats(
-	dataset string,
-	variable string,
-	dataRequest string,
-	targetLat float64,
-	targetLon float64,
-) (coastWatchWindowStats, error) {
-	var result coastWatchWindowStats
-
-	encoded := url.QueryEscape(dataRequest)
-	encoded = strings.ReplaceAll(encoded, "+", "%20")
-	remoteURL := fmt.Sprintf(
-		"https://coastwatch.noaa.gov/erddap/griddap/%s.json?%s",
-		dataset,
-		encoded,
-	)
-
-	client, err := coastWatchIPv4Client(55 * time.Second)
-	if err != nil {
-		return result, err
-	}
-	req, err := http.NewRequest(http.MethodGet, remoteURL, nil)
-	if err != nil {
-		return result, err
-	}
-	req.Header.Set("User-Agent", "pittsburg-saildata/"+appVersion)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return result, err
-	}
-	defer resp.Body.Close()
-
-	body, err := ioutil.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	if err != nil {
-		return result, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		detail := strings.TrimSpace(string(body))
-		if len(detail) > 500 {
-			detail = detail[:500]
-		}
-		return result, fmt.Errorf("CoastWatch %s returned HTTP %d: %s", variable, resp.StatusCode, detail)
-	}
-
-	var payload struct {
-		Table struct {
-			ColumnNames []string        `json:"columnNames"`
-			Rows        [][]interface{} `json:"rows"`
-		} `json:"table"`
-	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return result, err
-	}
-
-	latCol, lonCol, valueCol := -1, -1, -1
-	for i, name := range payload.Table.ColumnNames {
-		switch strings.ToLower(strings.TrimSpace(name)) {
-		case "latitude":
-			latCol = i
-		case "longitude":
-			lonCol = i
-		default:
-			if strings.EqualFold(strings.TrimSpace(name), variable) {
-				valueCol = i
-			}
-		}
-	}
-	if latCol < 0 || lonCol < 0 || valueCol < 0 {
-		return result, fmt.Errorf("CoastWatch %s response is missing expected columns", variable)
-	}
-
-	asFloat := func(v interface{}) (float64, bool) {
-		switch x := v.(type) {
-		case float64:
-			return x, !math.IsNaN(x) && !math.IsInf(x, 0)
-		case json.Number:
-			f, err := x.Float64()
-			return f, err == nil
-		case string:
-			f, err := strconv.ParseFloat(strings.TrimSpace(x), 64)
-			return f, err == nil && !math.IsNaN(f) && !math.IsInf(f, 0)
-		default:
-			return 0, false
-		}
-	}
-
-	minVal := math.Inf(1)
-	maxVal := math.Inf(-1)
-	bestDistance := math.Inf(1)
-	bestValue := 0.0
-	count := 0
-
-	for _, row := range payload.Table.Rows {
-		maxIndex := latCol
-		if lonCol > maxIndex {
-			maxIndex = lonCol
-		}
-		if valueCol > maxIndex {
-			maxIndex = valueCol
-		}
-		if len(row) <= maxIndex {
-			continue
-		}
-		lat, okLat := asFloat(row[latCol])
-		lon, okLon := asFloat(row[lonCol])
-		value, okValue := asFloat(row[valueCol])
-		if !okLat || !okLon || !okValue {
-			continue
-		}
-		count++
-		if value < minVal {
-			minVal = value
-		}
-		if value > maxVal {
-			maxVal = value
-		}
-		d := math.Hypot(lat-targetLat, (lon-targetLon)*math.Cos(targetLat*math.Pi/180))
-		if d < bestDistance {
-			bestDistance = d
-			bestValue = value
-		}
-	}
-
-	if count == 0 {
-		return result, fmt.Errorf("CoastWatch %s returned no usable values", variable)
-	}
-
-	result.Point = bestValue
-	result.Min = minVal
-	result.Max = maxVal
-	result.Count = count
-	return result, nil
-}
-
 func fetchNWSForecastZoneName(zoneID string) string {
 	zoneID = strings.ToUpper(strings.TrimSpace(zoneID))
 	if zoneID == "" {
@@ -1648,53 +1821,17 @@ func runServer(
 		}
 	})
 
-	mux.HandleFunc("/fishing-reports", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/saildrone-observations", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-
-		body, err := ioutil.ReadFile("assets/fishing_reports.json")
-		if err != nil {
-			http.Error(
-				w,
-				"fishing report feed is unavailable: assets/fishing_reports.json could not be read: "+err.Error(),
-				http.StatusServiceUnavailable,
-			)
-			return
-		}
-		if !json.Valid(body) {
-			http.Error(
-				w,
-				"fishing report feed is unavailable: assets/fishing_reports.json is not valid JSON",
-				http.StatusInternalServerError,
-			)
-			return
-		}
-
-		var payload struct {
-			SchemaVersion int               `json:"schema_version"`
-			Updated       string            `json:"updated"`
-			Reports       []json.RawMessage `json:"reports"`
-		}
-		if err := json.Unmarshal(body, &payload); err != nil {
-			http.Error(w, "fishing report feed validation failed: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if payload.SchemaVersion != 1 {
-			http.Error(w, "unsupported fishing report feed schema_version", http.StatusInternalServerError)
-			return
-		}
-		if len(payload.Reports) == 0 {
-			http.Error(w, "fishing report feed contains no reports", http.StatusServiceUnavailable)
-			return
-		}
-
+		payload := fetchNOAASaildroneFeed()
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
-		w.Header().Set("Pragma", "no-cache")
-		w.Header().Set("Expires", "0")
-		_, _ = w.Write(body)
+		w.Header().Set("Cache-Control", "public, max-age=300")
+		if err := json.NewEncoder(w).Encode(payload); err != nil {
+			fmt.Println("saildrone-observations JSON encoding error:", err)
+		}
 	})
 
 	mux.HandleFunc("/smoke-overlay", func(w http.ResponseWriter, r *http.Request) {
@@ -1722,1044 +1859,6 @@ func runServer(
 		w.Header().Set("Cache-Control", "public, max-age=900")
 		if err := json.NewEncoder(w).Encode(payload); err != nil {
 			fmt.Println("smoke-overlay JSON encoding error:", err)
-		}
-	})
-
-	mux.HandleFunc("/sst-info", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		const metadataURL = "https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsstDNDaily.das"
-		req, err := http.NewRequest(http.MethodGet, metadataURL, nil)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		req.Header.Set("User-Agent", "pittsburg-saildata/"+appVersion)
-
-		client := &http.Client{Timeout: 8 * time.Second}
-		resp, err := client.Do(req)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			http.Error(w, fmt.Sprintf("NOAA CoastWatch returned HTTP %d", resp.StatusCode), http.StatusBadGateway)
-			return
-		}
-
-		body, err := ioutil.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
-			return
-		}
-
-		latest := ""
-		reCoverage := regexp.MustCompile(`String\s+time_coverage_end\s+"([^"]+)"`)
-		if match := reCoverage.FindSubmatch(body); len(match) == 2 {
-			latest = string(match[1])
-		}
-		if latest == "" {
-			reTimeRange := regexp.MustCompile(`(?s)time\s*\{.*?Float64\s+actual_range\s+[0-9.eE+\-]+,\s*([0-9.eE+\-]+);`)
-			if match := reTimeRange.FindSubmatch(body); len(match) == 2 {
-				if seconds, parseErr := strconv.ParseFloat(string(match[1]), 64); parseErr == nil {
-					latest = time.Unix(int64(seconds), 0).UTC().Format(time.RFC3339)
-				}
-			}
-		}
-		if latest == "" {
-			latest = "current"
-		}
-
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("Cache-Control", "public, max-age=900")
-		if err := json.NewEncoder(w).Encode(map[string]string{
-			"time":     latest,
-			"dataset":  "noaacwBLENDEDsstDNDaily",
-			"variable": "analysed_sst",
-		}); err != nil {
-			fmt.Println("sst-info JSON encoding error:", err)
-		}
-	})
-
-	mux.HandleFunc("/sst-overlay", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		q := r.URL.Query()
-		parseFloat := func(name string) (float64, error) {
-			raw := strings.TrimSpace(q.Get(name))
-			if raw == "" {
-				return 0, fmt.Errorf("%s is required", name)
-			}
-			v, err := strconv.ParseFloat(raw, 64)
-			if err != nil {
-				return 0, fmt.Errorf("invalid %s", name)
-			}
-			return v, nil
-		}
-
-		west, err := parseFloat("west")
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		south, err := parseFloat("south")
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		east, err := parseFloat("east")
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		north, err := parseFloat("north")
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		if west < -180 || west > 180 || east < -180 || east > 180 ||
-			south < -89.9 || south > 89.9 || north < -89.9 || north > 89.9 ||
-			west >= east || south >= north {
-			http.Error(w, "invalid SST map bounds", http.StatusBadRequest)
-			return
-		}
-
-		width := 1200
-		height := 900
-		if raw := strings.TrimSpace(q.Get("width")); raw != "" {
-			if v, err := strconv.Atoi(raw); err == nil {
-				width = v
-			}
-		}
-		if raw := strings.TrimSpace(q.Get("height")); raw != "" {
-			if v, err := strconv.Atoi(raw); err == nil {
-				height = v
-			}
-		}
-		if width < 256 {
-			width = 256
-		}
-		if width > 2400 {
-			width = 2400
-		}
-		if height < 256 {
-			height = 256
-		}
-		if height > 1800 {
-			height = 1800
-		}
-
-		timeValue := strings.TrimSpace(q.Get("time"))
-		if timeValue == "" {
-			timeValue = "current"
-		}
-
-		// Use ERDDAP griddap instead of WMS so the SST color scale is fixed.
-		// The 35-95 F range (1.667-35.000 C) gives warm tropical/subtropical water and strong El Niño conditions more headroom,
-		// while 60 sections preserve approximately 1 F color bands so temperature breaks remain easy to compare between map views.
-		timeSelector := "(last)"
-		if timeValue != "" && !strings.EqualFold(timeValue, "current") {
-			timeSelector = "(" + timeValue + ")"
-		}
-		dataRequest := fmt.Sprintf(
-			"analysed_sst[%s][(%.6f):(%.6f)][(%.6f):(%.6f)]",
-			timeSelector,
-			south,
-			north,
-			west,
-			east,
-		)
-
-		graphics := url.Values{}
-		graphics.Set(".draw", "surface")
-		graphics.Set(".vars", "longitude|latitude|analysed_sst")
-		graphics.Set(".colorBar", "Rainbow|D|Linear|1.666667|35.000000|60")
-		graphics.Set(".land", "off")
-		graphics.Set(".legend", "Off")
-		graphics.Set(".size", strconv.Itoa(width)+"|"+strconv.Itoa(height))
-
-		encodedDataRequest := url.QueryEscape(dataRequest)
-		encodedDataRequest = strings.ReplaceAll(encodedDataRequest, "+", "%20")
-
-		baseTransport, ok := http.DefaultTransport.(*http.Transport)
-		if !ok {
-			http.Error(w, "NOAA CoastWatch SST transport is unavailable", http.StatusInternalServerError)
-			return
-		}
-		transport := baseTransport.Clone()
-		dialer := &net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}
-		// CoastWatch was resolving to IPv6 on the local network, but the IPv6
-		// route timed out. Force SST traffic over IPv4 while leaving the rest of
-		// the application networking unchanged.
-		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-			return dialer.DialContext(ctx, "tcp4", address)
-		}
-		transport.TLSHandshakeTimeout = 30 * time.Second
-		transport.ResponseHeaderTimeout = 45 * time.Second
-
-		client := &http.Client{
-			Transport: transport,
-			Timeout:   75 * time.Second,
-		}
-
-		upstreams := []struct {
-			label string
-			base  string
-		}{
-			{
-				label: "CoastWatch Central ERDDAP",
-				base:  "https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDsstDNDaily.transparentPng?",
-			},
-		}
-
-		var resp *http.Response
-		var body []byte
-		var upstreamLabel string
-		var attemptErrors []string
-
-		for _, upstream := range upstreams {
-			remoteURL := upstream.base + encodedDataRequest + "&" + graphics.Encode()
-			req, err := http.NewRequest(http.MethodGet, remoteURL, nil)
-			if err != nil {
-				attemptErrors = append(attemptErrors, upstream.label+": "+err.Error())
-				continue
-			}
-			req.Header.Set("User-Agent", "pittsburg-saildata/"+appVersion)
-
-			candidateResp, err := client.Do(req)
-			if err != nil {
-				attemptErrors = append(attemptErrors, upstream.label+": "+err.Error())
-				continue
-			}
-
-			candidateBody, readErr := ioutil.ReadAll(io.LimitReader(candidateResp.Body, 12<<20))
-			candidateResp.Body.Close()
-			if readErr != nil {
-				attemptErrors = append(attemptErrors, upstream.label+": response read failed: "+readErr.Error())
-				continue
-			}
-
-			resp = candidateResp
-			body = candidateBody
-			upstreamLabel = upstream.label
-			break
-		}
-
-		if resp == nil {
-			detail := strings.Join(attemptErrors, " | ")
-			if detail == "" {
-				detail = "all configured NOAA CoastWatch SST endpoints failed"
-			}
-			http.Error(w, "NOAA CoastWatch Sea Surface Temp request failed: "+detail, http.StatusBadGateway)
-			return
-		}
-
-		w.Header().Set("X-SST-Upstream", upstreamLabel)
-		if resp.StatusCode != http.StatusOK {
-			detail := strings.TrimSpace(string(body))
-			if len(detail) > 500 {
-				detail = detail[:500]
-			}
-			if detail == "" {
-				detail = http.StatusText(resp.StatusCode)
-			}
-			http.Error(
-				w,
-				fmt.Sprintf("NOAA CoastWatch SST returned HTTP %d: %s", resp.StatusCode, detail),
-				http.StatusBadGateway,
-			)
-			return
-		}
-		contentType := strings.ToLower(resp.Header.Get("Content-Type"))
-		if !strings.Contains(contentType, "image/png") {
-			detail := strings.TrimSpace(string(body))
-			if len(detail) > 240 {
-				detail = detail[:240]
-			}
-			if detail == "" {
-				detail = "unexpected non-PNG response"
-			}
-			http.Error(w, "NOAA CoastWatch SST: "+detail, http.StatusBadGateway)
-			return
-		}
-
-		// ERDDAP's griddap surface PNG is linear in latitude, while Leaflet's
-		// EPSG:3857 display is linear in Web Mercator Y. Stretching the source PNG
-		// directly to Leaflet bounds aligns only the outer corners and produces
-		// increasingly obvious coastline drift at wide geographic extents. Reproject
-		// the image scanlines server-side before Leaflet displays it. Longitude needs
-		// no resampling because both representations are linear in longitude here.
-		projectedBody, projectionErr := reprojectLatLonPNGToWebMercator(body, south, north)
-		if projectionErr != nil {
-			http.Error(w, "Sea Surface Temp Web Mercator reprojection failed: "+projectionErr.Error(), http.StatusBadGateway)
-			return
-		}
-
-		w.Header().Set("X-SST-Coastline", "native CoastWatch transparency/no-data mask")
-		w.Header().Set("X-SST-Projection", "server-reprojected EPSG:4326 latitude grid to EPSG:3857 scanlines")
-		w.Header().Set("Content-Type", "image/png")
-		w.Header().Set("Cache-Control", "public, max-age=900")
-		_, _ = w.Write(projectedBody)
-	})
-
-	mux.HandleFunc("/chlorophyll-info", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		const metadataURL = "https://coastwatch.noaa.gov/erddap/griddap/noaacwNPPN20S3ASCIDINEOF2kmDaily.das"
-		req, err := http.NewRequest(http.MethodGet, metadataURL, nil)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		req.Header.Set("User-Agent", "pittsburg-saildata/"+appVersion)
-
-		client := &http.Client{Timeout: 12 * time.Second}
-		resp, err := client.Do(req)
-		if err != nil {
-			http.Error(w, "NOAA chlorophyll metadata request failed: "+err.Error(), http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close()
-
-		body, err := ioutil.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		if err != nil {
-			http.Error(w, "NOAA chlorophyll metadata read failed: "+err.Error(), http.StatusBadGateway)
-			return
-		}
-		if resp.StatusCode != http.StatusOK {
-			detail := strings.TrimSpace(string(body))
-			if len(detail) > 500 {
-				detail = detail[:500]
-			}
-			http.Error(
-				w,
-				fmt.Sprintf("NOAA chlorophyll metadata returned HTTP %d: %s", resp.StatusCode, detail),
-				http.StatusBadGateway,
-			)
-			return
-		}
-
-		// Prefer the time axis actual_range endpoint: it is the dataset's
-		// actual last indexed coordinate and is safer than time_coverage_end
-		// for constructing/displaying the latest field time.
-		latest := ""
-		reTimeRange := regexp.MustCompile(`(?s)time\s*\{.*?Float64\s+actual_range\s+[0-9.eE+\-]+,\s*([0-9.eE+\-]+);`)
-		if match := reTimeRange.FindSubmatch(body); len(match) == 2 {
-			if seconds, parseErr := strconv.ParseFloat(string(match[1]), 64); parseErr == nil {
-				latest = time.Unix(int64(seconds), 0).UTC().Format(time.RFC3339)
-			}
-		}
-		if latest == "" {
-			reCoverage := regexp.MustCompile(`String\s+time_coverage_end\s+"([^"]+)"`)
-			if match := reCoverage.FindSubmatch(body); len(match) == 2 {
-				latest = string(match[1])
-			}
-		}
-		if latest == "" {
-			latest = "current"
-		}
-
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("Cache-Control", "public, max-age=900")
-		if err := json.NewEncoder(w).Encode(map[string]string{
-			"time":     latest,
-			"dataset":  "noaacwNPPN20S3ASCIDINEOF2kmDaily",
-			"variable": "chlor_a",
-		}); err != nil {
-			fmt.Println("chlorophyll-info JSON encoding error:", err)
-		}
-	})
-
-	mux.HandleFunc("/chlorophyll-field", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		q := r.URL.Query()
-		parseFloat := func(name string) (float64, error) {
-			raw := strings.TrimSpace(q.Get(name))
-			if raw == "" {
-				return 0, fmt.Errorf("%s is required", name)
-			}
-			v, err := strconv.ParseFloat(raw, 64)
-			if err != nil {
-				return 0, fmt.Errorf("invalid %s", name)
-			}
-			return v, nil
-		}
-
-		west, err := parseFloat("west")
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		south, err := parseFloat("south")
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		east, err := parseFloat("east")
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		north, err := parseFloat("north")
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		if west < -180 || west > 180 || east < -180 || east > 180 ||
-			south < -89.9 || south > 89.9 || north < -89.9 || north > 89.9 ||
-			west >= east || south >= north {
-			http.Error(w, "invalid chlorophyll map bounds", http.StatusBadRequest)
-			return
-		}
-
-		width := 1200
-		height := 900
-		if raw := strings.TrimSpace(q.Get("width")); raw != "" {
-			if v, err := strconv.Atoi(raw); err == nil {
-				width = v
-			}
-		}
-		if raw := strings.TrimSpace(q.Get("height")); raw != "" {
-			if v, err := strconv.Atoi(raw); err == nil {
-				height = v
-			}
-		}
-		if width < 256 {
-			width = 256
-		}
-		if width > 1800 {
-			width = 1800
-		}
-		if height < 256 {
-			height = 256
-		}
-		if height > 1400 {
-			height = 1400
-		}
-
-		dataRequest := fmt.Sprintf(
-			"chlor_a[last][0][(%.6f):(%.6f)][(%.6f):(%.6f)]",
-			south,
-			north,
-			west,
-			east,
-		)
-
-		graphics := url.Values{}
-		graphics.Set(".draw", "surface")
-		graphics.Set(".vars", "longitude|latitude|chlor_a")
-		graphics.Set(".colorBar", "Rainbow|C|Log|0.1|1|")
-		graphics.Set(".land", "off")
-		graphics.Set(".legend", "Off")
-		graphics.Set(".size", strconv.Itoa(width)+"|"+strconv.Itoa(height))
-
-		encodedDataRequest := url.QueryEscape(dataRequest)
-		encodedDataRequest = strings.ReplaceAll(encodedDataRequest, "+", "%20")
-		remoteURL := "https://coastwatch.noaa.gov/erddap/griddap/noaacwNPPN20S3ASCIDINEOF2kmDaily.transparentPng?" +
-			encodedDataRequest + "&" + graphics.Encode()
-
-		baseTransport, ok := http.DefaultTransport.(*http.Transport)
-		if !ok {
-			http.Error(w, "NOAA CoastWatch chlorophyll transport is unavailable", http.StatusInternalServerError)
-			return
-		}
-		transport := baseTransport.Clone()
-		dialer := &net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}
-		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-			return dialer.DialContext(ctx, "tcp4", address)
-		}
-		transport.TLSHandshakeTimeout = 30 * time.Second
-		transport.ResponseHeaderTimeout = 45 * time.Second
-		client := &http.Client{Transport: transport, Timeout: 75 * time.Second}
-
-		req, err := http.NewRequest(http.MethodGet, remoteURL, nil)
-		if err != nil {
-			http.Error(w, "chlorophyll field request construction failed: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		req.Header.Set("User-Agent", "pittsburg-saildata/"+appVersion)
-
-		resp, err := client.Do(req)
-		if err != nil {
-			http.Error(w, "NOAA CoastWatch chlorophyll field request failed: "+err.Error()+" | upstream="+remoteURL, http.StatusBadGateway)
-			return
-		}
-		body, readErr := ioutil.ReadAll(io.LimitReader(resp.Body, 12<<20))
-		resp.Body.Close()
-		if readErr != nil {
-			http.Error(w, "NOAA chlorophyll field response read failed: "+readErr.Error(), http.StatusBadGateway)
-			return
-		}
-		if resp.StatusCode != http.StatusOK {
-			detail := strings.TrimSpace(string(body))
-			if len(detail) > 1200 {
-				detail = detail[:1200]
-			}
-			http.Error(w, fmt.Sprintf("NOAA chlorophyll field returned HTTP %d: %s | upstream=%s", resp.StatusCode, detail, remoteURL), http.StatusBadGateway)
-			return
-		}
-		if !strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "image/png") {
-			http.Error(w, "NOAA chlorophyll field returned non-PNG content | upstream="+remoteURL, http.StatusBadGateway)
-			return
-		}
-
-		clippedBody, maskErr := applyNOAACoastlineMask(
-			body,
-			west,
-			south,
-			east,
-			north,
-			width,
-			height,
-		)
-		if maskErr != nil {
-			http.Error(w, "Chlorophyll coastline clipping failed: "+maskErr.Error(), http.StatusBadGateway)
-			return
-		}
-		body = clippedBody
-
-		w.Header().Set("X-Chlorophyll-Upstream", "CoastWatch Central ERDDAP · DINEOF field")
-		w.Header().Set("X-Coastline-Mask", "NOAA ENC Direct Coastal Land_Area · 2x supersampled")
-		w.Header().Set("Content-Type", "image/png")
-		w.Header().Set("Cache-Control", "public, max-age=900")
-		_, _ = w.Write(body)
-	})
-
-	mux.HandleFunc("/chlorophyll-overlay", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		q := r.URL.Query()
-		parseFloat := func(name string) (float64, error) {
-			raw := strings.TrimSpace(q.Get(name))
-			if raw == "" {
-				return 0, fmt.Errorf("%s is required", name)
-			}
-			v, err := strconv.ParseFloat(raw, 64)
-			if err != nil {
-				return 0, fmt.Errorf("invalid %s", name)
-			}
-			return v, nil
-		}
-
-		west, err := parseFloat("west")
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		south, err := parseFloat("south")
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		east, err := parseFloat("east")
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		north, err := parseFloat("north")
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		if west < -180 || west > 180 || east < -180 || east > 180 ||
-			south < -89.9 || south > 89.9 || north < -89.9 || north > 89.9 ||
-			west >= east || south >= north {
-			http.Error(w, "invalid chlorophyll map bounds", http.StatusBadRequest)
-			return
-		}
-
-		width := 1200
-		height := 900
-		if raw := strings.TrimSpace(q.Get("width")); raw != "" {
-			if v, err := strconv.Atoi(raw); err == nil {
-				width = v
-			}
-		}
-		if raw := strings.TrimSpace(q.Get("height")); raw != "" {
-			if v, err := strconv.Atoi(raw); err == nil {
-				height = v
-			}
-		}
-		if width < 256 {
-			width = 256
-		}
-		if width > 1600 {
-			width = 1600
-		}
-		if height < 256 {
-			height = 256
-		}
-		if height > 1200 {
-			height = 1200
-		}
-
-		// The source grid is ~2 km. Limit the numeric request to roughly
-		// 220 samples per axis at large map extents by using ERDDAP stride.
-		latSpan := north - south
-		lonSpan := east - west
-		latPoints := int(math.Ceil(latSpan/0.018)) + 1
-		lonPoints := int(math.Ceil(lonSpan/0.018)) + 1
-		latStride := 1
-		lonStride := 1
-		if latPoints > 220 {
-			latStride = int(math.Ceil(float64(latPoints) / 220.0))
-		}
-		if lonPoints > 220 {
-			lonStride = int(math.Ceil(float64(lonPoints) / 220.0))
-		}
-
-		dataRequest := fmt.Sprintf(
-			"chlor_a[last][0][(%.6f):%d:(%.6f)][(%.6f):%d:(%.6f)]",
-			south,
-			latStride,
-			north,
-			west,
-			lonStride,
-			east,
-		)
-		encodedRequest := url.QueryEscape(dataRequest)
-		encodedRequest = strings.ReplaceAll(encodedRequest, "+", "%20")
-		remoteURL := "https://coastwatch.noaa.gov/erddap/griddap/noaacwNPPN20S3ASCIDINEOF2kmDaily.json?" + encodedRequest
-
-		baseTransport, ok := http.DefaultTransport.(*http.Transport)
-		if !ok {
-			http.Error(w, "NOAA CoastWatch chlorophyll transport is unavailable", http.StatusInternalServerError)
-			return
-		}
-		transport := baseTransport.Clone()
-		dialer := &net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}
-		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-			return dialer.DialContext(ctx, "tcp4", address)
-		}
-		transport.TLSHandshakeTimeout = 30 * time.Second
-		transport.ResponseHeaderTimeout = 45 * time.Second
-
-		client := &http.Client{
-			Transport: transport,
-			Timeout:   75 * time.Second,
-		}
-
-		req, err := http.NewRequest(http.MethodGet, remoteURL, nil)
-		if err != nil {
-			http.Error(w, "chlorophyll contour request construction failed: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		req.Header.Set("User-Agent", "pittsburg-saildata/"+appVersion)
-
-		resp, err := client.Do(req)
-		if err != nil {
-			http.Error(
-				w,
-				"NOAA CoastWatch chlorophyll numeric request failed: "+err.Error()+" | upstream="+remoteURL,
-				http.StatusBadGateway,
-			)
-			return
-		}
-		body, readErr := ioutil.ReadAll(io.LimitReader(resp.Body, 24<<20))
-		resp.Body.Close()
-		if readErr != nil {
-			http.Error(w, "NOAA chlorophyll numeric response read failed: "+readErr.Error(), http.StatusBadGateway)
-			return
-		}
-		if resp.StatusCode != http.StatusOK {
-			detail := strings.TrimSpace(string(body))
-			if len(detail) > 1200 {
-				detail = detail[:1200]
-			}
-			http.Error(
-				w,
-				fmt.Sprintf("NOAA chlorophyll numeric request returned HTTP %d: %s | upstream=%s", resp.StatusCode, detail, remoteURL),
-				http.StatusBadGateway,
-			)
-			return
-		}
-
-		var payload struct {
-			Table struct {
-				ColumnNames []string        `json:"columnNames"`
-				Rows        [][]interface{} `json:"rows"`
-			} `json:"table"`
-		}
-		if err := json.Unmarshal(body, &payload); err != nil {
-			http.Error(w, "NOAA chlorophyll JSON decode failed: "+err.Error(), http.StatusBadGateway)
-			return
-		}
-		if len(payload.Table.Rows) == 0 {
-			http.Error(w, "NOAA chlorophyll numeric request returned no rows", http.StatusBadGateway)
-			return
-		}
-
-		col := map[string]int{}
-		for i, name := range payload.Table.ColumnNames {
-			col[strings.ToLower(strings.TrimSpace(name))] = i
-		}
-		latCol, okLat := col["latitude"]
-		lonCol, okLon := col["longitude"]
-		valCol, okVal := col["chlor_a"]
-		timeCol, okTime := col["time"]
-		if !okLat || !okLon || !okVal {
-			http.Error(w, "NOAA chlorophyll JSON is missing latitude/longitude/chlor_a columns", http.StatusBadGateway)
-			return
-		}
-
-		asFloat := func(v interface{}) (float64, bool) {
-			switch n := v.(type) {
-			case float64:
-				return n, true
-			case string:
-				f, err := strconv.ParseFloat(strings.TrimSpace(n), 64)
-				return f, err == nil
-			default:
-				return 0, false
-			}
-		}
-
-		type gridPoint struct {
-			lat float64
-			lon float64
-			val float64
-		}
-		points := make([]gridPoint, 0, len(payload.Table.Rows))
-		latSet := map[float64]struct{}{}
-		lonSet := map[float64]struct{}{}
-		servedTime := ""
-
-		for _, row := range payload.Table.Rows {
-			if latCol >= len(row) || lonCol >= len(row) || valCol >= len(row) {
-				continue
-			}
-			lat, ok1 := asFloat(row[latCol])
-			lon, ok2 := asFloat(row[lonCol])
-			val, ok3 := asFloat(row[valCol])
-			if !ok1 || !ok2 || !ok3 || math.IsNaN(val) || math.IsInf(val, 0) {
-				continue
-			}
-			points = append(points, gridPoint{lat: lat, lon: lon, val: val})
-			latSet[lat] = struct{}{}
-			lonSet[lon] = struct{}{}
-			if servedTime == "" && okTime && timeCol < len(row) {
-				servedTime = fmt.Sprint(row[timeCol])
-			}
-		}
-		if len(points) == 0 {
-			http.Error(w, "NOAA chlorophyll numeric response contained no usable values", http.StatusBadGateway)
-			return
-		}
-
-		lats := make([]float64, 0, len(latSet))
-		for v := range latSet {
-			lats = append(lats, v)
-		}
-		lons := make([]float64, 0, len(lonSet))
-		for v := range lonSet {
-			lons = append(lons, v)
-		}
-		sort.Float64s(lats)
-		sort.Float64s(lons)
-		if len(lats) < 2 || len(lons) < 2 {
-			http.Error(w, "NOAA chlorophyll grid is too small for contours", http.StatusBadGateway)
-			return
-		}
-
-		latIndex := make(map[float64]int, len(lats))
-		for i, v := range lats {
-			latIndex[v] = i
-		}
-		lonIndex := make(map[float64]int, len(lons))
-		for i, v := range lons {
-			lonIndex[v] = i
-		}
-
-		grid := make([][]float64, len(lats))
-		for i := range grid {
-			grid[i] = make([]float64, len(lons))
-			for j := range grid[i] {
-				grid[i][j] = math.NaN()
-			}
-		}
-		for _, p := range points {
-			grid[latIndex[p.lat]][lonIndex[p.lon]] = p.val
-		}
-
-		canvas := image.NewNRGBA(image.Rect(0, 0, width, height))
-
-		type contourStyle struct {
-			level float64
-			halo  color.NRGBA
-			core  color.NRGBA
-			rHalo int
-			rCore int
-		}
-		styles := []contourStyle{
-			{level: 0.2, halo: color.NRGBA{R: 8, G: 40, B: 56, A: 235}, core: color.NRGBA{R: 99, G: 230, B: 255, A: 255}, rHalo: 2, rCore: 1},
-			{level: 0.3, halo: color.NRGBA{R: 8, G: 40, B: 56, A: 245}, core: color.NRGBA{R: 255, G: 253, B: 231, A: 255}, rHalo: 3, rCore: 2},
-			{level: 0.5, halo: color.NRGBA{R: 8, G: 40, B: 56, A: 235}, core: color.NRGBA{R: 255, G: 209, B: 102, A: 255}, rHalo: 2, rCore: 1},
-		}
-
-		putDisc := func(cx, cy, radius int, c color.NRGBA) {
-			for dy := -radius; dy <= radius; dy++ {
-				for dx := -radius; dx <= radius; dx++ {
-					if dx*dx+dy*dy > radius*radius {
-						continue
-					}
-					x := cx + dx
-					y := cy + dy
-					if x < 0 || x >= width || y < 0 || y >= height {
-						continue
-					}
-					canvas.SetNRGBA(x, y, c)
-				}
-			}
-		}
-		drawLine := func(x0, y0, x1, y1 float64, radius int, c color.NRGBA) {
-			dx := math.Abs(x1 - x0)
-			dy := math.Abs(y1 - y0)
-			steps := int(math.Ceil(math.Max(dx, dy)))
-			if steps < 1 {
-				putDisc(int(math.Round(x0)), int(math.Round(y0)), radius, c)
-				return
-			}
-			for step := 0; step <= steps; step++ {
-				t := float64(step) / float64(steps)
-				x := int(math.Round(x0 + (x1-x0)*t))
-				y := int(math.Round(y0 + (y1-y0)*t))
-				putDisc(x, y, radius, c)
-			}
-		}
-		toPixel := func(lat, lon float64) (float64, float64) {
-			x := (lon - west) / (east - west) * float64(width-1)
-			y := (north - lat) / (north - south) * float64(height-1)
-			return x, y
-		}
-		interp := func(a, b, level float64) float64 {
-			if a == b {
-				return 0.5
-			}
-			t := (level - a) / (b - a)
-			if t < 0 {
-				t = 0
-			}
-			if t > 1 {
-				t = 1
-			}
-			return t
-		}
-
-		type xy struct{ x, y float64 }
-		drawContour := func(style contourStyle) {
-			level := style.level
-			for iy := 0; iy < len(lats)-1; iy++ {
-				for ix := 0; ix < len(lons)-1; ix++ {
-					v00 := grid[iy][ix]
-					v10 := grid[iy][ix+1]
-					v11 := grid[iy+1][ix+1]
-					v01 := grid[iy+1][ix]
-					if math.IsNaN(v00) || math.IsNaN(v10) || math.IsNaN(v11) || math.IsNaN(v01) {
-						continue
-					}
-
-					var crossings []xy
-					// Bottom edge: (lat[iy], lon[ix]) -> (lat[iy], lon[ix+1])
-					if (v00 < level) != (v10 < level) {
-						t := interp(v00, v10, level)
-						lat := lats[iy]
-						lon := lons[ix] + (lons[ix+1]-lons[ix])*t
-						x, y := toPixel(lat, lon)
-						crossings = append(crossings, xy{x, y})
-					}
-					// Right edge.
-					if (v10 < level) != (v11 < level) {
-						t := interp(v10, v11, level)
-						lat := lats[iy] + (lats[iy+1]-lats[iy])*t
-						lon := lons[ix+1]
-						x, y := toPixel(lat, lon)
-						crossings = append(crossings, xy{x, y})
-					}
-					// Top edge.
-					if (v01 < level) != (v11 < level) {
-						t := interp(v01, v11, level)
-						lat := lats[iy+1]
-						lon := lons[ix] + (lons[ix+1]-lons[ix])*t
-						x, y := toPixel(lat, lon)
-						crossings = append(crossings, xy{x, y})
-					}
-					// Left edge.
-					if (v00 < level) != (v01 < level) {
-						t := interp(v00, v01, level)
-						lat := lats[iy] + (lats[iy+1]-lats[iy])*t
-						lon := lons[ix]
-						x, y := toPixel(lat, lon)
-						crossings = append(crossings, xy{x, y})
-					}
-
-					if len(crossings) == 2 {
-						drawLine(crossings[0].x, crossings[0].y, crossings[1].x, crossings[1].y, style.rHalo, style.halo)
-						drawLine(crossings[0].x, crossings[0].y, crossings[1].x, crossings[1].y, style.rCore, style.core)
-					} else if len(crossings) == 4 {
-						center := (v00 + v10 + v11 + v01) / 4
-						if center >= level {
-							drawLine(crossings[0].x, crossings[0].y, crossings[3].x, crossings[3].y, style.rHalo, style.halo)
-							drawLine(crossings[0].x, crossings[0].y, crossings[3].x, crossings[3].y, style.rCore, style.core)
-							drawLine(crossings[1].x, crossings[1].y, crossings[2].x, crossings[2].y, style.rHalo, style.halo)
-							drawLine(crossings[1].x, crossings[1].y, crossings[2].x, crossings[2].y, style.rCore, style.core)
-						} else {
-							drawLine(crossings[0].x, crossings[0].y, crossings[1].x, crossings[1].y, style.rHalo, style.halo)
-							drawLine(crossings[0].x, crossings[0].y, crossings[1].x, crossings[1].y, style.rCore, style.core)
-							drawLine(crossings[2].x, crossings[2].y, crossings[3].x, crossings[3].y, style.rHalo, style.halo)
-							drawLine(crossings[2].x, crossings[2].y, crossings[3].x, crossings[3].y, style.rCore, style.core)
-						}
-					}
-				}
-			}
-		}
-
-		for _, style := range styles {
-			drawContour(style)
-		}
-
-		var encoded bytes.Buffer
-		if err := png.Encode(&encoded, canvas); err != nil {
-			http.Error(w, "chlorophyll contour PNG encoding failed: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("X-Chlorophyll-Upstream", "CoastWatch Central ERDDAP · numeric DINEOF")
-		if servedTime != "" {
-			w.Header().Set("X-Chlorophyll-Time", servedTime)
-		}
-		w.Header().Set("Content-Type", "image/png")
-		w.Header().Set("Cache-Control", "public, max-age=900")
-		_, _ = w.Write(encoded.Bytes())
-	})
-
-	mux.HandleFunc("/fishing-water", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		lat, lon, ok, err := parseOptionalLatLon(r.URL.Query())
-		if err != nil || !ok {
-			if err == nil {
-				err = fmt.Errorf("lat and lon are required")
-			}
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		// Roughly a 15 nmi neighborhood around the selected destination.
-		halfLat := 0.25
-		cosLat := math.Max(0.25, math.Cos(lat*math.Pi/180))
-		halfLon := math.Min(0.50, 0.25/cosLat)
-		south := math.Max(-89.8, lat-halfLat)
-		north := math.Min(89.8, lat+halfLat)
-		west := math.Max(-179.8, lon-halfLon)
-		east := math.Min(179.8, lon+halfLon)
-
-		sstRequest := fmt.Sprintf(
-			"analysed_sst[last][(%.6f):(%.6f)][(%.6f):(%.6f)]",
-			south, north, west, east,
-		)
-		chlRequest := fmt.Sprintf(
-			"chlor_a[last][0][(%.6f):(%.6f)][(%.6f):(%.6f)]",
-			south, north, west, east,
-		)
-
-		sstStats, sstErr := fetchCoastWatchWindowStats(
-			"noaacwBLENDEDsstDNDaily",
-			"analysed_sst",
-			sstRequest,
-			lat,
-			lon,
-		)
-		chlStats, chlErr := fetchCoastWatchWindowStats(
-			"noaacwNPPN20S3ASCIDINEOF2kmDaily",
-			"chlor_a",
-			chlRequest,
-			lat,
-			lon,
-		)
-
-		type sstPayload struct {
-			PointF  float64 `json:"point_f,omitempty"`
-			MinF    float64 `json:"min_f,omitempty"`
-			MaxF    float64 `json:"max_f,omitempty"`
-			SpreadF float64 `json:"spread_f,omitempty"`
-			Count   int     `json:"count,omitempty"`
-		}
-		type chlPayload struct {
-			Point float64 `json:"point_mg_m3,omitempty"`
-			Min   float64 `json:"min_mg_m3,omitempty"`
-			Max   float64 `json:"max_mg_m3,omitempty"`
-			Count int     `json:"count,omitempty"`
-		}
-		payload := struct {
-			SST         *sstPayload `json:"sst,omitempty"`
-			Chlorophyll *chlPayload `json:"chlorophyll,omitempty"`
-			Error       string      `json:"error,omitempty"`
-		}{}
-
-		var errs []string
-		if sstErr != nil {
-			errs = append(errs, "Sea Surface Temp: "+sstErr.Error())
-		} else {
-			toF := func(c float64) float64 { return c*9/5 + 32 }
-			payload.SST = &sstPayload{
-				PointF:  toF(sstStats.Point),
-				MinF:    toF(sstStats.Min),
-				MaxF:    toF(sstStats.Max),
-				SpreadF: (sstStats.Max - sstStats.Min) * 9 / 5,
-				Count:   sstStats.Count,
-			}
-		}
-		if chlErr != nil {
-			errs = append(errs, "Chlorophyll: "+chlErr.Error())
-		} else {
-			payload.Chlorophyll = &chlPayload{
-				Point: chlStats.Point,
-				Min:   chlStats.Min,
-				Max:   chlStats.Max,
-				Count: chlStats.Count,
-			}
-		}
-		if len(errs) > 0 {
-			payload.Error = strings.Join(errs, " | ")
-		}
-
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
-		if err := json.NewEncoder(w).Encode(payload); err != nil {
-			fmt.Println("fishing-water JSON encoding error:", err)
 		}
 	})
 
@@ -6439,7 +5538,7 @@ var sailingHTMLTemplate = template.Must(template.New("sailing").Parse(`<!doctype
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <style>:root{--navy:#082b45;--blue:#126b91;--sea:#0b8793;--ink:#153242;--muted:#607886;--paper:#f5fafc;--card:#fff;--line:#d8e7ed;--flood:#087f8c;--ebb:#365f91;--slack:#756d64;--shadow:0 12px 34px rgba(8,43,69,.10)}*{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#dff3f8,#f7fbfc 32rem);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Avenir Next",Avenir,Helvetica,Arial,sans-serif;line-height:1.45}.shell{max-width:880px;margin:auto;padding:28px 18px 64px}.hero{color:#fff;padding:34px 30px 30px;border-radius:24px;min-height:360px;display:flex;flex-direction:column;justify-content:flex-end;background:
 linear-gradient(180deg,rgba(4,24,38,.06) 12%,rgba(4,24,38,.24) 48%,rgba(4,24,38,.86) 100%),
-url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text-shadow:0 2px 12px rgba(0,0,0,.45)}.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-weight:800;font-size:.76rem;opacity:.8}.photo-tag{margin-top:14px;font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;opacity:.72}h1{font-size:clamp(1.8rem,6vw,3.2rem);line-height:1.05;margin:.4rem 0 .6rem;letter-spacing:-.035em}.sub{opacity:.82}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}.full{grid-column:1/-1}h2{font-size:.82rem;letter-spacing:.13em;text-transform:uppercase;color:var(--blue);margin:0 0 16px}.bottom{font-size:1.13rem}.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.wind-card .metric{min-width:0}.wind-card .value{white-space:nowrap}@media(max-width:640px){.wind-card .metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}.metric{background:var(--paper);border-radius:15px;padding:14px}.label{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700}.value{font-size:1.55rem;font-weight:800;color:var(--navy)}.meta{color:var(--muted);font-size:.88rem;margin-top:12px}.station{font-weight:800;font-size:1.1rem;color:var(--navy)}.wind-distance-warning{margin-top:10px;padding:10px 12px;border:1px solid #e7c978;border-radius:12px;background:#fff8df;color:#654d08;font-size:.9rem}.wind-distance-warning strong{color:#4e3a00}.wind-summary{white-space:pre-line;margin-top:14px;padding:13px 14px;background:#eef7fa;border-left:4px solid var(--sea);border-radius:10px;color:var(--ink);font-size:.92rem}.event{display:grid;grid-template-columns:88px 12px 1fr;gap:12px;align-items:center;min-height:58px}.time{font-weight:800;color:var(--navy)}.dot{width:12px;height:12px;border-radius:50%;background:var(--slack);box-shadow:0 0 0 5px #edf3f5}.flood .dot{background:var(--flood)}.ebb .dot{background:var(--ebb)}.eventbody{border-left:2px solid var(--line);padding:8px 0 8px 18px}.eventlabel{font-weight:800}.eventdata{color:var(--muted);font-size:.9rem}.badge{display:inline-block;border-radius:999px;padding:5px 10px;background:#e9f6fb;color:var(--blue);font-size:.75rem;font-weight:800;margin-top:12px}.footer{text-align:center;color:var(--muted);font-size:.78rem;margin-top:22px}.hero .yogiism{margin:18px 0 0;max-width:720px;color:#fff;font-style:italic;font-size:.96rem;line-height:1.4;opacity:.96}.full-report{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:.88rem;line-height:1.55;background:#071f31;color:#e7f4f8;border-radius:14px;padding:18px;overflow-x:auto}.wind-readings{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}.wind-readings-header{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:8px}.wind-readings-title{font-weight:850;color:var(--navy)}.wind-reading-control{display:flex;align-items:flex-end;gap:7px;flex-wrap:wrap}.wind-reading-control label{display:flex;flex-direction:column;gap:3px;color:var(--muted);font-size:.72rem;font-weight:850;text-transform:uppercase;letter-spacing:.04em}.wind-reading-control select{min-width:76px;padding:6px 28px 6px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;font:inherit}.wind-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap}.wind-card-head h2{margin-bottom:16px}.wind-unit-control{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:.72rem;font-weight:850;text-transform:uppercase;letter-spacing:.04em}.wind-unit-control select{padding:6px 28px 6px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;font:inherit;color:var(--ink)}.wind-reading-chart{margin:4px 0 12px;border:1px solid var(--line);border-radius:10px;background:#fff;padding:8px}.wind-reading-chart svg{display:block;width:100%;height:auto;min-height:260px;max-height:320px}.wind-chart-grid{stroke:#dce6e9;stroke-width:1}.wind-chart-axis{stroke:#8aa0a8;stroke-width:1}.wind-chart-wind{fill:none;stroke:#126b91;stroke-width:2.5;stroke-linejoin:round;stroke-linecap:round}.wind-chart-gust{fill:none;stroke:#a95a24;stroke-width:1.7;stroke-linejoin:round;stroke-linecap:round}.wind-chart-label{fill:#60747c;font-size:11px;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.wind-chart-legend{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin:0 0 6px;color:var(--muted);font-size:.78rem;font-weight:750}.wind-chart-key{display:inline-flex;align-items:center;gap:6px}.wind-chart-key-line{display:inline-block;width:22px;border-top:3px solid #126b91}.wind-chart-key-line.gust{border-top-color:#a95a24;border-top-width:2px;border-top-style:solid}.wind-chart-empty{padding:34px 12px;text-align:center;color:var(--muted);font-size:.85rem}.wind-chart-cursor{stroke:#263b46;stroke-width:1.4;pointer-events:none}.wind-chart-cursor-dot{fill:#fff;stroke-width:2;pointer-events:none}.wind-chart-cursor-dot.wind{stroke:#126b91}.wind-chart-cursor-dot.gust{stroke:#a95a24}.wind-chart-hit{fill:transparent;cursor:crosshair;touch-action:none}.wind-chart-readout{margin:-2px 0 8px;color:var(--ink);font-size:.82rem;font-weight:750;min-height:1.2em}.wind-readings-wrap{max-height:132px;overflow:auto;border:1px solid var(--line);border-radius:10px}.wind-readings-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.84rem}.wind-readings-table th,.wind-readings-table td{padding:7px 9px;border-top:1px solid var(--line);text-align:left;white-space:nowrap}.wind-readings-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc;color:var(--muted);font-size:.7rem;text-transform:uppercase;letter-spacing:.05em}.wind-readings-table tbody tr:first-child td{border-top:0}.card-action-row{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}#current-summary-card,.wind-card{min-width:0}.timeline-scope-note{margin:.15rem 0 1rem;color:var(--muted);font-size:.88rem}.current-events-integrated{margin:14px 0 4px;padding:10px 0 0;border-top:1px solid var(--line)}.current-events-head{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:8px}.current-events-head strong{color:var(--navy);font-size:.92rem}.current-events-head span{color:var(--muted);font-size:.78rem}.current-key-times{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:28px;row-gap:2px}.current-key-time{display:grid;grid-template-columns:76px minmax(0,1fr);gap:10px;align-items:baseline;padding:5px 0;border-bottom:1px solid #edf2f3;font-size:.86rem}.current-key-time-time{font-weight:800;color:var(--navy);white-space:nowrap}.current-key-time-label{color:var(--ink)}.current-key-time-label strong{font-weight:800}.current-key-time-meta{color:var(--muted);margin-left:6px;white-space:nowrap}@media(max-width:640px){.current-key-times{grid-template-columns:1fr}.current-key-time{grid-template-columns:72px minmax(0,1fr)}}.details-link-card{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap}.details-link-card h2{margin-bottom:.2rem}.details-link{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;white-space:nowrap}.details-note{color:var(--muted);font-size:.88rem;margin:-4px 0 14px}.current-chart-header{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap}.current-window-inline{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin:2px 0 10px;color:var(--muted);font-size:.86rem}.current-window-inline strong{color:var(--navy);font-size:.86rem}.current-window-inline span{white-space:nowrap}.current-chart-header h2{margin-bottom:.15rem}.current-date-label{color:var(--muted);font-weight:750;font-size:.9rem}.current-range-toolbar{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin:8px 0 10px;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:var(--paper)}.current-range-toolbar .current-date-nav{display:inline-flex;align-items:center;min-height:44px;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:8px 12px;background:#fff;color:var(--blue);font-size:.86rem;font-weight:850}.current-range-toolbar .current-date-nav.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-control-label{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:.75rem;font-weight:850}.current-control-label .current-date-picker{min-height:44px;font-size:1rem}@media(max-width:640px){.current-range-toolbar{align-items:stretch}.current-control-label{flex:1 1 140px}.current-range-toolbar .current-date-nav{justify-content:center;flex:1 1 135px}}.current-date-controls{display:flex;gap:7px;flex-wrap:wrap;align-items:center}.current-date-picker{border:1px solid var(--line);border-radius:999px;padding:6px 10px;background:#fff;color:var(--navy);font:inherit;font-size:.82rem;font-weight:750;min-height:34px}.current-date-picker:focus{outline:2px solid var(--blue);outline-offset:2px}.current-refreshing{opacity:.55;transition:opacity .15s ease}.current-date-controls a{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:7px 11px;background:#fff;color:var(--blue);font-size:.82rem;font-weight:850}.current-date-controls a:hover{background:var(--paper)}.current-date-controls a.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-planning{margin:16px 0 12px;padding:14px 16px;border:1px solid var(--line);border-radius:16px;background:#fff}.current-planning-head{display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:10px}.current-planning-head strong{color:var(--navy);font-size:1rem}.current-planning-head span{color:var(--muted);font-size:.82rem}.planning-preferences{display:flex;flex-direction:column;gap:10px;margin:8px 0 12px}.planning-preferences-row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;width:100%}.planning-preferences label{display:flex;gap:5px;align-items:center;color:var(--muted);font-size:.78rem;font-weight:850}.planning-preferences input{min-height:40px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--navy);font:inherit;font-size:1rem;padding:6px 8px}.planning-preferences input[type="number"]{width:76px}.planning-preferences b{color:var(--muted);font-size:.82rem}@media(max-width:640px){.planning-preferences label{flex:1 1 130px;justify-content:space-between}.planning-preferences input[type="time"]{min-width:110px}}.planning-help{margin:2px 0 12px;padding:10px 12px;border-radius:10px;background:#f7f9fa;color:var(--ink);font-size:.82rem;line-height:1.45}.planning-help strong{color:var(--navy)}.current-planning-days{display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:8px}.planning-day{border:1px solid var(--line);border-radius:12px;padding:10px;min-width:0}.planning-day.preferred{background:#eef8f3}.planning-day.caution{background:#fff8df;border-color:#e7c978}.planning-day.redflag{background:#fff0ed;border-color:#dfa297}.planning-date{font-size:.78rem;font-weight:850;color:var(--navy)}.planning-status{font-size:.92rem;font-weight:900;margin-top:2px}.preferred .planning-status{color:#176246}.caution .planning-status{color:#775900}.redflag .planning-status{color:#9a3328}.planning-detail{font-size:.78rem;line-height:1.35;color:var(--ink);margin-top:5px}.planning-disclaimer{color:var(--muted);font-size:.75rem;margin-top:9px}@media(max-width:640px){.current-planning-days{grid-template-columns:1fr 1fr}.planning-detail{font-size:.8rem}}.current-chart-wrap .event-point,.current-chart-wrap .event-point:hover{cursor:default!important;pointer-events:none}.current-chart-wrap{margin-top:16px}.current-chart-svg{display:block;width:100%;height:auto;background:#f8fbfc;border:1px solid var(--line);border-radius:16px}.grid-line{stroke:#d9e4e8;stroke-width:1}.v-grid-line{stroke:#e6eef1;stroke-width:1}.day-grid-line{stroke:#b7cbd4;stroke-width:1.4}.zero-line{stroke:#17384a;stroke-width:2}.axis-label{fill:#657d89;font-size:11px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.y-label{text-anchor:end}.x-label{text-anchor:middle}.axis-title{fill:#657d89;font-size:11px;text-anchor:middle}.tide-y-label{text-anchor:start}.tide-range-bar{opacity:1;stroke-width:3;stroke-linecap:round;fill:none}.tide-range-bar.typical{stroke:#4a6473}.tide-range-bar.elevated{stroke:#d5ad28}.tide-range-bar.large{stroke:#d9791f}.tide-range-bar.exceptional{stroke:#c94a3f}.tide-range-value{font-size:11px;font-weight:900;text-anchor:middle;paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round;fill:#17384a}.tide-range-toggle{display:flex;align-items:center;gap:7px;color:var(--ink);font-size:.84rem;font-weight:800}.tide-range-toggle input{margin:0}.tide-range-legend{display:flex;gap:10px;flex-wrap:wrap;align-items:center;color:var(--muted);font-size:.76rem}.tide-range-key{display:inline-flex;align-items:center;gap:5px}.tide-range-swatch{width:11px;height:11px;border-radius:3px;display:inline-block}.tide-range-swatch.typical{background:#4a6473}.tide-range-swatch.elevated{background:#d5ad28}.tide-range-swatch.large{background:#d9791f}.tide-range-swatch.exceptional{background:#c94a3f}.night-window{fill:#aebdc4;opacity:.78}.sail-window{fill:#f8fbfc;opacity:.96}.preferred-window{fill:#f0d46d;opacity:.34}.flood-area{fill:#6d8fd0;opacity:.86}.ebb-area{fill:#0b9d83;opacity:.90}.current-line{fill:none;stroke:#214b62;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}.event-point{stroke:#fff;stroke-width:1.5}.event-point.flood{fill:#5478bd}.event-point.ebb{fill:#078a75}.event-point.slack{fill:#756d64}.event-time{fill:#17384a;font-size:9px;font-weight:800;text-anchor:middle;paint-order:stroke;stroke:#fff;stroke-width:2.5px;stroke-linejoin:round}.event-time.flood{fill:#294f91}.event-time.ebb{fill:#066c5d}.event-time.slack{fill:#514b46}.now-line{stroke:#c63a2b;stroke-width:2.5}.now-label{fill:#c63a2b;font-size:11px;font-weight:800}.chart-explainer{color:var(--ink);font-size:.94rem;line-height:1.45;margin:2px 0 12px}.chart-note{color:var(--muted);font-size:.82rem;margin-top:9px}.candidate-table{width:100%;border-collapse:collapse;font-size:.86rem}.candidate-table th,.candidate-table td{padding:10px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}.candidate-table th{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}.candidate-table td.num,.candidate-table th.num{text-align:right;white-space:nowrap}.candidate-good td.status{font-weight:800}.candidate-bad{opacity:.82}.candidate-selected{background:rgba(20,120,100,.08)}.candidate-selected td:first-child{font-weight:800}.candidate-note{color:var(--muted);font-size:.82rem;margin:0 0 12px}.candidate-scroll{overflow-x:auto}.candidate-link{color:var(--blue);text-decoration:none;font-weight:800}.candidate-link:hover{text-decoration:underline}.candidate-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:0 0 12px}.nearest-link{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:7px 12px;color:var(--blue);font-weight:800;text-decoration:none;background:#fff}.nearest-link:hover{background:var(--paper)}.map-card{overflow:hidden}.map-intro{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px}.map-help{color:var(--muted);font-size:.9rem;max-width:600px}.map-wrap{border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#dfecef}.location-map{height:390px;width:100%}.map-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px}.map-coordinate{font-variant-numeric:tabular-nums;color:var(--muted);font-size:.9rem}.map-go{display:inline-block;border:0;border-radius:999px;padding:10px 16px;background:var(--blue);color:#fff;font-weight:850;text-decoration:none;cursor:pointer}.map-go[aria-disabled="true"]{opacity:.45;pointer-events:none}.map-search-area{border:0;cursor:pointer}.map-search-area[aria-disabled="true"]{opacity:.55;pointer-events:none}.map-search-area[hidden]{display:none}.map-search-status{color:var(--muted);font-size:.82rem}.map-reset{border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:800;cursor:pointer}.map-reset:disabled{opacity:.45;cursor:default}.map-navigation{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}.map-state-controls{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:10px}.map-current-toggle{display:inline-flex;align-items:center;gap:7px;color:var(--ink);font-weight:750;font-size:.88rem}.map-current-toggle input{margin:0}.map-overlays-menu{position:relative}.map-overlays-menu summary{list-style:none;cursor:pointer;border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;font-size:.88rem}.map-overlays-menu summary::-webkit-details-marker{display:none}.map-overlays-menu summary::after{content:" ▾";font-size:.78em}.map-overlays-menu[open] summary::after{content:" ▴"}.map-overlays-panel{position:absolute;z-index:700;top:calc(100% + 6px);left:0;min-width:270px;max-width:min(360px,88vw);padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:#fff;box-shadow:0 10px 28px rgba(7,31,49,.18);display:flex;flex-direction:column;gap:10px}.map-overlay-toggle{display:flex;align-items:flex-start;gap:8px;color:var(--ink);font-weight:750;font-size:.88rem;line-height:1.3}.map-overlay-toggle input{margin-top:2px}.map-overlay-note{color:var(--muted);font-size:.76rem;line-height:1.35;padding-top:2px;border-top:1px solid var(--line)}.map-center-panel{min-width:240px}.map-center-action{width:100%;border:0;border-radius:10px;padding:9px 10px;background:transparent;color:var(--ink);font:inherit;font-size:.88rem;font-weight:750;text-align:left;cursor:pointer}.map-center-action:hover,.map-center-action:focus-visible{background:var(--paper);outline:none}.map-center-action:disabled{opacity:.45;cursor:default;background:transparent}.map-nav-button{border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;cursor:pointer}.map-nav-button:disabled{opacity:.45;cursor:default}.map-layer-note{margin-top:8px;color:var(--muted);font-size:.8rem;line-height:1.4}.map-smoke-legend{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:8px;color:var(--muted);font-size:.78rem}.map-smoke-legend[hidden]{display:none}.map-smoke-legend span{display:inline-flex;align-items:center;gap:5px}.smoke-swatch{display:inline-block;width:18px;height:10px;border:1px solid rgba(70,70,70,.5);border-radius:2px}.smoke-swatch.light{background:rgba(174,181,184,.32)}.smoke-swatch.medium{background:rgba(226,163,63,.42)}.smoke-swatch.heavy{background:rgba(194,79,67,.52)}.map-smoke-note{font-style:italic}.map-symbol{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;margin-right:4px;font-size:27px;font-weight:950;line-height:1;vertical-align:-6px;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff,0 2px 3px rgba(0,0,0,.35)}
+url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text-shadow:0 2px 12px rgba(0,0,0,.45)}.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-weight:800;font-size:.76rem;opacity:.8}.photo-tag{margin-top:14px;font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;opacity:.72}h1{font-size:clamp(1.8rem,6vw,3.2rem);line-height:1.05;margin:.4rem 0 .6rem;letter-spacing:-.035em}.sub{opacity:.82}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}.full{grid-column:1/-1}h2{font-size:.82rem;letter-spacing:.13em;text-transform:uppercase;color:var(--blue);margin:0 0 16px}.bottom{font-size:1.13rem}.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.wind-card .metric{min-width:0}.wind-card .value{white-space:nowrap}@media(max-width:640px){.wind-card .metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}.metric{background:var(--paper);border-radius:15px;padding:14px}.label{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700}.value{font-size:1.55rem;font-weight:800;color:var(--navy)}.meta{color:var(--muted);font-size:.88rem;margin-top:12px}.station{font-weight:800;font-size:1.1rem;color:var(--navy)}.wind-distance-warning{margin-top:10px;padding:10px 12px;border:1px solid #e7c978;border-radius:12px;background:#fff8df;color:#654d08;font-size:.9rem}.wind-distance-warning strong{color:#4e3a00}.wind-summary{white-space:pre-line;margin-top:14px;padding:13px 14px;background:#eef7fa;border-left:4px solid var(--sea);border-radius:10px;color:var(--ink);font-size:.92rem}.event{display:grid;grid-template-columns:88px 12px 1fr;gap:12px;align-items:center;min-height:58px}.time{font-weight:800;color:var(--navy)}.dot{width:12px;height:12px;border-radius:50%;background:var(--slack);box-shadow:0 0 0 5px #edf3f5}.flood .dot{background:var(--flood)}.ebb .dot{background:var(--ebb)}.eventbody{border-left:2px solid var(--line);padding:8px 0 8px 18px}.eventlabel{font-weight:800}.eventdata{color:var(--muted);font-size:.9rem}.badge{display:inline-block;border-radius:999px;padding:5px 10px;background:#e9f6fb;color:var(--blue);font-size:.75rem;font-weight:800;margin-top:12px}.footer{text-align:center;color:var(--muted);font-size:.78rem;margin-top:22px}.hero .yogiism{margin:18px 0 0;max-width:720px;color:#fff;font-style:italic;font-size:.96rem;line-height:1.4;opacity:.96}.full-report{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:.88rem;line-height:1.55;background:#071f31;color:#e7f4f8;border-radius:14px;padding:18px;overflow-x:auto}.wind-readings{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}.wind-readings-header{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:8px}.wind-readings-title{font-weight:850;color:var(--navy)}.wind-reading-control{display:flex;align-items:flex-end;gap:7px;flex-wrap:wrap}.wind-reading-control label{display:flex;flex-direction:column;gap:3px;color:var(--muted);font-size:.72rem;font-weight:850;text-transform:uppercase;letter-spacing:.04em}.wind-reading-control select{min-width:76px;padding:6px 28px 6px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;font:inherit}.wind-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap}.wind-card-head h2{margin-bottom:16px}.wind-unit-control{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:.72rem;font-weight:850;text-transform:uppercase;letter-spacing:.04em}.wind-unit-control select{padding:6px 28px 6px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;font:inherit;color:var(--ink)}.wind-reading-chart{margin:4px 0 12px;border:1px solid var(--line);border-radius:10px;background:#fff;padding:8px}.wind-reading-chart svg{display:block;width:100%;height:auto;min-height:260px;max-height:320px}.wind-chart-grid{stroke:#dce6e9;stroke-width:1}.wind-chart-axis{stroke:#8aa0a8;stroke-width:1}.wind-chart-wind{fill:none;stroke:#126b91;stroke-width:2.5;stroke-linejoin:round;stroke-linecap:round}.wind-chart-gust{fill:none;stroke:#a95a24;stroke-width:1.7;stroke-linejoin:round;stroke-linecap:round}.wind-chart-label{fill:#60747c;font-size:11px;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.wind-chart-legend{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin:0 0 6px;color:var(--muted);font-size:.78rem;font-weight:750}.wind-chart-key{display:inline-flex;align-items:center;gap:6px}.wind-chart-key-line{display:inline-block;width:22px;border-top:3px solid #126b91}.wind-chart-key-line.gust{border-top-color:#a95a24;border-top-width:2px;border-top-style:solid}.wind-chart-empty{padding:34px 12px;text-align:center;color:var(--muted);font-size:.85rem}.wind-chart-cursor{stroke:#263b46;stroke-width:1.4;pointer-events:none}.wind-chart-cursor-dot{fill:#fff;stroke-width:2;pointer-events:none}.wind-chart-cursor-dot.wind{stroke:#126b91}.wind-chart-cursor-dot.gust{stroke:#a95a24}.wind-chart-hit{fill:transparent;cursor:crosshair;touch-action:none}.wind-chart-readout{margin:-2px 0 8px;color:var(--ink);font-size:.82rem;font-weight:750;min-height:1.2em}.wind-readings-wrap{max-height:132px;overflow:auto;border:1px solid var(--line);border-radius:10px}.wind-readings-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.84rem}.wind-readings-table th,.wind-readings-table td{padding:7px 9px;border-top:1px solid var(--line);text-align:left;white-space:nowrap}.wind-readings-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc;color:var(--muted);font-size:.7rem;text-transform:uppercase;letter-spacing:.05em}.wind-readings-table tbody tr:first-child td{border-top:0}.card-action-row{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}#current-summary-card,.wind-card{min-width:0}.timeline-scope-note{margin:.15rem 0 1rem;color:var(--muted);font-size:.88rem}.current-events-integrated{margin:14px 0 4px;padding:10px 0 0;border-top:1px solid var(--line)}.current-events-head{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:8px}.current-events-head strong{color:var(--navy);font-size:.92rem}.current-events-head span{color:var(--muted);font-size:.78rem}.current-key-times{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:28px;row-gap:2px}.current-key-time{display:grid;grid-template-columns:76px minmax(0,1fr);gap:10px;align-items:baseline;padding:5px 0;border-bottom:1px solid #edf2f3;font-size:.86rem}.current-key-time-time{font-weight:800;color:var(--navy);white-space:nowrap}.current-key-time-label{color:var(--ink)}.current-key-time-label strong{font-weight:800}.current-key-time-meta{color:var(--muted);margin-left:6px;white-space:nowrap}@media(max-width:640px){.current-key-times{grid-template-columns:1fr}.current-key-time{grid-template-columns:72px minmax(0,1fr)}}.details-link-card{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap}.details-link-card h2{margin-bottom:.2rem}.details-link{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;white-space:nowrap}.details-note{color:var(--muted);font-size:.88rem;margin:-4px 0 14px}.current-chart-header{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap}.current-window-inline{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin:2px 0 10px;color:var(--muted);font-size:.86rem}.current-window-inline strong{color:var(--navy);font-size:.86rem}.current-window-inline span{white-space:nowrap}.current-chart-header h2{margin-bottom:.15rem}.current-date-label{color:var(--muted);font-weight:750;font-size:.9rem}.current-range-toolbar{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin:8px 0 10px;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:var(--paper)}.current-range-toolbar .current-date-nav{display:inline-flex;align-items:center;min-height:44px;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:8px 12px;background:#fff;color:var(--blue);font-size:.86rem;font-weight:850}.current-range-toolbar .current-date-nav.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-control-label{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:.75rem;font-weight:850}.current-control-label .current-date-picker{min-height:44px;font-size:1rem}@media(max-width:640px){.current-range-toolbar{align-items:stretch}.current-control-label{flex:1 1 140px}.current-range-toolbar .current-date-nav{justify-content:center;flex:1 1 135px}}.current-date-controls{display:flex;gap:7px;flex-wrap:wrap;align-items:center}.current-date-picker{border:1px solid var(--line);border-radius:999px;padding:6px 10px;background:#fff;color:var(--navy);font:inherit;font-size:.82rem;font-weight:750;min-height:34px}.current-date-picker:focus{outline:2px solid var(--blue);outline-offset:2px}.current-refreshing{opacity:.55;transition:opacity .15s ease}.current-date-controls a{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:7px 11px;background:#fff;color:var(--blue);font-size:.82rem;font-weight:850}.current-date-controls a:hover{background:var(--paper)}.current-date-controls a.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-planning{margin:16px 0 12px;padding:14px 16px;border:1px solid var(--line);border-radius:16px;background:#fff}.current-planning-head{display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:10px}.current-planning-head strong{color:var(--navy);font-size:1rem}.current-planning-head span{color:var(--muted);font-size:.82rem}.planning-preferences{display:flex;flex-direction:column;gap:10px;margin:8px 0 12px}.planning-preferences-row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;width:100%}.planning-preferences label{display:flex;gap:5px;align-items:center;color:var(--muted);font-size:.78rem;font-weight:850}.planning-preferences input{min-height:40px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--navy);font:inherit;font-size:1rem;padding:6px 8px}.planning-preferences input[type="number"]{width:76px}.planning-preferences b{color:var(--muted);font-size:.82rem}@media(max-width:640px){.planning-preferences label{flex:1 1 130px;justify-content:space-between}.planning-preferences input[type="time"]{min-width:110px}}.planning-help{margin:2px 0 12px;padding:10px 12px;border-radius:10px;background:#f7f9fa;color:var(--ink);font-size:.82rem;line-height:1.45}.planning-help strong{color:var(--navy)}.current-planning-days{display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:8px}.planning-day{border:1px solid var(--line);border-radius:12px;padding:10px;min-width:0}.planning-day.preferred{background:#eef8f3}.planning-day.caution{background:#fff8df;border-color:#e7c978}.planning-day.redflag{background:#fff0ed;border-color:#dfa297}.planning-date{font-size:.78rem;font-weight:850;color:var(--navy)}.planning-status{font-size:.92rem;font-weight:900;margin-top:2px}.preferred .planning-status{color:#176246}.caution .planning-status{color:#775900}.redflag .planning-status{color:#9a3328}.planning-detail{font-size:.78rem;line-height:1.35;color:var(--ink);margin-top:5px}.planning-disclaimer{color:var(--muted);font-size:.75rem;margin-top:9px}@media(max-width:640px){.current-planning-days{grid-template-columns:1fr 1fr}.planning-detail{font-size:.8rem}}.current-chart-wrap .event-point,.current-chart-wrap .event-point:hover{cursor:default!important;pointer-events:none}.current-chart-wrap{margin-top:16px}.current-chart-svg{display:block;width:100%;height:auto;background:#f8fbfc;border:1px solid var(--line);border-radius:16px}.grid-line{stroke:#d9e4e8;stroke-width:1}.v-grid-line{stroke:#e6eef1;stroke-width:1}.day-grid-line{stroke:#b7cbd4;stroke-width:1.4}.zero-line{stroke:#17384a;stroke-width:2}.axis-label{fill:#657d89;font-size:11px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.y-label{text-anchor:end}.x-label{text-anchor:middle}.axis-title{fill:#657d89;font-size:11px;text-anchor:middle}.tide-y-label{text-anchor:start}.tide-range-bar{opacity:1;stroke-width:3;stroke-linecap:round;fill:none}.tide-range-bar.typical{stroke:#4a6473}.tide-range-bar.elevated{stroke:#d5ad28}.tide-range-bar.large{stroke:#d9791f}.tide-range-bar.exceptional{stroke:#c94a3f}.tide-range-value{font-size:11px;font-weight:900;text-anchor:middle;paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round;fill:#17384a}.tide-range-toggle{display:flex;align-items:center;gap:7px;color:var(--ink);font-size:.84rem;font-weight:800}.tide-range-toggle input{margin:0}.tide-range-legend{display:flex;gap:10px;flex-wrap:wrap;align-items:center;color:var(--muted);font-size:.76rem}.tide-range-key{display:inline-flex;align-items:center;gap:5px}.tide-range-swatch{width:11px;height:11px;border-radius:3px;display:inline-block}.tide-range-swatch.typical{background:#4a6473}.tide-range-swatch.elevated{background:#d5ad28}.tide-range-swatch.large{background:#d9791f}.tide-range-swatch.exceptional{background:#c94a3f}.night-window{fill:#aebdc4;opacity:.78}.sail-window{fill:#f8fbfc;opacity:.96}.preferred-window{fill:#f0d46d;opacity:.34}.flood-area{fill:#6d8fd0;opacity:.86}.ebb-area{fill:#0b9d83;opacity:.90}.current-line{fill:none;stroke:#214b62;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}.event-point{stroke:#fff;stroke-width:1.5}.event-point.flood{fill:#5478bd}.event-point.ebb{fill:#078a75}.event-point.slack{fill:#756d64}.event-time{fill:#17384a;font-size:9px;font-weight:800;text-anchor:middle;paint-order:stroke;stroke:#fff;stroke-width:2.5px;stroke-linejoin:round}.event-time.flood{fill:#294f91}.event-time.ebb{fill:#066c5d}.event-time.slack{fill:#514b46}.now-line{stroke:#c63a2b;stroke-width:2.5}.now-label{fill:#c63a2b;font-size:11px;font-weight:800}.chart-explainer{color:var(--ink);font-size:.94rem;line-height:1.45;margin:2px 0 12px}.chart-note{color:var(--muted);font-size:.82rem;margin-top:9px}.candidate-table{width:100%;border-collapse:collapse;font-size:.86rem}.candidate-table th,.candidate-table td{padding:10px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}.candidate-table th{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}.candidate-table td.num,.candidate-table th.num{text-align:right;white-space:nowrap}.candidate-good td.status{font-weight:800}.candidate-bad{opacity:.82}.candidate-selected{background:rgba(20,120,100,.08)}.candidate-selected td:first-child{font-weight:800}.candidate-note{color:var(--muted);font-size:.82rem;margin:0 0 12px}.candidate-scroll{overflow-x:auto}.candidate-link{color:var(--blue);text-decoration:none;font-weight:800}.candidate-link:hover{text-decoration:underline}.candidate-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:0 0 12px}.nearest-link{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:7px 12px;color:var(--blue);font-weight:800;text-decoration:none;background:#fff}.nearest-link:hover{background:var(--paper)}.map-card{overflow:hidden}.map-intro{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px}.map-help{color:var(--muted);font-size:.9rem;max-width:600px}.map-wrap{border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#dfecef}.location-map{height:390px;width:100%}.map-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px}.map-coordinate{font-variant-numeric:tabular-nums;color:var(--muted);font-size:.9rem}.map-go{display:inline-block;border:0;border-radius:999px;padding:10px 16px;background:var(--blue);color:#fff;font-weight:850;text-decoration:none;cursor:pointer}.map-go[aria-disabled="true"]{opacity:.45;pointer-events:none}.map-search-area{border:0;cursor:pointer}.map-search-area[aria-disabled="true"]{opacity:.55;pointer-events:none}.map-search-area[hidden]{display:none}.map-search-status{color:var(--muted);font-size:.82rem}.map-reset{border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:800;cursor:pointer}.map-reset:disabled{opacity:.45;cursor:default}.map-navigation{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}.map-state-controls{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:10px}.map-current-toggle{display:inline-flex;align-items:center;gap:7px;color:var(--ink);font-weight:750;font-size:.88rem}.map-current-toggle input{margin:0}.map-overlays-menu{position:relative}.map-overlays-menu summary{list-style:none;cursor:pointer;border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;font-size:.88rem}.map-overlays-menu summary::-webkit-details-marker{display:none}.map-overlays-menu summary::after{content:" ▾";font-size:.78em}.map-overlays-menu[open] summary::after{content:" ▴"}.map-overlays-panel{position:absolute;z-index:700;top:calc(100% + 6px);left:0;min-width:270px;max-width:min(360px,88vw);padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:#fff;box-shadow:0 10px 28px rgba(7,31,49,.18);display:flex;flex-direction:column;gap:10px}.map-overlays-menu#map-overlays-menu>.map-overlays-panel{top:auto;bottom:calc(100% + 6px);left:0;width:min(360px,calc(100vw - 24px));max-width:none;max-height:min(70vh,560px);overflow-y:auto;overscroll-behavior:contain}.map-overlay-group{border:1px solid var(--line);border-radius:10px;background:#fbfdfe;overflow:hidden}.map-overlay-group+ .map-overlay-group{margin-top:2px}.map-overlay-group>summary{list-style:none;cursor:pointer;padding:9px 10px;font-size:.78rem;font-weight:900;letter-spacing:.055em;text-transform:uppercase;color:var(--navy);display:flex;align-items:center;justify-content:space-between;gap:10px;background:#f5f9fa}.map-overlay-group>summary::-webkit-details-marker{display:none}.map-overlay-group>summary::after{content:"▸";font-size:.82rem;color:var(--muted);transition:transform .15s ease}.map-overlay-group[open]>summary::after{transform:rotate(90deg)}.map-overlay-group-body{display:flex;flex-direction:column;gap:8px;padding:9px 10px 10px}.map-overlay-group .map-overlay-toggle{font-size:.84rem}.map-overlay-group .map-overlay-toggle span{min-width:0}.map-overlay-note{max-height:150px;overflow:auto;padding-right:3px}.map-overlay-toggle{display:flex;align-items:flex-start;gap:8px;color:var(--ink);font-weight:750;font-size:.88rem;line-height:1.3}.map-overlay-toggle input{margin-top:2px}.map-overlay-note{color:var(--muted);font-size:.76rem;line-height:1.35;padding-top:2px;border-top:1px solid var(--line)}.map-overlay-help{margin-top:8px;color:var(--muted);font-size:.78rem;line-height:1.4}.map-overlay-help summary{cursor:pointer;color:var(--blue);font-weight:800}.map-overlay-help-body{margin-top:6px;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#f8fbfc}@media(max-width:600px){.map-overlays-menu#map-overlays-menu>.map-overlays-panel{width:calc(100vw - 20px)}}.map-center-panel{min-width:240px}.map-center-action{width:100%;border:0;border-radius:10px;padding:9px 10px;background:transparent;color:var(--ink);font:inherit;font-size:.88rem;font-weight:750;text-align:left;cursor:pointer}.map-center-action:hover,.map-center-action:focus-visible{background:var(--paper);outline:none}.map-center-action:disabled{opacity:.45;cursor:default;background:transparent}.map-nav-button{border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;cursor:pointer}.map-nav-button:disabled{opacity:.45;cursor:default}.map-layer-note{margin-top:8px;color:var(--muted);font-size:.8rem;line-height:1.4}.map-smoke-legend{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:8px;color:var(--muted);font-size:.78rem}.map-smoke-legend[hidden]{display:none}.map-smoke-legend span{display:inline-flex;align-items:center;gap:5px}.smoke-swatch{display:inline-block;width:18px;height:10px;border:1px solid rgba(70,70,70,.5);border-radius:2px}.smoke-swatch.light{background:rgba(174,181,184,.32)}.smoke-swatch.medium{background:rgba(226,163,63,.42)}.smoke-swatch.heavy{background:rgba(194,79,67,.52)}.map-smoke-note{font-style:italic}.map-symbol{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;margin-right:4px;font-size:27px;font-weight:950;line-height:1;vertical-align:-6px;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff,0 2px 3px rgba(0,0,0,.35)}
 .map-symbol.request{color:#126b91}.map-symbol.wind{color:#2f855a}.map-symbol.current{color:#7d55a6}.map-symbol.wind-candidate{color:#4f6978}
 .map-leaflet-symbol{background:transparent;border:0}
 .location-map,
@@ -6544,7 +5643,7 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 @media(max-width:600px){.map-resize-handle{height:22px}}
 .map-location-info-grid{display:grid;grid-template-columns:minmax(290px,.9fr) minmax(360px,1.1fr);gap:14px;align-items:stretch;margin-top:10px}.map-location-info-grid .map-coordinate-entry{margin-top:0;align-self:start}.selected-location-weather{margin-top:0;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:var(--paper);min-height:128px}.selected-location-weather-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:4px}.selected-location-weather-head strong{color:var(--navy);font-size:.95rem}.selected-location-weather-place{font-size:.84rem;font-weight:750;color:var(--ink);margin:0 0 7px}.selected-location-weather-updated{color:var(--muted);font-size:.75rem}.selected-location-weather-metrics{display:flex;gap:14px;flex-wrap:wrap;align-items:baseline}.selected-location-weather-metric{font-size:.88rem;color:var(--ink)}@media(max-width:700px){.map-location-info-grid{grid-template-columns:1fr}.selected-location-weather{min-height:0}}.selected-location-weather-metric b{color:var(--navy)}.selected-location-weather-forecast{margin:7px 0 0;color:var(--ink);font-size:.9rem}.selected-location-weather-note{margin:6px 0 0;color:var(--muted);font-size:.75rem}.selected-location-weather-error{margin:6px 0 0;color:#8b2c2c;font-size:.82rem}.map-coordinate-entry{display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-top:10px}.map-coordinate-field{display:flex;flex-direction:column;gap:3px}.map-coordinate-field label{font-size:.72rem;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}.map-coordinate-field input{width:132px;padding:7px 9px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--ink);font:inherit}.map-coordinate-use{padding:8px 12px;border:1px solid #126b91;border-radius:9px;background:#126b91;color:#fff;font-weight:850;cursor:pointer}.map-coordinate-use:hover{filter:brightness(.97)}.map-coordinate-error{font-size:.8rem;color:#9b3027;min-height:1.2em}
-.map-station-list{margin-top:12px}.map-station-list-title{font-weight:850;color:var(--navy);margin:0 0 8px}.map-station-table-wrap{max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:14px;background:#fff}.map-station-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.86rem}.map-station-table th,.map-station-table td{padding:8px 10px;border-top:1px solid var(--line);text-align:left;vertical-align:top;background:#fff}.map-station-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc}.map-station-table th{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}.map-station-table tbody tr:first-child td{border-top:0}.map-station-table a{color:var(--blue);font-weight:800;text-decoration:none}.map-station-table a:hover{text-decoration:underline}.map-scale-status{background:rgba(255,255,255,.94);border:1px solid #9fb5bf;border-radius:8px;padding:5px 8px;color:#234654;font-size:.74rem;font-weight:800;line-height:1.25;box-shadow:0 1px 4px rgba(25,55,70,.18);white-space:nowrap}.map-nautical-zoom-note{position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:850;background:rgba(7,31,49,.92);color:#fff;border-radius:999px;padding:7px 12px;font-size:.78rem;font-weight:850;box-shadow:0 2px 8px rgba(0,0,0,.2);pointer-events:none;white-space:nowrap;max-width:calc(100% - 32px);overflow:hidden;text-overflow:ellipsis}.map-overlay-toggle.is-unavailable{opacity:.5}.map-sst-legend{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-top:8px;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#f8fbfc;color:var(--muted);font-size:.76rem}.map-sst-bar{width:min(320px,60vw);height:12px;border-radius:999px;border:1px solid rgba(0,0,0,.16);background:linear-gradient(90deg,#263b9b 0%,#1677d2 18%,#1ccad8 36%,#65c94f 54%,#f0d63a 72%,#f28b2d 86%,#c9342f 100%)}.map-sst-scale{display:flex;gap:10px;align-items:center;justify-content:space-between;min-width:min(320px,60vw);font-weight:800;color:var(--ink)}.map-sst-note{flex:1 1 260px}.map-sst-legend[hidden]{display:none}.map-chl-field-legend{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-top:8px;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#f8fbfc;color:var(--muted);font-size:.76rem}.map-chl-field-bar{width:min(320px,60vw);height:12px;border-radius:999px;border:1px solid rgba(0,0,0,.16);background:linear-gradient(90deg,#334db3 0%,#2485c6 20%,#2fc6be 40%,#68ce63 60%,#d4dc45 80%,#e4b83f 100%)}.map-chl-field-scale{display:flex;gap:8px;align-items:center;justify-content:space-between;min-width:min(320px,60vw);font-weight:800;color:var(--ink)}.map-chl-field-note{flex:1 1 300px}.map-chl-field-legend[hidden]{display:none}.map-chl-field-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-chl-field-status[hidden]{display:none}.map-chl-legend{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:8px;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#f8fbfc;color:var(--muted);font-size:.76rem}.map-chl-contour-key{display:inline-flex;align-items:center;gap:5px;font-weight:800;color:var(--ink)}.map-chl-contour-line{display:inline-block;width:34px;height:0;border-top-style:solid;filter:drop-shadow(0 0 1px #102a38)}.map-chl-contour-line.c02{border-top-width:2px;border-top-color:#63e6ff}.map-chl-contour-line.c03{border-top-width:4px;border-top-color:#fffde7}.map-chl-contour-line.c05{border-top-width:2px;border-top-color:#ffd166}.map-chl-note{flex:1 1 320px}.map-chl-legend[hidden]{display:none}.map-chl-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-chl-status[hidden]{display:none}.map-structure-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-structure-status[hidden]{display:none}.map-fishing-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-fishing-status[hidden]{display:none}.map-fishing-legend{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:8px;padding:7px 9px;border:1px solid var(--line);border-radius:10px;background:#f8fbfc;color:var(--muted);font-size:.75rem}.map-fishing-legend[hidden]{display:none}.map-fishing-key{display:inline-flex;align-items:center;gap:5px}.map-fishing-dot{width:10px;height:10px;border-radius:50%;display:inline-block;border:2px solid #fff;box-shadow:0 0 0 1px #173645}.map-fishing-dot.albacore{background:#18a6a6}.map-fishing-dot.bluefin{background:#2658b8}.map-fishing-zone-key{width:18px;height:10px;border:2px dashed #2658b8;background:rgba(38,88,184,.12);display:inline-block}.map-undersea-feature-label{background:transparent!important;border:0!important;box-shadow:none!important;white-space:nowrap;pointer-events:none}.map-undersea-feature-label .undersea-dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;background:#ffd166;border:1px solid #20323c;vertical-align:1px;box-shadow:0 0 0 1px rgba(255,255,255,.75)}.map-undersea-feature-label .undersea-name{font-size:13px;font-weight:850;letter-spacing:.01em;color:#fff7d1;text-shadow:-2px -2px 0 #102a38,2px -2px 0 #102a38,-2px 2px 0 #102a38,2px 2px 0 #102a38,0 2px 3px rgba(0,0,0,.85)}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#2f855a}.map-dot.current{background:#7d55a6}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}
+.map-station-list{margin-top:12px}.map-station-list-title{font-weight:850;color:var(--navy);margin:0 0 8px}.map-station-table-wrap{max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:14px;background:#fff}.map-station-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.86rem}.map-station-table th,.map-station-table td{padding:8px 10px;border-top:1px solid var(--line);text-align:left;vertical-align:top;background:#fff}.map-station-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc}.map-station-table th{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}.map-station-table tbody tr:first-child td{border-top:0}.map-station-table a{color:var(--blue);font-weight:800;text-decoration:none}.map-station-table a:hover{text-decoration:underline}.map-scale-status{background:rgba(255,255,255,.94);border:1px solid #9fb5bf;border-radius:8px;padding:5px 8px;color:#234654;font-size:.74rem;font-weight:800;line-height:1.25;box-shadow:0 1px 4px rgba(25,55,70,.18);white-space:nowrap}.map-nautical-zoom-note{position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:850;background:rgba(7,31,49,.92);color:#fff;border-radius:999px;padding:7px 12px;font-size:.78rem;font-weight:850;box-shadow:0 2px 8px rgba(0,0,0,.2);pointer-events:none;white-space:nowrap;max-width:calc(100% - 32px);overflow:hidden;text-overflow:ellipsis}.map-overlay-toggle.is-unavailable{opacity:.5}.map-structure-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-structure-status[hidden]{display:none}.map-saildrone-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-saildrone-status[hidden]{display:none}.map-undersea-feature-label{background:transparent!important;border:0!important;box-shadow:none!important;white-space:nowrap;pointer-events:none}.map-undersea-feature-label .undersea-dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;background:#ffd166;border:1px solid #20323c;vertical-align:1px;box-shadow:0 0 0 1px rgba(255,255,255,.75)}.map-undersea-feature-label .undersea-name{font-size:13px;font-weight:850;letter-spacing:.01em;color:#fff7d1;text-shadow:-2px -2px 0 #102a38,2px -2px 0 #102a38,-2px 2px 0 #102a38,2px 2px 0 #102a38,0 2px 3px rgba(0,0,0,.85)}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#2f855a}.map-dot.current{background:#7d55a6}.map-dot.saildrone{width:12px;height:12px;background:#8d3fb0;border:2px solid #fff;box-shadow:0 0 0 1px #8d3fb0}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}
 .offshore-trip-card{border-left:5px solid #126b91}.offshore-trip-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap}.offshore-trip-coords{color:var(--muted);font-size:.82rem;font-weight:750}.offshore-trip-summary{margin:10px 0 12px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:#f7fbfc}.offshore-trip-summary strong{color:var(--navy)}.offshore-trip-metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:10px 0}.offshore-trip-metric{padding:9px 10px;border:1px solid var(--line);border-radius:11px;background:#fff}.offshore-trip-metric .label{font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:850}.offshore-trip-metric .value{margin-top:3px;color:var(--navy);font-weight:900;font-size:1rem}.offshore-trip-buoy{margin:4px 0 8px;color:var(--ink);font-size:.86rem}.offshore-trip-watch{margin:8px 0 0;padding-left:20px;color:var(--ink)}.offshore-trip-watch li{margin:3px 0}.offshore-trip-forecast{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px}.offshore-trip-period{padding:10px 12px;border:1px solid var(--line);border-radius:11px;background:#fbfdfe}.offshore-trip-period strong{display:block;color:var(--navy);margin-bottom:3px}.offshore-trip-period p{margin:0;line-height:1.42;font-size:.88rem}.offshore-trip-note{margin:9px 0 0;color:var(--muted);font-size:.78rem;line-height:1.45}.offshore-trip-error{color:#8b2c2c;font-size:.88rem}.offshore-trip-loading{color:var(--muted);font-weight:750}.fishing-planning{margin-top:18px;padding-top:16px;border-top:2px solid #dce8ed}.fishing-planning-head{display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap}.fishing-planning-head h3{margin:0;color:var(--navy);font-size:1.05rem}.fishing-planning-status{color:var(--muted);font-size:.78rem}.fishing-planning-summary{margin:10px 0;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:#fffdf5;line-height:1.45}.fishing-planning-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.fishing-planning-item{padding:10px 11px;border:1px solid var(--line);border-radius:11px;background:#fff}.fishing-planning-item .label{font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:850}.fishing-planning-item .value{margin-top:3px;color:var(--navy);font-weight:900;line-height:1.25}.fishing-planning-item .detail{margin-top:4px;color:var(--muted);font-size:.77rem;line-height:1.35}.fishing-planning-error{margin:8px 0 0;color:#8b2c2c;font-size:.82rem}@media(max-width:850px){.fishing-planning-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:520px){.fishing-planning-grid{grid-template-columns:1fr}}@media(max-width:800px){.offshore-trip-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:640px){.offshore-trip-forecast{grid-template-columns:1fr}}.marine-forecast-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap}
 .marine-forecast-zone{color:var(--muted);font-size:.84rem;font-weight:750}
 .marine-alerts{margin:8px 0 14px;display:flex;gap:7px;flex-wrap:wrap}
@@ -6564,7 +5663,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 <section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Open the full planning dashboard for location, wind, currents, forecasts, map layers, and customization controls.</p></div><a id="planning-page-link" class="planning-page-link" href="{{.PlanningDetailsURL}}">Planning and Details →</a></section>
 {{else}}
 <section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Full planning dashboard and customization controls.</p></div><a class="planning-page-link" href="{{.ConditionsURL}}">← Back to Conditions Now</a></section>
-<section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map to choose a sailing location, then use Find stations near selected location. The latitude/longitude fields always show the current map center; you may edit them and use Center Map → Latitude & Longitude to pan there without changing the selected sailing location. My location also centers the map only. Panning changes the view, not the selected ★ location. Click a nearby wind station to pin its details and preview the associated currents station, then use the selection link in the map panel to commit the wind-station choice. Candidate stations and distances always refer to the selected location.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-nautical-zoom-note" class="map-nautical-zoom-note" hidden aria-live="polite">Nautical chart available at Zoom 9+.</div><div id="map-resize-handle" class="map-resize-handle" role="separator" aria-label="Resize map vertically" aria-orientation="horizontal" aria-valuemin="260" aria-valuemax="900" aria-valuenow="390" aria-grabbed="false" tabindex="0" title="Drag up or down to resize map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-state-controls" aria-label="Map controls"><details id="map-types-menu" class="map-overlays-menu"><summary>Map Types</summary><div class="map-overlays-panel"><label class="map-overlay-toggle"><input type="radio" name="map-type" value="map"> <span>Street Map</span></label><label id="map-type-nautical-label" class="map-overlay-toggle"><input id="map-type-nautical" type="radio" name="map-type" value="nautical"> <span>Nautical Chart <small>(Zoom 9+)</small></span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="satellite"> <span>Satellite</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="hybrid"> <span>Hybrid</span></label></div></details><details id="map-overlays-menu" class="map-overlays-menu"><summary>Map Overlays</summary><div class="map-overlays-panel"><label id="map-marine-zone-control" class="map-overlay-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-smoke"> <span>Satellite smoke (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-sst"> <span>Sea Surface Temp (NOAA CoastWatch)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-chlorophyll-field"> <span>Chlorophyll Field (NOAA gap-filled 2 km · land-clipped)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-chlorophyll"> <span>Chlorophyll Contours (NOAA gap-filled 2 km)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-structure"> <span>Underwater Structure (NOAA bathymetry + names)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-fishing-reports"> <span>Fishing Reports (external data file)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-clouds"> <span>Satellite Cloud Cover (NOAA)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-radar"> <span>Weather radar (NOAA/NWS)</span></label><div class="map-overlay-note">Sea Surface Temp uses NOAA CoastWatch Geo-Polar Blended daily analysed sea-surface temperature imagery with the dataset's own native land/no-data transparency preserved. The fixed fishing-oriented color scale emphasizes temperature breaks and boundaries between cooler and warmer water. It is a multi-satellite global Level-4 analysis at about 5 km resolution; the shoreline edge is therefore coarse in bays and estuaries, and this layer is intended for regional/offshore temperature gradients rather than precise shoreline interpretation. Chlorophyll Field uses NOAA CoastWatch multi-sensor Level-4 DINEOF gap-filled daily chlorophyll-a at about 2 km as a restrained semi-transparent background raster so broad water-mass features remain visible. Chlorophyll Contours are a separate overlay derived from the same NOAA numeric grid and draw only three concentration contours: 0.2, 0.3, and 0.5 mg/m³. Use either layer independently or combine them with Sea Surface Temp and underwater structure. NOAA performs the cloud-gap filling upstream. Underwater Structure combines NOAA/NCEI ETOPO shaded relief with NOAA Marine Cadastre official undersea feature points. Fishing-relevant features such as seamounts, banks, ridges, hills, knolls, shoals, reefs, rises, plateaus, pinnacles, and escarpments are labeled locally for better contrast. It is intended for fishing-planning context, not navigation; smaller pinnacles may not appear in the global relief model. Fishing Reports is loaded from assets/fishing_reports.json so report updates do not require changing Go or map UI code. Exact positions are plotted only when the source provides them; fisherman shorthand such as “20×20” is shown as a derived approximate position with an uncertainty circle, and broad reports such as “Cordell to Monterey” are shown as regional zones rather than fake point coordinates. Satellite Cloud Cover uses NOAA/NESDIS GOES imagery rendered for the current map view; daylight areas appear natural-color-like and nighttime areas use infrared imagery. Radar uses Iowa State IEM's Web-Mercator CONUS NEXRAD N0Q WMS layer; a clear/transparent radar layer can simply mean no precipitation echoes are present.</div></div></details><details id="map-center-menu" class="map-overlays-menu"><summary>Center Map</summary><div class="map-overlays-panel map-center-panel"><button type="button" id="map-geolocate" class="map-center-action" title="Center the map on your device location without changing the selected location">My location</button><button type="button" id="map-nav-coordinates" class="map-center-action" title="Center the map on the latitude and longitude shown below">Latitude &amp; Longitude</button><button type="button" id="map-nav-selected" class="map-center-action" {{if not .MapHasRequest}}disabled{{end}}>Selected location</button><button type="button" id="map-nav-wind" class="map-center-action" {{if not .MapHasWind}}disabled{{end}}>Selected wind station</button><button type="button" id="map-nav-current" class="map-center-action" {{if not .MapHasCurrent}}disabled{{end}}>Selected currents station</button></div></details><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}" {{if not .MapHasRequest}}disabled{{end}}>Clear selected location &amp; candidates</button></div><div class="map-location-info-grid"><div class="map-coordinate-entry" aria-label="Map center coordinates"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLat}}" aria-label="Map center latitude"></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLon}}" aria-label="Map center longitude"></div><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div id="selected-location-weather" class="selected-location-weather" aria-live="polite"><div class="selected-location-weather-head"><strong>Local Conditions</strong><span id="selected-location-weather-updated" class="selected-location-weather-updated">{{if .SelectedWeatherUpdated}}Updated {{.SelectedWeatherUpdated}}{{end}}</span></div><div id="selected-location-weather-place" class="selected-location-weather-place">{{if .MapHasRequest}}{{if .SelectedWeatherLocation}}{{.SelectedWeatherLocation}}{{else}}Near selected location{{end}}{{else}}Select a location for local conditions{{end}}</div><div id="selected-location-weather-content" {{if not .MapHasRequest}}hidden{{end}}><div class="selected-location-weather-metrics"><span class="selected-location-weather-metric"><b>Air temp:</b> <span id="selected-location-weather-air">{{if .SelectedWeatherAirTemp}}{{.SelectedWeatherAirTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>High:</b> <span id="selected-location-weather-high">{{if .SelectedWeatherHighTemp}}{{.SelectedWeatherHighTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>Low:</b> <span id="selected-location-weather-low">{{if .SelectedWeatherLowTemp}}{{.SelectedWeatherLowTemp}}{{else}}—{{end}}</span></span></div><p id="selected-location-weather-forecast" class="selected-location-weather-forecast" {{if not .SelectedWeatherShortForecast}}hidden{{end}}>{{.SelectedWeatherShortForecast}}</p><p id="selected-location-weather-error" class="selected-location-weather-error" {{if not .SelectedWeatherError}}hidden{{end}}>{{.SelectedWeatherError}}</p><p class="selected-location-weather-note">NWS point forecast near the selected location. Air temperature is the current-hour forecast, not a direct observation.</p></div></div></div><div class="map-controls"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Select a location to find stations</span><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-weather-overlay-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div id="map-sst-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-structure-status" class="map-structure-status" hidden></div><div id="map-chl-field-legend" class="map-chl-field-legend" hidden><strong>Chlorophyll Field</strong><span class="map-chl-field-bar" aria-hidden="true"></span><span class="map-chl-field-scale"><span>0.1</span><span>0.2</span><span>0.3</span><span>0.5</span><span>0.7</span><span>1 mg/m³</span></span><span class="map-chl-field-note">Semi-transparent NOAA gap-filled chlorophyll background. Blue/cyan = lower chlorophyll / cleaner water; green/yellow = higher chlorophyll. Use this layer to see broad water-mass features such as pockets and eddies.</span></div><div id="map-chl-field-status" class="map-chl-field-status" hidden></div><div id="map-chl-legend" class="map-chl-legend" hidden><strong>Chlorophyll Contours</strong><span class="map-chl-contour-key"><i class="map-chl-contour-line c02"></i>0.2 mg/m³</span><span class="map-chl-contour-key"><i class="map-chl-contour-line c03"></i>0.3 mg/m³</span><span class="map-chl-contour-key"><i class="map-chl-contour-line c05"></i>0.5 mg/m³</span><span class="map-chl-note">Exact chlorophyll concentration contours from the NOAA numeric grid. The 0.3 mg/m³ line is emphasized as the primary clear-water transition reference; compare it with Sea Surface Temp breaks and offshore structure.</span></div><div id="map-chl-status" class="map-chl-status" hidden></div><div id="map-fishing-legend" class="map-fishing-legend" hidden><strong>Fishing Reports</strong><span class="map-fishing-key"><i class="map-fishing-dot albacore"></i>Albacore</span><span class="map-fishing-key"><i class="map-fishing-dot bluefin"></i>Bluefin</span><span class="map-fishing-key"><i class="map-fishing-zone-key"></i>Broad regional report</span><span>Dashed uncertainty circles = derived shorthand positions.</span></div><div id="map-fishing-status" class="map-fishing-status" hidden></div><div id="map-sst-legend" class="map-sst-legend" hidden><strong>Sea Surface Temp / Temp Breaks</strong><span class="map-sst-bar" aria-hidden="true"></span><span class="map-sst-scale"><span>35°F</span><span>45</span><span>55</span><span>65</span><span>75</span><span>85</span><span>95°F</span></span><span class="map-sst-note">Fixed 35–95°F NOAA sea-surface temperature scale in 1°F bands. The wider fixed range preserves headroom for warm tropical/subtropical water and strong El Niño conditions while still showing regional temperature breaks; values below/above the range saturate at the end colors. NOAA Geo-Polar Blended daily sea-surface temperature, about 5 km resolution. The server reprojects the latitude/longitude raster into Leaflet Web Mercator before display, while preserving CoastWatch land/no-data transparency. Source-grid detail remains coarse near complex shorelines, so use the layer for regional/offshore gradients rather than shoreline-scale temperature.</span></div><div class="map-layer-note">Drag the handle directly below the map to make the map taller or shorter. Keyboard users can focus the handle and use ↑/↓ (Shift for larger steps).</div><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
+<section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map to choose a sailing location, then use Find stations near selected location. The latitude/longitude fields always show the current map center; you may edit them and use Center Map → Latitude & Longitude to pan there without changing the selected sailing location. My location also centers the map only. Panning changes the view, not the selected ★ location. Click a nearby wind station to pin its details and preview the associated currents station, then use the selection link in the map panel to commit the wind-station choice. Candidate stations and distances always refer to the selected location.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-nautical-zoom-note" class="map-nautical-zoom-note" hidden aria-live="polite">Nautical chart available at Zoom 9+.</div><div id="map-resize-handle" class="map-resize-handle" role="separator" aria-label="Resize map vertically" aria-orientation="horizontal" aria-valuemin="260" aria-valuemax="900" aria-valuenow="390" aria-grabbed="false" tabindex="0" title="Drag up or down to resize map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-state-controls" aria-label="Map controls"><details id="map-types-menu" class="map-overlays-menu"><summary>Map Types</summary><div class="map-overlays-panel"><label class="map-overlay-toggle"><input type="radio" name="map-type" value="map"> <span>Street Map</span></label><label id="map-type-nautical-label" class="map-overlay-toggle"><input id="map-type-nautical" type="radio" name="map-type" value="nautical"> <span>Nautical Chart <small>(Zoom 9+)</small></span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="satellite"> <span>Satellite</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="hybrid"> <span>Hybrid</span></label></div></details><details id="map-overlays-menu" class="map-overlays-menu"><summary>Map Overlays</summary><div class="map-overlays-panel"><details class="map-overlay-group"><summary>Weather &amp; Hazards</summary><div class="map-overlay-group-body"><label id="map-marine-zone-control" class="map-overlay-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-smoke"> <span>Satellite smoke (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-clouds"> <span>Satellite Cloud Cover (NOAA)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-radar"> <span>Weather radar (NOAA/NWS)</span></label></div></details><details class="map-overlay-group" open><summary>Terrain &amp; Seafloor</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-structure"> <span>Topography &amp; Bathymetry (NOAA ETOPO + offshore feature names)</span></label></div></details><details class="map-overlay-group"><summary>Observations</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-saildrone"> <span>Saildrone Observations (NOAA PMEL)</span></label></div></details></div></details><details id="map-center-menu" class="map-overlays-menu"><summary>Center Map</summary><div class="map-overlays-panel map-center-panel"><button type="button" id="map-geolocate" class="map-center-action" title="Center the map on your device location without changing the selected location">My location</button><button type="button" id="map-nav-coordinates" class="map-center-action" title="Center the map on the latitude and longitude shown below">Latitude &amp; Longitude</button><button type="button" id="map-nav-selected" class="map-center-action" {{if not .MapHasRequest}}disabled{{end}}>Selected location</button><button type="button" id="map-nav-wind" class="map-center-action" {{if not .MapHasWind}}disabled{{end}}>Selected wind station</button><button type="button" id="map-nav-current" class="map-center-action" {{if not .MapHasCurrent}}disabled{{end}}>Selected currents station</button></div></details><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}" {{if not .MapHasRequest}}disabled{{end}}>Clear selected location &amp; candidates</button></div><div class="map-location-info-grid"><div class="map-coordinate-entry" aria-label="Map center coordinates"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLat}}" aria-label="Map center latitude"></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLon}}" aria-label="Map center longitude"></div><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div id="selected-location-weather" class="selected-location-weather" aria-live="polite"><div class="selected-location-weather-head"><strong>Local Conditions</strong><span id="selected-location-weather-updated" class="selected-location-weather-updated">{{if .SelectedWeatherUpdated}}Updated {{.SelectedWeatherUpdated}}{{end}}</span></div><div id="selected-location-weather-place" class="selected-location-weather-place">{{if .MapHasRequest}}{{if .SelectedWeatherLocation}}{{.SelectedWeatherLocation}}{{else}}Near selected location{{end}}{{else}}Select a location for local conditions{{end}}</div><div id="selected-location-weather-content" {{if not .MapHasRequest}}hidden{{end}}><div class="selected-location-weather-metrics"><span class="selected-location-weather-metric"><b>Air temp:</b> <span id="selected-location-weather-air">{{if .SelectedWeatherAirTemp}}{{.SelectedWeatherAirTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>High:</b> <span id="selected-location-weather-high">{{if .SelectedWeatherHighTemp}}{{.SelectedWeatherHighTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>Low:</b> <span id="selected-location-weather-low">{{if .SelectedWeatherLowTemp}}{{.SelectedWeatherLowTemp}}{{else}}—{{end}}</span></span></div><p id="selected-location-weather-forecast" class="selected-location-weather-forecast" {{if not .SelectedWeatherShortForecast}}hidden{{end}}>{{.SelectedWeatherShortForecast}}</p><p id="selected-location-weather-error" class="selected-location-weather-error" {{if not .SelectedWeatherError}}hidden{{end}}>{{.SelectedWeatherError}}</p><p class="selected-location-weather-note">NWS point forecast near the selected location. Air temperature is the current-hour forecast, not a direct observation.</p></div></div></div><div class="map-controls"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Select a location to find stations</span><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><details class="map-overlay-help"><summary>Map overlay details</summary><div class="map-overlay-help-body">Topography & Bathymetry combines NOAA/NCEI ETOPO land topography and seafloor bathymetry with NOAA Marine Cadastre official named offshore features. Fishing-relevant features such as seamounts, banks, ridges, hills, knolls, shoals, reefs, rises, plateaus, pinnacles, and escarpments are labeled locally for better contrast. It is intended for fishing-planning context, not navigation; smaller pinnacles may not appear in the global relief model. Saildrone Observations uses NOAA PMEL public ERDDAP mission data and plots the latest reported position and met-ocean readings from configured 2026 NOAA Saildrone missions; availability is mission-dependent and these moving platforms are not a fixed station network. Exact positions are plotted only when the source provides them; fisherman shorthand such as “20×20” is shown as a derived approximate position with an uncertainty circle, and broad reports such as “Cordell to Monterey” are shown as regional zones rather than fake point coordinates. Satellite Cloud Cover uses NOAA/NESDIS GOES imagery rendered for the current map view; daylight areas appear natural-color-like and nighttime areas use infrared imagery. Radar uses Iowa State IEM's Web-Mercator CONUS NEXRAD N0Q WMS layer; a clear/transparent radar layer can simply mean no precipitation echoes are present.</div></details><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-weather-overlay-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div id="map-structure-status" class="map-structure-status" hidden></div><div id="map-saildrone-status" class="map-saildrone-status" hidden></div><div class="map-layer-note">Drag the handle directly below the map to make the map taller or shorter. Keyboard users can focus the handle and use ↑/↓ (Shift for larger steps).</div><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span><span class="map-key"><span class="map-dot saildrone" aria-hidden="true"></span>Saildrone latest position</span></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
 {{if .WindError}}<section class="card full error-card"><h2>Wind station selection unavailable</h2><p class="error-message">{{.WindError}}</p><p class="error-help">The page is still available so you can inspect the request and nearby station diagnostics. Try nearby coordinates or an explicit NDBC station ID.</p></section>{{end}}
 <section class="card full wind-card"><div class="wind-card-head"><h2>Wind</h2><label class="wind-unit-control" for="wind-unit-select">Wind speed<select id="wind-unit-select"><option value="kts" {{if eq .WindUnit "kts"}}selected{{end}}>Knots</option><option value="mph" {{if eq .WindUnit "mph"}}selected{{end}}>MPH</option></select></label></div>
 <div class="metrics">
@@ -6603,13 +5702,13 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 <div id="offshore-trip-forecast" class="offshore-trip-forecast"></div>
 <p class="offshore-trip-note">Observed values come from the nearest usable NDBC station found near the selected destination. Forecast text and alerts come from the NWS forecast zone for the selected point. The buoy may be tens of miles from the destination and the zone forecast covers a broad area; use this as planning context, not a point-specific guarantee.</p>
 <div id="fishing-planning" class="fishing-planning">
-<div class="fishing-planning-head"><h3>Fishing Planning</h3><span id="fishing-planning-status" class="fishing-planning-status">Loading water and fishing context…</span></div>
+<div class="fishing-planning-head"><h3>Fishing Planning</h3><span id="fishing-planning-status" class="fishing-planning-status">Loading nearby offshore feature…</span></div>
 <div id="fishing-planning-summary" class="fishing-planning-summary">Select a ★ destination to evaluate the fishing setup.</div>
 <div class="fishing-planning-grid">
-<div class="fishing-planning-item"><div class="label">Sea Surface Temp</div><div id="fishing-planning-sst" class="value">—</div><div id="fishing-planning-sst-detail" class="detail"></div></div>
-<div class="fishing-planning-item"><div class="label">Chlorophyll</div><div id="fishing-planning-chl" class="value">—</div><div id="fishing-planning-chl-detail" class="detail"></div></div>
-<div class="fishing-planning-item"><div class="label">Structure</div><div id="fishing-planning-structure" class="value">—</div><div id="fishing-planning-structure-detail" class="detail"></div></div>
-<div class="fishing-planning-item"><div class="label">Recent reports</div><div id="fishing-planning-reports" class="value">—</div><div id="fishing-planning-reports-detail" class="detail"></div></div>
+
+
+<div class="fishing-planning-item"><div class="label">Nearby Offshore Feature</div><div id="fishing-planning-structure" class="value">—</div><div id="fishing-planning-structure-detail" class="detail"></div></div>
+
 </div>
 <p id="fishing-planning-error" class="fishing-planning-error" hidden></p>
 </div>
@@ -6694,21 +5793,8 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   map.getPane("underseaNamesPane").style.zIndex = 425;
   map.getPane("underseaNamesPane").style.pointerEvents = "none";
 
-  map.createPane("fishingReportsPane");
-  map.getPane("fishingReportsPane").style.zIndex = 428;
-
-
-  map.createPane("sstOverlayPane");
-  map.getPane("sstOverlayPane").style.zIndex = 420;
-  map.getPane("sstOverlayPane").style.pointerEvents = "none";
-
-  map.createPane("chlorophyllFieldPane");
-  map.getPane("chlorophyllFieldPane").style.zIndex = 421;
-  map.getPane("chlorophyllFieldPane").style.pointerEvents = "none";
-
-  map.createPane("chlorophyllOverlayPane");
-  map.getPane("chlorophyllOverlayPane").style.zIndex = 423;
-  map.getPane("chlorophyllOverlayPane").style.pointerEvents = "none";
+  map.createPane("saildronePane");
+  map.getPane("saildronePane").style.zIndex = 432;
 
   map.createPane("cloudOverlayPane");
   map.getPane("cloudOverlayPane").style.zIndex = 430;
@@ -6729,6 +5815,23 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   map.createPane("smokeOutlinePane");
   map.getPane("smokeOutlinePane").style.zIndex = 470;
   map.getPane("smokeOutlinePane").style.pointerEvents = "none";
+
+
+
+  var overlayGroups = document.querySelectorAll("#map-overlays-menu .map-overlay-group");
+  for (var overlayGroupIndex = 0; overlayGroupIndex < overlayGroups.length; overlayGroupIndex++) {
+    (function(group) {
+      group.addEventListener("toggle", function() {
+        if (!group.open) return;
+        for (var otherIndex = 0; otherIndex < overlayGroups.length; otherIndex++) {
+          var otherGroup = overlayGroups[otherIndex];
+          if (otherGroup !== group && otherGroup.open) {
+            otherGroup.removeAttribute("open");
+          }
+        }
+      });
+    })(overlayGroups[overlayGroupIndex]);
+  }
 
   var resizeHandle = document.getElementById("map-resize-handle");
   if (resizeHandle) {
@@ -6930,10 +6033,6 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     document.querySelectorAll('input[name="map-type"]').forEach(function(input) {
       input.checked = input.value === preferredMapLayerName;
     });
-
-    if (sstLayer && mapState.sstOverlayVisible && map.hasLayer(sstLayer)) {
-      sstLayer.bringToFront();
-    }
     if (cloudLayer && mapState.cloudOverlayVisible && map.hasLayer(cloudLayer)) {
       cloudLayer.bringToFront();
     }
@@ -6978,32 +6077,17 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 
   // These overlay objects must remain live for the checkbox handlers below.
   // Do not reinitialize cloudLayer or radarLayer to null later in this script.
-  var sstLatestTime = "";
-  var sstMetadataLoaded = false;
-  var sstMetadataLoading = false;
-  var sstLayer = null;
-  var sstObjectURL = "";
-  var sstRequestSerial = 0;
-  var sstRefreshTimer = null;
-
-  var chlLatestTime = "";
-  var chlMetadataLoaded = false;
-  var chlMetadataLoading = false;
-  var chlLayer = null;
-  var chlObjectURL = "";
-  var chlRequestSerial = 0;
-  var chlRefreshTimer = null;
-
-  var chlFieldLayer = null;
-  var chlFieldObjectURL = "";
-  var chlFieldRequestSerial = 0;
-  var chlFieldRefreshTimer = null;
-
   var structureReliefLayer = null;
   var structureNamesLayer = null;
   var structureRequestSerial = 0;
   var structureRefreshTimer = null;
-  var fishingReportsLayer = null;
+  var saildroneLayer = null;
+  var saildroneStatusSummary = {
+    total: 0,
+    stale: 0,
+    failed: 0,
+    oldestAgeHours: null
+  };
   var structureReliefServiceURL =
     "https://gis.ngdc.noaa.gov/arcgis/rest/services/etopo1/MapServer/export";
   var structureNamesServiceURL =
@@ -7028,8 +6112,8 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     }
   );
 
-  function setSSTStatus(message, isError) {
-    var status = document.getElementById("map-sst-status");
+  function setSaildroneStatus(message, isError) {
+    var status = document.getElementById("map-saildrone-status");
     if (!status) return;
     message = String(message || "").trim();
     status.hidden = !message;
@@ -7037,855 +6121,166 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     status.style.color = isError ? "#9a352f" : "";
   }
 
-  function setSSTLegendVisible(visible) {
-    var legend = document.getElementById("map-sst-legend");
-    if (legend) legend.hidden = !visible;
+  function formatSaildroneAgeHours(hours) {
+    var n = Number(hours);
+    if (!Number.isFinite(n) || n < 0) return "";
+    if (n < 48) return n.toFixed(n < 10 ? 1 : 0) + " h";
+    return (n / 24).toFixed(n < 120 ? 1 : 0) + " days";
   }
 
-  function formatSSTDatasetTime(value) {
-    var parsed = new Date(value);
-    if (!Number.isFinite(parsed.getTime())) return String(value || "");
-    return parsed.toLocaleString([], {
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-      timeZoneName: "short"
+  function updateSaildroneViewportStatus() {
+    if (!mapState.saildroneVisible || !saildroneLayer) return;
+
+    var total = Number(saildroneStatusSummary.total) || 0;
+    var visible = 0;
+    var viewBounds = map.getBounds();
+
+    saildroneLayer.eachLayer(function(layer) {
+      if (!layer.getLatLng) return;
+      var latLng = layer.getLatLng();
+      if (latLng && viewBounds.contains(latLng)) visible++;
     });
-  }
 
-  function ensureSSTMetadata(callback) {
-    if (sstMetadataLoaded) {
-      callback(true);
-      return;
-    }
-    if (sstMetadataLoading) {
-      window.setTimeout(function() { ensureSSTMetadata(callback); }, 120);
-      return;
-    }
-
-    sstMetadataLoading = true;
-    fetch("/sst-info", {headers: {"Accept":"application/json"}})
-      .then(function(response) {
-        if (!response.ok) throw new Error("HTTP " + response.status);
-        return response.json();
-      })
-      .then(function(payload) {
-        sstMetadataLoading = false;
-        sstLatestTime = String(payload.time || "");
-        if (!sstLatestTime) throw new Error("missing dataset time");
-        sstMetadataLoaded = true;
-        callback(true);
-      })
-      .catch(function(err) {
-        sstMetadataLoading = false;
-        // ERDDAP defines time=current as the latest available field, so
-        // metadata failure must not prevent the SST image from rendering.
-        sstLatestTime = "current";
-        sstMetadataLoaded = true;
-        setSSTStatus("NOAA CoastWatch SST · using latest available daily field.", false);
-        callback(true);
-      });
-  }
-
-  function sstOverlayURL(bounds) {
-    var mapSize = map.getSize();
-    // ERDDAP renders a latitude/longitude raster on demand; the server then
-    // reprojects its scanlines into Leaflet/Web-Mercator geometry. Keep the
-    // request modest and avoid Retina/device-pixel doubling so it loads reliably.
-    var width = Math.max(256, Math.min(1200, Math.round(mapSize.x)));
-    var height = Math.max(256, Math.min(900, Math.round(mapSize.y)));
-    var params = new URLSearchParams();
-    params.set("west", bounds.getWest().toFixed(6));
-    params.set("south", bounds.getSouth().toFixed(6));
-    params.set("east", bounds.getEast().toFixed(6));
-    params.set("north", bounds.getNorth().toFixed(6));
-    params.set("width", String(width));
-    params.set("height", String(height));
-    if (sstLatestTime) params.set("time", sstLatestTime);
-    return "/sst-overlay?" + params.toString();
-  }
-
-  function sstCanonicalViewport(bounds) {
-    var centerLng = map.getCenter().lng;
-    var world = Math.floor((centerLng + 180) / 360);
-    var worldWest = -180 + 360 * world;
-    var worldEast = 180 + 360 * world;
-
-    var displayWest = Math.max(bounds.getWest(), worldWest);
-    var displayEast = Math.min(bounds.getEast(), worldEast);
-    if (!(displayEast > displayWest)) return null;
-
-    var sourceWest = displayWest - 360 * world;
-    var sourceEast = displayEast - 360 * world;
-    sourceWest = Math.max(-180, Math.min(180, sourceWest));
-    sourceEast = Math.max(-180, Math.min(180, sourceEast));
-    if (!(sourceEast > sourceWest)) return null;
-
-    return {
-      sourceBounds: L.latLngBounds(
-        [bounds.getSouth(), sourceWest],
-        [bounds.getNorth(), sourceEast]
-      ),
-      displayBounds: L.latLngBounds(
-        [bounds.getSouth(), displayWest],
-        [bounds.getNorth(), displayEast]
-      ),
-      clipped:
-        Math.abs(displayWest - bounds.getWest()) > 1e-9 ||
-        Math.abs(displayEast - bounds.getEast()) > 1e-9
-    };
-  }
-
-  function refreshSSTOverlay() {
-    if (!mapState.sstOverlayVisible || !sstMetadataLoaded) return;
-
-    var bounds = map.getBounds();
-    var viewport = sstCanonicalViewport(bounds);
-    if (!viewport) {
-      setSSTLegendVisible(false);
-      setSSTStatus("Satellite SST is unavailable for the current map bounds.", true);
-      return;
-    }
-
-    var requestSerial = ++sstRequestSerial;
-    var overlayURL = sstOverlayURL(viewport.sourceBounds);
-
-    setSSTLegendVisible(false);
-    setSSTStatus("Loading NOAA CoastWatch SST…", false);
-
-    var sstUpstreamLabel = "";
-    fetch(overlayURL, {headers: {"Accept": "image/png"}})
-      .then(function(response) {
-        sstUpstreamLabel = String(response.headers.get("X-SST-Upstream") || "").trim();
-        var contentType = String(response.headers.get("Content-Type") || "").toLowerCase();
-        if (!response.ok) {
-          return response.text().then(function(detail) {
-            detail = String(detail || "").trim();
-            if (detail.length > 1200) detail = detail.slice(0, 1200) + "…";
-            throw new Error(detail || ("HTTP " + response.status));
-          });
-        }
-        if (contentType.indexOf("image/png") === -1) {
-          return response.text().then(function(detail) {
-            detail = String(detail || "").trim();
-            if (detail.length > 1200) detail = detail.slice(0, 1200) + "…";
-            throw new Error(
-              "Expected PNG from SST proxy but received " +
-              (contentType || "an unknown content type") +
-              (detail ? ": " + detail : "")
-            );
-          });
-        }
-        return response.blob();
-      })
-      .then(function(blob) {
-        if (!mapState.sstOverlayVisible || requestSerial !== sstRequestSerial) return;
-
-        var objectURL = URL.createObjectURL(blob);
-        var nextLayer = L.imageOverlay(objectURL, viewport.displayBounds, {
-          opacity: 0.50,
-          pane: "sstOverlayPane",
-          interactive: false,
-          attribution: "NOAA CoastWatch Geo-Polar Blended SST"
-        });
-
-        nextLayer.once("load", function() {
-          if (!mapState.sstOverlayVisible || requestSerial !== sstRequestSerial) {
-            if (map.hasLayer(nextLayer)) map.removeLayer(nextLayer);
-            URL.revokeObjectURL(objectURL);
-            return;
-          }
-
-          var previousLayer = sstLayer;
-          var previousObjectURL = sstObjectURL;
-          sstLayer = nextLayer;
-          sstObjectURL = objectURL;
-          if (sstLayer.bringToFront) sstLayer.bringToFront();
-
-          if (previousLayer && previousLayer !== sstLayer && map.hasLayer(previousLayer)) {
-            map.removeLayer(previousLayer);
-          }
-          if (previousObjectURL && previousObjectURL !== sstObjectURL) {
-            URL.revokeObjectURL(previousObjectURL);
-          }
-
-          setSSTLegendVisible(true);
-          var sstTimeLabel = sstLatestTime === "current"
-            ? "latest available daily field"
-            : "latest daily field: " + formatSSTDatasetTime(sstLatestTime);
-          var upstreamSuffix = sstUpstreamLabel ? " · via " + sstUpstreamLabel : "";
-          setSSTStatus(
-            "NOAA CoastWatch Geo-Polar SST · Web-Mercator reprojected · native land/no-data transparency · fixed 35–95°F temp-break scale · " +
-            sstTimeLabel + upstreamSuffix + " · IPv4" +
-            (viewport.clipped ? " · viewport clipped at dateline" : ""),
-            false
-          );
-
-          if (cloudLayer && mapState.cloudOverlayVisible && map.hasLayer(cloudLayer)) cloudLayer.bringToFront();
-          if (radarLayer && mapState.radarOverlayVisible && map.hasLayer(radarLayer)) radarLayer.bringToFront();
-        });
-
-        nextLayer.once("error", function() {
-          if (map.hasLayer(nextLayer)) map.removeLayer(nextLayer);
-          URL.revokeObjectURL(objectURL);
-          if (requestSerial !== sstRequestSerial || !mapState.sstOverlayVisible) return;
-          setSSTLegendVisible(false);
-          setSSTStatus("SST PNG was received but could not be displayed by the map.", true);
-        });
-
-        nextLayer.addTo(map);
-        if (nextLayer.bringToFront) nextLayer.bringToFront();
-      })
-      .catch(function(err) {
-        if (requestSerial !== sstRequestSerial || !mapState.sstOverlayVisible) return;
-        setSSTLegendVisible(false);
-        var detail = String(err && err.message ? err.message : err || "unknown error").trim();
-        setSSTStatus("NOAA CoastWatch Sea Surface Temp request failed: " + detail, true);
-      });
-  }
-
-  function scheduleSSTRefresh() {
-    if (!mapState.sstOverlayVisible) return;
-    if (sstRefreshTimer) window.clearTimeout(sstRefreshTimer);
-    sstRefreshTimer = window.setTimeout(function() {
-      sstRefreshTimer = null;
-      if (!sstMetadataLoaded) {
-        setSSTStatus("Loading latest NOAA CoastWatch sea-surface temperature…", false);
-        ensureSSTMetadata(function(ok) {
-          if (!mapState.sstOverlayVisible || !ok) return;
-          refreshSSTOverlay();
-        });
-        return;
-      }
-      refreshSSTOverlay();
-    }, 180);
-  }
-
-  function setSSTOverlayVisible(visible) {
-    mapState.sstOverlayVisible = !!visible;
-    if (!mapState.sstOverlayVisible) {
-      sstRequestSerial++;
-      if (sstRefreshTimer) {
-        window.clearTimeout(sstRefreshTimer);
-        sstRefreshTimer = null;
-      }
-      if (sstLayer && map.hasLayer(sstLayer)) map.removeLayer(sstLayer);
-      sstLayer = null;
-      if (sstObjectURL) {
-        URL.revokeObjectURL(sstObjectURL);
-        sstObjectURL = "";
-      }
-      setSSTLegendVisible(false);
-      setSSTStatus("", false);
-      return;
-    }
-
-    setSSTStatus("Loading latest NOAA CoastWatch sea-surface temperature…", false);
-    ensureSSTMetadata(function(ok) {
-      if (!mapState.sstOverlayVisible || !ok) return;
-      refreshSSTOverlay();
-    });
-  }
-
-  function setChlorophyllFieldStatus(message, isError) {
-    var status = document.getElementById("map-chl-field-status");
-    if (!status) return;
-    message = String(message || "").trim();
-    status.hidden = !message;
-    status.textContent = message;
-    status.style.color = isError ? "#9a352f" : "";
-  }
-
-  function setChlorophyllFieldLegendVisible(visible) {
-    var legend = document.getElementById("map-chl-field-legend");
-    if (legend) legend.hidden = !visible;
-  }
-
-  function chlorophyllFieldRequest(bounds) {
-    var mapSize = map.getSize();
-    var width = Math.max(256, Math.min(1400, Math.round(mapSize.x)));
-    var height = Math.max(256, Math.min(1000, Math.round(mapSize.y)));
-    var params = new URLSearchParams();
-    params.set("west", bounds.getWest().toFixed(6));
-    params.set("south", bounds.getSouth().toFixed(6));
-    params.set("east", bounds.getEast().toFixed(6));
-    params.set("north", bounds.getNorth().toFixed(6));
-    params.set("width", String(width));
-    params.set("height", String(height));
-    return "/chlorophyll-field?" + params.toString();
-  }
-
-  function refreshChlorophyllField() {
-    if (!mapState.chlorophyllFieldVisible || !chlMetadataLoaded) return;
-
-    var bounds = map.getBounds();
-    if (bounds.getWest() < -180 || bounds.getEast() > 180) {
-      setChlorophyllFieldStatus(
-        "Satellite chlorophyll is unavailable while the map view crosses the international date line.",
+    if (total === 0) {
+      setSaildroneStatus(
+        "NOAA PMEL Saildrone · no platform positions returned" +
+        (saildroneStatusSummary.failed
+          ? " · " + saildroneStatusSummary.failed + " configured datasets unavailable"
+          : ""),
         true
       );
       return;
     }
 
-    var requestSerial = ++chlFieldRequestSerial;
-    var fieldURL = chlorophyllFieldRequest(bounds);
-    setChlorophyllFieldLegendVisible(false);
-    setChlorophyllFieldStatus("Loading NOAA CoastWatch chlorophyll field…", false);
+    var parts = [
+      "NOAA PMEL Saildrone",
+      total + " latest platform position" + (total === 1 ? "" : "s"),
+      visible + " visible in current map view"
+    ];
 
-    var upstreamLabel = "";
-    var servedTime = "";
-    fetch(fieldURL, {headers: {"Accept":"image/png"}})
+    var oldestLabel = formatSaildroneAgeHours(saildroneStatusSummary.oldestAgeHours);
+    if (oldestLabel) parts.push("oldest observation " + oldestLabel);
+    if (saildroneStatusSummary.stale) {
+      parts.push(saildroneStatusSummary.stale + " older than 72 h");
+    }
+    if (saildroneStatusSummary.failed) {
+      parts.push(saildroneStatusSummary.failed + " configured datasets unavailable");
+    }
+
+    setSaildroneStatus(parts.join(" · "), false);
+  }
+
+  function saildroneNumber(value) {
+    var n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function saildronePopupHTML(obs) {
+    var wind = saildroneNumber(obs.wind_speed_mps);
+    var windDir = saildroneNumber(obs.wind_direction_deg);
+    var waterTemp = saildroneNumber(obs.water_temp_c);
+    var salinity = saildroneNumber(obs.salinity_psu);
+    var current = saildroneNumber(obs.current_speed_mps);
+    var currentDir = saildroneNumber(obs.current_direction_deg);
+    var wave = saildroneNumber(obs.wave_height_m);
+    var wavePeriod = saildroneNumber(obs.wave_period_s);
+    var ageHours = saildroneNumber(obs.age_hours);
+
+    var rows = [];
+    if (wind !== null) rows.push("<b>Wind:</b> " + (wind * 1.94384).toFixed(1) + " kt" +
+      (windDir !== null ? " from " + Math.round(windDir) + "°" : ""));
+    if (waterTemp !== null) rows.push("<b>Water:</b> " + (waterTemp * 9 / 5 + 32).toFixed(1) + "°F");
+    if (salinity !== null) rows.push("<b>Salinity:</b> " + salinity.toFixed(2) + " PSU");
+    if (current !== null) rows.push("<b>Current:</b> " + (current * 1.94384).toFixed(2) + " kt" +
+      (currentDir !== null ? " toward " + Math.round(currentDir) + "°" : ""));
+    if (wave !== null) rows.push("<b>Significant wave:</b> " + (wave * 3.28084).toFixed(1) + " ft" +
+      (wavePeriod !== null ? " @ " + wavePeriod.toFixed(1) + " s" : ""));
+
+    var ageText = ageHours === null ? "" :
+      (ageHours < 48 ? ageHours.toFixed(1) + " h old" : (ageHours / 24).toFixed(1) + " days old");
+
+    return "<strong>Saildrone " + escapeHTML(String(obs.drone_id || "")) + "</strong>" +
+      "<div>" + escapeHTML(String(obs.mission || "")) + "</div>" +
+      (rows.length ? "<div style='margin-top:6px'>" + rows.join("<br>") + "</div>" : "") +
+      "<div style='margin-top:6px;color:#5f7380'>Observed " +
+      escapeHTML(String(obs.time || "time unavailable")) +
+      (ageText ? " · " + escapeHTML(ageText) : "") +
+      "</div><div style='margin-top:5px;color:#5f7380'>NOAA PMEL public ERDDAP · moving research platform</div>";
+  }
+
+  function renderSaildroneObservations(payload) {
+    if (saildroneLayer && map.hasLayer(saildroneLayer)) map.removeLayer(saildroneLayer);
+    saildroneLayer = L.layerGroup();
+
+    var observations = Array.isArray(payload && payload.observations) ? payload.observations : [];
+    var plotted = 0;
+    var stale = 0;
+    var oldestAgeHours = null;
+
+    observations.forEach(function(obs) {
+      var lat = Number(obs.latitude);
+      var lon = Number(obs.longitude);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+
+      var ageHours = Number(obs.age_hours);
+      if (Number.isFinite(ageHours)) {
+        if (ageHours > 72) stale++;
+        if (oldestAgeHours === null || ageHours > oldestAgeHours) oldestAgeHours = ageHours;
+      }
+
+      L.circleMarker([lat, lon], {
+        pane: "saildronePane",
+        radius: 7,
+        color: "#ffffff",
+        weight: 2,
+        opacity: 1,
+        fillColor: "#8d3fb0",
+        fillOpacity: 0.92
+      }).bindPopup(saildronePopupHTML(obs)).addTo(saildroneLayer);
+      plotted++;
+    });
+
+    saildroneLayer.addTo(map);
+    saildroneStatusSummary = {
+      total: plotted,
+      stale: stale,
+      failed: Array.isArray(payload && payload.errors) ? payload.errors.length : 0,
+      oldestAgeHours: oldestAgeHours
+    };
+    updateSaildroneViewportStatus();
+  }
+
+  function setSaildroneVisible(visible) {
+    mapState.saildroneVisible = !!visible;
+    if (!mapState.saildroneVisible) {
+      if (saildroneLayer && map.hasLayer(saildroneLayer)) map.removeLayer(saildroneLayer);
+      saildroneStatusSummary = {total:0, stale:0, failed:0, oldestAgeHours:null};
+      setSaildroneStatus("", false);
+      return;
+    }
+
+    setSaildroneStatus("Loading NOAA PMEL Saildrone observations…", false);
+    fetch("/saildrone-observations", {headers: {"Accept": "application/json"}})
       .then(function(response) {
-        upstreamLabel = String(response.headers.get("X-Chlorophyll-Upstream") || "").trim();
-        servedTime = String(response.headers.get("X-Chlorophyll-Time") || "").trim();
-        var contentType = String(response.headers.get("Content-Type") || "").toLowerCase();
         if (!response.ok) {
           return response.text().then(function(detail) {
-            detail = String(detail || "").trim();
-            if (detail.length > 1200) detail = detail.slice(0, 1200) + "…";
-            throw new Error(detail || ("HTTP " + response.status));
+            throw new Error(String(detail || "HTTP " + response.status).trim());
           });
         }
-        if (contentType.indexOf("image/png") === -1) {
-          throw new Error("Expected PNG from chlorophyll field proxy but received " + contentType);
-        }
-        return response.blob();
-      })
-      .then(function(blob) {
-        if (!mapState.chlorophyllFieldVisible || requestSerial !== chlFieldRequestSerial) return;
-
-        var objectURL = URL.createObjectURL(blob);
-        var nextLayer = L.imageOverlay(objectURL, bounds, {
-          opacity: 0.34,
-          pane: "chlorophyllFieldPane",
-          interactive: false,
-          attribution: "NOAA CoastWatch DINEOF chlorophyll field"
-        });
-
-        nextLayer.once("load", function() {
-          if (!mapState.chlorophyllFieldVisible || requestSerial !== chlFieldRequestSerial) {
-            if (map.hasLayer(nextLayer)) map.removeLayer(nextLayer);
-            URL.revokeObjectURL(objectURL);
-            return;
-          }
-
-          var previousLayer = chlFieldLayer;
-          var previousObjectURL = chlFieldObjectURL;
-          chlFieldLayer = nextLayer;
-          chlFieldObjectURL = objectURL;
-
-          if (previousLayer && previousLayer !== chlFieldLayer && map.hasLayer(previousLayer)) {
-            map.removeLayer(previousLayer);
-          }
-          if (previousObjectURL && previousObjectURL !== chlFieldObjectURL) {
-            URL.revokeObjectURL(previousObjectURL);
-          }
-
-          setChlorophyllFieldLegendVisible(true);
-          var displayTime = servedTime || chlLatestTime;
-          var timeLabel = !displayTime || displayTime === "current"
-            ? "latest available daily field"
-            : "data field: " + formatChlorophyllDatasetTime(displayTime);
-          var upstreamSuffix = upstreamLabel ? " · via " + upstreamLabel : "";
-          setChlorophyllFieldStatus(
-            "NOAA DINEOF chlorophyll field · gap-filled 2 km · 0.1–1 mg/m³ display · " +
-            timeLabel + upstreamSuffix + " · IPv4",
-            false
-          );
-
-          if (chlLayer && mapState.chlorophyllOverlayVisible && map.hasLayer(chlLayer)) chlLayer.bringToFront();
-          if (structureNamesLayer && mapState.structureOverlayVisible && map.hasLayer(structureNamesLayer)) {
-            structureNamesLayer.eachLayer(function(layer) {
-              if (layer.bringToFront) layer.bringToFront();
-            });
-          }
-        });
-
-        nextLayer.once("error", function() {
-          if (map.hasLayer(nextLayer)) map.removeLayer(nextLayer);
-          URL.revokeObjectURL(objectURL);
-          if (requestSerial !== chlFieldRequestSerial || !mapState.chlorophyllFieldVisible) return;
-          setChlorophyllFieldLegendVisible(false);
-          setChlorophyllFieldStatus("Chlorophyll field PNG was received but could not be displayed by the map.", true);
-        });
-
-        nextLayer.addTo(map);
-      })
-      .catch(function(err) {
-        if (requestSerial !== chlFieldRequestSerial || !mapState.chlorophyllFieldVisible) return;
-        setChlorophyllFieldLegendVisible(false);
-        var detail = String(err && err.message ? err.message : err || "unknown error").trim();
-        setChlorophyllFieldStatus("NOAA CoastWatch chlorophyll field request failed: " + detail, true);
-      });
-  }
-
-  function scheduleChlorophyllFieldRefresh() {
-    if (!mapState.chlorophyllFieldVisible) return;
-    if (chlFieldRefreshTimer) window.clearTimeout(chlFieldRefreshTimer);
-    chlFieldRefreshTimer = window.setTimeout(function() {
-      chlFieldRefreshTimer = null;
-      if (!chlMetadataLoaded) {
-        ensureChlorophyllMetadata(function(ok) {
-          if (!mapState.chlorophyllFieldVisible || !ok) return;
-          refreshChlorophyllField();
-        });
-        return;
-      }
-      refreshChlorophyllField();
-    }, 180);
-  }
-
-  function setChlorophyllFieldVisible(visible) {
-    mapState.chlorophyllFieldVisible = !!visible;
-    if (!mapState.chlorophyllFieldVisible) {
-      chlFieldRequestSerial++;
-      if (chlFieldRefreshTimer) {
-        window.clearTimeout(chlFieldRefreshTimer);
-        chlFieldRefreshTimer = null;
-      }
-      if (chlFieldLayer && map.hasLayer(chlFieldLayer)) map.removeLayer(chlFieldLayer);
-      chlFieldLayer = null;
-      if (chlFieldObjectURL) {
-        URL.revokeObjectURL(chlFieldObjectURL);
-        chlFieldObjectURL = "";
-      }
-      setChlorophyllFieldLegendVisible(false);
-      setChlorophyllFieldStatus("", false);
-      return;
-    }
-
-    setChlorophyllFieldStatus("Loading latest NOAA CoastWatch chlorophyll field…", false);
-    ensureChlorophyllMetadata(function(ok) {
-      if (!mapState.chlorophyllFieldVisible || !ok) return;
-      refreshChlorophyllField();
-    });
-  }
-
-  function setChlorophyllStatus(message, isError) {
-    var status = document.getElementById("map-chl-status");
-    if (!status) return;
-    message = String(message || "").trim();
-    status.hidden = !message;
-    status.textContent = message;
-    status.style.color = isError ? "#9a352f" : "";
-  }
-
-  function setChlorophyllLegendVisible(visible) {
-    var legend = document.getElementById("map-chl-legend");
-    if (legend) legend.hidden = !visible;
-  }
-
-  function formatChlorophyllDatasetTime(value) {
-    var parsed = new Date(value);
-    if (!Number.isFinite(parsed.getTime())) return String(value || "");
-    return parsed.toLocaleString([], {
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-      timeZoneName: "short"
-    });
-  }
-
-  function ensureChlorophyllMetadata(callback) {
-    if (chlMetadataLoaded) {
-      callback(true);
-      return;
-    }
-    if (chlMetadataLoading) {
-      window.setTimeout(function() { ensureChlorophyllMetadata(callback); }, 120);
-      return;
-    }
-
-    chlMetadataLoading = true;
-    fetch("/chlorophyll-info", {headers: {"Accept":"application/json"}})
-      .then(function(response) {
-        if (!response.ok) throw new Error("HTTP " + response.status);
         return response.json();
       })
       .then(function(payload) {
-        chlMetadataLoading = false;
-        chlLatestTime = String(payload.time || "");
-        if (!chlLatestTime) throw new Error("missing dataset time");
-        chlMetadataLoaded = true;
-        callback(true);
+        if (!mapState.saildroneVisible) return;
+        renderSaildroneObservations(payload);
       })
-      .catch(function() {
-        chlMetadataLoading = false;
-        chlLatestTime = "current";
-        chlMetadataLoaded = true;
-        setChlorophyllStatus(
-          "NOAA CoastWatch chlorophyll · using latest available daily field.",
-          false
+      .catch(function(err) {
+        if (!mapState.saildroneVisible) return;
+        setSaildroneStatus(
+          "NOAA PMEL Saildrone observations failed: " +
+          String(err && err.message ? err.message : err || "unknown error"),
+          true
         );
-        callback(true);
       });
-  }
-
-  function chlorophyllOverlayRequest(bounds) {
-    var mapSize = map.getSize();
-    var width = Math.max(256, Math.min(1400, Math.round(mapSize.x)));
-    var height = Math.max(256, Math.min(1000, Math.round(mapSize.y)));
-    var params = new URLSearchParams();
-    params.set("west", bounds.getWest().toFixed(6));
-    params.set("south", bounds.getSouth().toFixed(6));
-    params.set("east", bounds.getEast().toFixed(6));
-    params.set("north", bounds.getNorth().toFixed(6));
-    params.set("width", String(width));
-    params.set("height", String(height));
-    return {
-      url: "/chlorophyll-overlay?" + params.toString(),
-      bounds: bounds
-    };
-  }
-
-  function refreshChlorophyllOverlay() {
-    if (!mapState.chlorophyllOverlayVisible || !chlMetadataLoaded) return;
-
-    var bounds = map.getBounds();
-    if (bounds.getWest() < -180 || bounds.getEast() > 180) {
-      setChlorophyllStatus(
-        "Satellite chlorophyll is unavailable while the map view crosses the international date line.",
-        true
-      );
-      return;
-    }
-
-    var request = chlorophyllOverlayRequest(bounds);
-    var requestSerial = ++chlRequestSerial;
-    var overlayURL = request.url;
-    var overlayBounds = request.bounds;
-
-    setChlorophyllLegendVisible(false);
-    setChlorophyllStatus("Loading NOAA CoastWatch chlorophyll image…", false);
-
-    var upstreamLabel = "";
-    var servedTime = "";
-    fetch(overlayURL, {headers: {"Accept":"image/png"}})
-      .then(function(response) {
-        upstreamLabel = String(response.headers.get("X-Chlorophyll-Upstream") || "").trim();
-        servedTime = String(response.headers.get("X-Chlorophyll-Time") || "").trim();
-        var contentType = String(response.headers.get("Content-Type") || "").toLowerCase();
-        if (!response.ok) {
-          return response.text().then(function(detail) {
-            detail = String(detail || "").trim();
-            if (detail.length > 500) detail = detail.slice(0, 500) + "…";
-            throw new Error(detail || ("HTTP " + response.status));
-          });
-        }
-        if (contentType.indexOf("image/png") === -1) {
-          return response.text().then(function(detail) {
-            detail = String(detail || "").trim();
-            if (detail.length > 500) detail = detail.slice(0, 500) + "…";
-            throw new Error(
-              "Expected PNG from chlorophyll proxy but received " +
-              (contentType || "an unknown content type") +
-              (detail ? ": " + detail : "")
-            );
-          });
-        }
-        return response.blob();
-      })
-      .then(function(blob) {
-        if (!mapState.chlorophyllOverlayVisible || requestSerial !== chlRequestSerial) return;
-
-        var objectURL = URL.createObjectURL(blob);
-        var nextLayer = L.imageOverlay(objectURL, overlayBounds, {
-          opacity: 0.98,
-          pane: "chlorophyllOverlayPane",
-          interactive: false,
-          attribution: "NOAA CoastWatch DINEOF chlorophyll contours"
-        });
-
-        nextLayer.once("load", function() {
-          if (!mapState.chlorophyllOverlayVisible || requestSerial !== chlRequestSerial) {
-            if (map.hasLayer(nextLayer)) map.removeLayer(nextLayer);
-            URL.revokeObjectURL(objectURL);
-            return;
-          }
-
-          var previousLayer = chlLayer;
-          var previousObjectURL = chlObjectURL;
-          chlLayer = nextLayer;
-          chlObjectURL = objectURL;
-          chlLayer.bringToFront();
-
-          if (previousLayer && previousLayer !== chlLayer && map.hasLayer(previousLayer)) {
-            map.removeLayer(previousLayer);
-          }
-          if (previousObjectURL && previousObjectURL !== chlObjectURL) {
-            URL.revokeObjectURL(previousObjectURL);
-          }
-
-          setChlorophyllLegendVisible(true);
-          var displayTime = servedTime || chlLatestTime;
-          var timeLabel = !displayTime || displayTime === "current"
-            ? "latest available daily field"
-            : "data field: " + formatChlorophyllDatasetTime(displayTime);
-          var upstreamSuffix = upstreamLabel ? " · via " + upstreamLabel : "";
-          setChlorophyllStatus(
-            "NOAA DINEOF chlorophyll contours · 0.2 / 0.3 / 0.5 mg/m³ · " +
-            timeLabel + upstreamSuffix + " · IPv4",
-            false
-          );
-
-          if (structureNamesLayer && mapState.structureOverlayVisible && map.hasLayer(structureNamesLayer)) {
-            structureNamesLayer.eachLayer(function(layer) {
-              if (layer.bringToFront) layer.bringToFront();
-            });
-          }
-          if (cloudLayer && mapState.cloudOverlayVisible && map.hasLayer(cloudLayer)) cloudLayer.bringToFront();
-          if (radarLayer && mapState.radarOverlayVisible && map.hasLayer(radarLayer)) radarLayer.bringToFront();
-        });
-
-        nextLayer.once("error", function() {
-          if (map.hasLayer(nextLayer)) map.removeLayer(nextLayer);
-          URL.revokeObjectURL(objectURL);
-          if (requestSerial !== chlRequestSerial || !mapState.chlorophyllOverlayVisible) return;
-          setChlorophyllLegendVisible(false);
-          setChlorophyllStatus("Chlorophyll contour PNG was received but could not be displayed by the map.", true);
-        });
-
-        nextLayer.addTo(map);
-        nextLayer.bringToFront();
-      })
-      .catch(function(err) {
-        if (requestSerial !== chlRequestSerial || !mapState.chlorophyllOverlayVisible) return;
-        setChlorophyllLegendVisible(false);
-        var detail = String(err && err.message ? err.message : err || "unknown error").trim();
-        setChlorophyllStatus("NOAA CoastWatch chlorophyll request failed: " + detail, true);
-      });
-  }
-
-  function scheduleChlorophyllRefresh() {
-    if (!mapState.chlorophyllOverlayVisible) return;
-    if (chlRefreshTimer) window.clearTimeout(chlRefreshTimer);
-    chlRefreshTimer = window.setTimeout(function() {
-      chlRefreshTimer = null;
-      if (!chlMetadataLoaded) {
-        setChlorophyllStatus("Loading latest NOAA CoastWatch chlorophyll…", false);
-        ensureChlorophyllMetadata(function(ok) {
-          if (!mapState.chlorophyllOverlayVisible || !ok) return;
-          refreshChlorophyllOverlay();
-        });
-        return;
-      }
-      refreshChlorophyllOverlay();
-    }, 180);
-  }
-
-  function setChlorophyllOverlayVisible(visible) {
-    mapState.chlorophyllOverlayVisible = !!visible;
-    if (!mapState.chlorophyllOverlayVisible) {
-      chlRequestSerial++;
-      if (chlRefreshTimer) {
-        window.clearTimeout(chlRefreshTimer);
-        chlRefreshTimer = null;
-      }
-      if (chlLayer && map.hasLayer(chlLayer)) map.removeLayer(chlLayer);
-      chlLayer = null;
-      if (chlObjectURL) {
-        URL.revokeObjectURL(chlObjectURL);
-        chlObjectURL = "";
-      }
-      setChlorophyllLegendVisible(false);
-      setChlorophyllStatus("", false);
-      return;
-    }
-
-    setChlorophyllStatus("Loading latest NOAA CoastWatch chlorophyll…", false);
-    ensureChlorophyllMetadata(function(ok) {
-      if (!mapState.chlorophyllOverlayVisible || !ok) return;
-      refreshChlorophyllOverlay();
-    });
-  }
-
-  var fishingReportsPayload = null;
-  var fishingReportsLoading = false;
-  var fishingReportsLoadCallbacks = [];
-
-  function loadFishingReports(callback) {
-    if (fishingReportsPayload) {
-      callback(true, fishingReportsPayload);
-      return;
-    }
-    fishingReportsLoadCallbacks.push(callback);
-    if (fishingReportsLoading) return;
-
-    fishingReportsLoading = true;
-    fetch("/fishing-reports", {headers: {"Accept":"application/json"}})
-      .then(function(response) {
-        if (!response.ok) {
-          return response.text().then(function(detail) {
-            detail = String(detail || "").trim();
-            throw new Error(detail || ("HTTP " + response.status));
-          });
-        }
-        return response.json();
-      })
-      .then(function(payload) {
-        if (!payload || !Array.isArray(payload.reports)) {
-          throw new Error("fishing report feed is missing reports[]");
-        }
-        fishingReportsPayload = payload;
-        fishingReportsLoading = false;
-        var callbacks = fishingReportsLoadCallbacks.slice();
-        fishingReportsLoadCallbacks = [];
-        callbacks.forEach(function(fn) { fn(true, fishingReportsPayload); });
-      })
-      .catch(function(err) {
-        fishingReportsLoading = false;
-        var callbacks = fishingReportsLoadCallbacks.slice();
-        fishingReportsLoadCallbacks = [];
-        callbacks.forEach(function(fn) { fn(false, err); });
-      });
-  }
-
-  function setFishingReportsStatus(message, isError) {
-    var status = document.getElementById("map-fishing-status");
-    if (!status) return;
-    message = String(message || "").trim();
-    status.hidden = !message;
-    status.textContent = message;
-    status.style.color = isError ? "#9a352f" : "";
-  }
-
-  function setFishingReportsLegendVisible(visible) {
-    var legend = document.getElementById("map-fishing-legend");
-    if (legend) legend.hidden = !visible;
-  }
-
-  function fishingSpeciesStyle(species) {
-    if (String(species || "").toLowerCase() === "bluefin") {
-      return {color:"#17366f", fillColor:"#2658b8"};
-    }
-    return {color:"#0b5b5b", fillColor:"#18a6a6"};
-  }
-
-  function fishingPopupHTML(report) {
-    var html = '<div style="min-width:220px">';
-    html += '<strong>' + escapeHTML(report.species) + ' · ' + escapeHTML(report.date) + '</strong>';
-    if (report.count) html += '<br>' + escapeHTML(report.count);
-    if (report.size) html += ' · ' + escapeHTML(report.size);
-    if (report.locationText) html += '<br><strong>Location:</strong> ' + escapeHTML(report.locationText);
-    if (report.position_type === "derived_point" || report.confidence === "derived") {
-      html += '<br><strong>Position:</strong> approximate, derived from report shorthand';
-    } else if (report.position_type === "region" || report.confidence === "regional") {
-      html += '<br><strong>Position:</strong> broad regional report';
-    }
-    if (report.notes) html += '<br><span style="color:#526a74">' + escapeHTML(report.notes) + '</span>';
-    if (report.sourceURL) {
-      html += '<br><a href="' + escapeHTML(report.sourceURL) + '" target="_blank" rel="noopener noreferrer">' +
-        escapeHTML(report.source || "Source report") + '</a>';
-    }
-    html += '</div>';
-    return html;
-  }
-
-  function renderFishingReports(payload) {
-    if (fishingReportsLayer && map.hasLayer(fishingReportsLayer)) {
-      map.removeLayer(fishingReportsLayer);
-    }
-    fishingReportsLayer = L.layerGroup();
-
-    var reports = payload && Array.isArray(payload.reports) ? payload.reports : [];
-    var pointCount = 0;
-    var regionCount = 0;
-
-    reports.forEach(function(report) {
-      var style = fishingSpeciesStyle(report.species);
-      var positionType = String(report.position_type || "").toLowerCase();
-
-      if (positionType === "derived_point" || positionType === "exact_point") {
-        var lat = Number(report.lat);
-        var lon = Number(report.lon);
-        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
-
-        var marker = L.circleMarker([lat, lon], {
-          pane: "fishingReportsPane",
-          radius: 7,
-          color: style.color,
-          weight: 2,
-          fillColor: style.fillColor,
-          fillOpacity: 0.92
-        }).bindPopup(fishingPopupHTML(report));
-        marker.addTo(fishingReportsLayer);
-        pointCount++;
-
-        if (positionType === "derived_point" && Number(report.uncertaintyNM) > 0) {
-          L.circle([lat, lon], {
-            pane: "fishingReportsPane",
-            radius: Number(report.uncertaintyNM) * 1852,
-            color: style.color,
-            weight: 1.5,
-            opacity: 0.75,
-            dashArray: "5 5",
-            fillColor: style.fillColor,
-            fillOpacity: 0.045,
-            interactive: false
-          }).addTo(fishingReportsLayer);
-        }
-        return;
-      }
-
-      if (positionType === "region" && Array.isArray(report.polygon) && report.polygon.length >= 3) {
-        var polygon = report.polygon
-          .map(function(pair) {
-            return Array.isArray(pair) && pair.length >= 2
-              ? [Number(pair[0]), Number(pair[1])]
-              : null;
-          })
-          .filter(function(pair) {
-            return pair && Number.isFinite(pair[0]) && Number.isFinite(pair[1]);
-          });
-        if (polygon.length < 3) return;
-
-        L.polygon(polygon, {
-          pane: "fishingReportsPane",
-          color: style.color,
-          weight: 2,
-          opacity: 0.85,
-          dashArray: "7 6",
-          fillColor: style.fillColor,
-          fillOpacity: 0.07
-        }).bindPopup(fishingPopupHTML(report)).addTo(fishingReportsLayer);
-        regionCount++;
-      }
-    });
-
-    fishingReportsLayer.addTo(map);
-    setFishingReportsLegendVisible(true);
-
-    var updated = String(payload && payload.updated || "").trim();
-    var suffix = updated ? " · feed updated " + updated : "";
-    setFishingReportsStatus(
-      "Fishing Reports feed · " + pointCount + " point reports + " + regionCount +
-      " regional reports" + suffix + ". Approximate locations are explicitly marked.",
-      false
-    );
-  }
-
-  function setFishingReportsVisible(visible) {
-    mapState.fishingReportsVisible = !!visible;
-    if (!mapState.fishingReportsVisible) {
-      if (fishingReportsLayer && map.hasLayer(fishingReportsLayer)) map.removeLayer(fishingReportsLayer);
-      setFishingReportsLegendVisible(false);
-      setFishingReportsStatus("", false);
-      return;
-    }
-
-    setFishingReportsStatus("Loading fishing reports…", false);
-    loadFishingReports(function(ok, result) {
-      if (!mapState.fishingReportsVisible) return;
-      if (!ok) {
-        setFishingReportsLegendVisible(false);
-        var detail = String(result && result.message ? result.message : result || "unknown error");
-        setFishingReportsStatus("Fishing Reports feed failed: " + detail, true);
-        return;
-      }
-      renderFishingReports(result);
-    });
   }
 
   function setStructureStatus(message, isError) {
@@ -8113,10 +6508,6 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
         }
 
         var labelResult = renderStructureNames(featureData);
-
-        if (sstLayer && mapState.sstOverlayVisible && map.hasLayer(sstLayer)) {
-          sstLayer.bringToFront();
-        }
         if (structureNamesLayer && map.hasLayer(structureNamesLayer)) {
           structureNamesLayer.eachLayer(function(layer) {
             if (layer.bringToFront) layer.bringToFront();
@@ -8479,11 +6870,8 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     marineZoneOverlayVisible: false,
     smokeOverlayVisible: false,
     smokeOverlayLoaded: false,
-    sstOverlayVisible: false,
-    chlorophyllFieldVisible: false,
-    chlorophyllOverlayVisible: false,
     structureOverlayVisible: false,
-    fishingReportsVisible: false,
+    saildroneVisible: false,
     cloudOverlayVisible: false,
     radarOverlayVisible: false
   };
@@ -9093,30 +7481,6 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     });
   });
 
-  var sstCheckbox = document.getElementById("map-show-sst");
-  if (sstCheckbox) {
-    sstCheckbox.checked = !!mapState.sstOverlayVisible;
-    sstCheckbox.addEventListener("change", function() {
-      setSSTOverlayVisible(!!sstCheckbox.checked);
-    });
-  }
-
-  var chlorophyllFieldCheckbox = document.getElementById("map-show-chlorophyll-field");
-  if (chlorophyllFieldCheckbox) {
-    chlorophyllFieldCheckbox.checked = !!mapState.chlorophyllFieldVisible;
-    chlorophyllFieldCheckbox.addEventListener("change", function() {
-      setChlorophyllFieldVisible(!!chlorophyllFieldCheckbox.checked);
-    });
-  }
-
-  var chlorophyllCheckbox = document.getElementById("map-show-chlorophyll");
-  if (chlorophyllCheckbox) {
-    chlorophyllCheckbox.checked = !!mapState.chlorophyllOverlayVisible;
-    chlorophyllCheckbox.addEventListener("change", function() {
-      setChlorophyllOverlayVisible(!!chlorophyllCheckbox.checked);
-    });
-  }
-
   var structureCheckbox = document.getElementById("map-show-structure");
   if (structureCheckbox) {
     structureCheckbox.checked = !!mapState.structureOverlayVisible;
@@ -9125,11 +7489,11 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     });
   }
 
-  var fishingReportsCheckbox = document.getElementById("map-show-fishing-reports");
-  if (fishingReportsCheckbox) {
-    fishingReportsCheckbox.checked = !!mapState.fishingReportsVisible;
-    fishingReportsCheckbox.addEventListener("change", function() {
-      setFishingReportsVisible(!!fishingReportsCheckbox.checked);
+  var saildroneCheckbox = document.getElementById("map-show-saildrone");
+  if (saildroneCheckbox) {
+    saildroneCheckbox.checked = !!mapState.saildroneVisible;
+    saildroneCheckbox.addEventListener("change", function() {
+      setSaildroneVisible(!!saildroneCheckbox.checked);
     });
   }
 
@@ -9159,11 +7523,9 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   map.on("moveend", function() {
     syncCoordinateInputsToMapCenter();
     updateMapScaleStatus();
-    if (mapState.sstOverlayVisible) scheduleSSTRefresh();
-    if (mapState.chlorophyllFieldVisible) scheduleChlorophyllFieldRefresh();
-    if (mapState.chlorophyllOverlayVisible) scheduleChlorophyllRefresh();
     if (mapState.structureOverlayVisible) scheduleStructureRefresh();
     if (mapState.cloudOverlayVisible) scheduleCloudRefresh();
+    if (mapState.saildroneVisible && saildroneLayer) updateSaildroneViewportStatus();
 
     if (!mapState.smokeOverlayVisible || !smokeLayer) return;
     var visibleCount = 0;
@@ -9315,29 +7677,6 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     return n.toFixed(digits) + suffix;
   }
 
-  function pointInFishingPolygon(lat, lon, polygon) {
-    if (!Array.isArray(polygon) || polygon.length < 3) return false;
-    var inside = false;
-    for (var i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-      var yi = Number(polygon[i][0]);
-      var xi = Number(polygon[i][1]);
-      var yj = Number(polygon[j][0]);
-      var xj = Number(polygon[j][1]);
-      if (![yi, xi, yj, xj].every(Number.isFinite)) continue;
-      var intersects =
-        ((yi > lat) !== (yj > lat)) &&
-        (lon < (xj - xi) * (lat - yi) / ((yj - yi) || 1e-12) + xi);
-      if (intersects) inside = !inside;
-    }
-    return inside;
-  }
-
-  function fishingReportAgeDays(dateText) {
-    var d = new Date(String(dateText || "") + "T12:00:00Z");
-    if (!Number.isFinite(d.getTime())) return NaN;
-    return Math.max(0, Math.floor((Date.now() - d.getTime()) / 86400000));
-  }
-
   function nearestFishingStructureForPoint(lat, lon) {
     var halfLat = 1.0;
     var cosLat = Math.max(0.25, Math.cos(lat * Math.PI / 180));
@@ -9374,166 +7713,42 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       });
   }
 
-  function fishingReportsNearPoint(lat, lon) {
-    return new Promise(function(resolve) {
-      loadFishingReports(function(ok, payload) {
-        if (!ok || !payload || !Array.isArray(payload.reports)) {
-          resolve({nearby:[], regional:[]});
-          return;
-        }
-
-        var origin = L.latLng(lat, lon);
-        var nearby = [];
-        var regional = [];
-
-        payload.reports.forEach(function(report) {
-          var type = String(report.position_type || "").toLowerCase();
-          if (type === "exact_point" || type === "derived_point") {
-            var rlat = Number(report.lat);
-            var rlon = Number(report.lon);
-            if (!Number.isFinite(rlat) || !Number.isFinite(rlon)) return;
-            var nm = map.distance(origin, L.latLng(rlat, rlon)) / 1852;
-            if (nm <= 100) {
-              nearby.push({
-                species: String(report.species || "Report"),
-                date: String(report.date || ""),
-                count: String(report.count || ""),
-                distance_nm: nm,
-                confidence: String(report.confidence || type)
-              });
-            }
-          } else if (type === "region" && pointInFishingPolygon(lat, lon, report.polygon)) {
-            regional.push({
-              species: String(report.species || "Report"),
-              date: String(report.date || ""),
-              locationText: String(report.locationText || ""),
-              confidence: String(report.confidence || "regional")
-            });
-          }
-        });
-
-        nearby.sort(function(a, b) {
-          var ageA = fishingReportAgeDays(a.date);
-          var ageB = fishingReportAgeDays(b.date);
-          if (Number.isFinite(ageA) && Number.isFinite(ageB) && ageA !== ageB) return ageA - ageB;
-          return a.distance_nm - b.distance_nm;
-        });
-
-        resolve({nearby:nearby, regional:regional});
-      });
-    });
-  }
-
-  function renderFishingPlanning(water, structure, reports) {
+  function renderFishingPlanning(structure) {
     var status = document.getElementById("fishing-planning-status");
     var summary = document.getElementById("fishing-planning-summary");
-    var sst = document.getElementById("fishing-planning-sst");
-    var sstDetail = document.getElementById("fishing-planning-sst-detail");
-    var chl = document.getElementById("fishing-planning-chl");
-    var chlDetail = document.getElementById("fishing-planning-chl-detail");
     var structureValue = document.getElementById("fishing-planning-structure");
     var structureDetail = document.getElementById("fishing-planning-structure-detail");
-    var reportValue = document.getElementById("fishing-planning-reports");
-    var reportDetail = document.getElementById("fishing-planning-reports-detail");
     var errorBox = document.getElementById("fishing-planning-error");
 
     var factors = [];
-    var caveats = [];
-
-    var sstPointF = Number(water && water.sst && water.sst.point_f);
-    var sstSpreadF = Number(water && water.sst && water.sst.spread_f);
-    if (sst) sst.textContent = Number.isFinite(sstPointF) ? sstPointF.toFixed(1) + "°F" : "Unavailable";
-    if (sstDetail) {
-      if (Number.isFinite(sstSpreadF)) {
-        var breakText = sstSpreadF >= 2.0
-          ? "pronounced local temp-break signal"
-          : (sstSpreadF >= 1.0 ? "moderate local temp-break signal" : "weak local temp gradient");
-        sstDetail.textContent =
-          breakText + " · " + sstSpreadF.toFixed(1) +
-          "°F spread in the nearby ~15 nmi sampling window";
-        if (sstSpreadF >= 1.0) factors.push("a useful Sea Surface Temp gradient");
-      } else {
-        sstDetail.textContent = "No local gradient estimate available.";
-      }
-    }
-
-    var chlPoint = Number(water && water.chlorophyll && water.chlorophyll.point_mg_m3);
-    var chlMin = Number(water && water.chlorophyll && water.chlorophyll.min_mg_m3);
-    var chlMax = Number(water && water.chlorophyll && water.chlorophyll.max_mg_m3);
-    if (chl) {
-      chl.textContent = Number.isFinite(chlPoint) ? chlPoint.toFixed(2) + " mg/m³" : "Unavailable";
-    }
-    if (chlDetail) {
-      if (Number.isFinite(chlPoint)) {
-        var waterClass = chlPoint <= 0.20 ? "clearer/blue water"
-          : (chlPoint <= 0.30 ? "clear-water transition"
-          : (chlPoint <= 0.50 ? "moderate chlorophyll" : "greener water"));
-        var edge = Number.isFinite(chlMin) && Number.isFinite(chlMax) && chlMin <= 0.30 && chlMax >= 0.30;
-        chlDetail.textContent = waterClass + (edge ? " · 0.30 mg/m³ transition crosses nearby window" : "");
-        if (chlPoint <= 0.30) factors.push("cleaner water");
-        if (edge) factors.push("a nearby chlorophyll edge");
-      } else {
-        chlDetail.textContent = "No chlorophyll value available.";
-      }
-    }
 
     if (structure) {
       if (structureValue) structureValue.textContent = structure.name;
       if (structureDetail) structureDetail.textContent = structure.distance_nm.toFixed(1) + " nmi from selected destination";
-      if (structure.distance_nm <= 15) factors.push("nearby named structure");
+      if (structure.distance_nm <= 15) factors.push("nearby named offshore feature");
     } else {
       if (structureValue) structureValue.textContent = "None nearby";
-      if (structureDetail) structureDetail.textContent = "No fishing-relevant NOAA named feature found in the search window.";
+      if (structureDetail) structureDetail.textContent = "No fishing-relevant NOAA named offshore feature found in the search window.";
     }
-
-    reports = reports || {nearby:[], regional:[]};
-    var nearby = Array.isArray(reports.nearby) ? reports.nearby : [];
-    var regional = Array.isArray(reports.regional) ? reports.regional : [];
-    if (nearby.length) {
-      var newest = nearby[0];
-      var age = fishingReportAgeDays(newest.date);
-      if (reportValue) reportValue.textContent = nearby.length + " within 100 nmi";
-      if (reportDetail) {
-        reportDetail.textContent =
-          newest.species + " · " + newest.distance_nm.toFixed(0) + " nmi away" +
-          (Number.isFinite(age) ? " · " + age + " day" + (age === 1 ? "" : "s") + " old" : "") +
-          (newest.count ? " · " + newest.count : "");
-      }
-      if (Number.isFinite(age) && age <= 14) factors.push("recent nearby fishing activity");
-    } else if (regional.length) {
-      var reg = regional[0];
-      if (reportValue) reportValue.textContent = "Regional report";
-      if (reportDetail) reportDetail.textContent =
-        reg.species + (reg.locationText ? " · " + reg.locationText : "") + " · broad location confidence";
-      factors.push("regional fishing activity");
-    } else {
-      if (reportValue) reportValue.textContent = "No nearby reports";
-      if (reportDetail) reportDetail.textContent = "No point report within 100 nmi and no regional report covering the selected destination.";
-    }
-
-    if (water && water.error) caveats.push(String(water.error));
 
     if (summary) {
       var unique = [];
       factors.forEach(function(item) {
         if (unique.indexOf(item) === -1) unique.push(item);
       });
-      if (unique.length >= 3) {
-        summary.innerHTML = "<strong>Fishing setup:</strong> promising alignment of " +
-          escapeHTML(unique.slice(0, 4).join(", ")) + ".";
-      } else if (unique.length) {
-        summary.innerHTML = "<strong>Fishing setup:</strong> some favorable signals — " +
+      if (unique.length) {
+        summary.innerHTML = "<strong>Fishing context:</strong> " +
           escapeHTML(unique.join(", ")) +
-          " — but the selected point does not yet show a full multi-factor convergence.";
+          ". Runtime fishing reports are not currently configured.";
       } else {
-        summary.innerHTML = "<strong>Fishing setup:</strong> limited positive convergence detected from the currently available water, structure, and report data.";
+        summary.innerHTML = "<strong>Fishing context:</strong> no nearby named offshore feature was found. Runtime fishing reports are not currently configured.";
       }
     }
 
     if (status) status.textContent = "Selected-destination fishing context";
     if (errorBox) {
-      errorBox.hidden = caveats.length === 0;
-      errorBox.textContent = caveats.join(" | ");
+      errorBox.hidden = true;
+      errorBox.textContent = "";
     }
   }
 
@@ -9543,37 +7758,23 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     var status = document.getElementById("fishing-planning-status");
     var summary = document.getElementById("fishing-planning-summary");
     var errorBox = document.getElementById("fishing-planning-error");
-    if (status) status.textContent = "Loading water, structure, and reports…";
+    if (status) status.textContent = "Loading nearby offshore feature…";
     if (summary) summary.textContent = "Evaluating the selected fishing destination…";
-    if (errorBox) errorBox.hidden = true;
+    if (errorBox) {
+      errorBox.hidden = true;
+      errorBox.textContent = "";
+    }
 
     var lat = Number(mapState.selectedLocation.lat);
     var lon = Number(mapState.selectedLocation.lon);
     var serial = ++fishingPlanningRequestSerial;
 
-    var waterPromise = fetch(
-      "/fishing-water?lat=" + encodeURIComponent(lat.toFixed(5)) +
-      "&lon=" + encodeURIComponent(lon.toFixed(5)),
-      {headers: {"Accept":"application/json"}, cache:"no-store"}
-    ).then(function(response) {
-      if (!response.ok) {
-        return response.text().then(function(detail) {
-          throw new Error(String(detail || "HTTP " + response.status).trim());
-        });
-      }
-      return response.json();
-    }).catch(function(err) {
-      return {error:"Water data: " + String(err && err.message ? err.message : err || "unavailable")};
-    });
-
-    Promise.all([
-      waterPromise,
-      nearestFishingStructureForPoint(lat, lon).catch(function() { return null; }),
-      fishingReportsNearPoint(lat, lon)
-    ]).then(function(results) {
-      if (serial !== fishingPlanningRequestSerial) return;
-      renderFishingPlanning(results[0], results[1], results[2]);
-    });
+    nearestFishingStructureForPoint(lat, lon)
+      .catch(function() { return null; })
+      .then(function(structure) {
+        if (serial !== fishingPlanningRequestSerial) return;
+        renderFishingPlanning(structure);
+      });
   }
 
   function renderOffshoreTrip(payload) {
