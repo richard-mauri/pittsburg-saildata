@@ -7,7 +7,7 @@ The default wind station is **PSBC1**.
 ## Current release
 
 **Public version: 1.9.3**  
-**Generated source lineage: v214**
+**Generated source lineage: v217**
 
 **Current SST status:** deferred/disabled in v195; see **Deferred SST — future approach** below.
 **Current chlorophyll status:** both Chlorophyll Field and Chlorophyll Contours are deferred/disabled in v198.
@@ -21,7 +21,7 @@ The service is designed to answer two practical questions:
 1. What is the wind doing now?
 2. What are the tidal currents expected to do during the preferred planning period?
 
-Wind observations come from NOAA/NDBC. Current predictions come from NOAA CO-OPS. Forecast-zone context and marine forecast information come from the National Weather Service. Optional map context includes NOAA/NESDIS satellite cloud cover, NOAA HMS smoke analysis, and NEXRAD radar imagery.
+Wind observations come from NOAA/NDBC. Current predictions come from NOAA CO-OPS. Forecast-zone context and marine forecast information come from the National Weather Service. Optional map context includes NOAA/NESDIS satellite cloud cover, NOAA HMS smoke analysis, NEXRAD radar imagery, and an observational sea-level-pressure/isobar layer derived from current NOAA/NWS Aviation Weather Center METAR data.
 
 The application is a conditions-planning aid. It is not a navigation system and is not a substitute for official navigation products, charts, notices, or prudent seamanship.
 
@@ -181,16 +181,21 @@ The map also shows a live scale/status label in the lower-right corner. It repor
 
 ## Map overlays
 
-The **Map Overlays** control supports independent visual overlays:
+The **Map Overlays** control supports independent visual overlays. The current groups are **Weather & Hazards**, **Wind & Pressure**, **Terrain & Seafloor**, and **Observations**. The Wind & Pressure group keeps the two wind-barb layers beside the pressure/isobar layer so the observed wind field and pressure-gradient context can be viewed together.
 
 - **NWS forecast zone**
 - **Satellite smoke (NOAA HMS)**
 - **Satellite Cloud Cover (NOAA/NESDIS)**
 - **Weather radar (NWS NEXRAD via Iowa State IEM)**
+- **Surface Pressure / Isobars (NOAA/NWS METAR)**
 
 Satellite Cloud Cover is rendered from NOAA/NESDIS merged GOES GeoColor imagery for the current map viewport.
 
 Radar uses the current NEXRAD base-reflectivity mosaic through Iowa State IEM's Web-Mercator WMS service.
+
+Surface Pressure / Isobars uses current mean sea-level-pressure observations from the NOAA/NWS Aviation Weather Center METAR feed already used for the land/inland wind-barb network. The Go server exposes the current pressure observations for a padded map area through `/pressure-observations`; the browser interpolates those point values into a smooth observational pressure field and draws labeled isobars. Contour spacing is zoom-dependent: **4 mb** at wide-area zooms, **2 mb** at regional zooms, and **1 mb** when zoomed in. A white halo keeps the purple pressure contours readable over street, nautical, satellite, radar, and cloud imagery.
+
+This pressure layer is intended to show the approximate pressure-gradient pattern around the map view. It is **not an official analyzed surface chart** and can contain interpolation uncertainty where the METAR network is sparse. Observations older than three hours are excluded, and the overlay reports when too few current pressure stations are available to construct contours.
 
 Smoke uses NOAA Hazard Mapping System analysis polygons and is qualitative satellite analysis, not AQI and not measured PM2.5 concentration.
 
@@ -233,6 +238,7 @@ Important endpoints include:
 /wind-stations
 /marine-forecast
 /smoke-overlay
+/pressure-observations
 /health
 /welcome
 /voice
@@ -469,6 +475,35 @@ These are reference stations, not a hard-coded application whitelist. Active sta
 `main.go` remains intentionally large and contains substantial browser HTML, CSS, JavaScript, Leaflet behavior, HTTP orchestration, and report presentation logic.
 
 A future refactor should be treated as a separate behavior-preserving project after the current UI and release behavior are stable. The safest direction would be to move browser templates/static assets out of `main.go` first, then separate HTTP/report orchestration while preserving the existing `wind.go` and `currents.go` data-source boundaries.
+
+## v217 / 1.9.3 changes
+
+- Reorganizes **Map Overlays** so the atmospheric layers used together for wind analysis are grouped under a dedicated **Wind & Pressure** category.
+- Moves **Marine / Bay Wind Barbs (NOAA/NDBC)** and **Land / Inland Wind Barbs (METAR)** out of **Observations** and into **Wind & Pressure**.
+- Moves **Surface Pressure / Isobars (NOAA/NWS METAR)** out of **Weather & Hazards** and into **Wind & Pressure** so pressure-gradient context sits beside the wind field it helps explain.
+- Leaves **Weather & Hazards** for NWS forecast zone, NOAA HMS smoke, NOAA satellite cloud cover, and NOAA/NWS radar; **Observations** now contains Saildrone Observations.
+- Changes menu organization only; overlay data sources, rendering, caching, interaction, and map-state behavior are unchanged from v216.
+- Advanced runtime identity to **Version 1.9.3 · Build v217**.
+
+## v216 / 1.9.3 changes
+
+- Fixes the **Clear selected location, station & candidates** enable/disable logic so the button remains available whenever any clearable map state exists: a selected sailing location, committed wind station, selected currents station, or nearby wind-station candidates.
+- Removes the previous selected-location-only click guard, allowing the same clear action to remove committed wind/current station markers even after the selected sailing location has already been cleared.
+- Aligns the server-rendered initial button state with the browser state logic, preventing the control from starting disabled when a wind/current station or candidate set is still present.
+- Leaves the v215 isobar overlay, v214 iOS Map Overlays behavior, wind-barb overlays, and shared wind-unit behavior unchanged.
+- Advanced runtime identity to **Version 1.9.3 · Build v216**.
+
+## v215 / 1.9.3 changes
+
+- Adds **Surface Pressure / Isobars (NOAA/NWS METAR)** under **Map Overlays → Weather & Hazards**.
+- Extends the existing Aviation Weather Center complete-METAR cache parser to retain current mean sea-level pressure when the feed supplies either `sea_level_pressure_mb` or `slp_mb`.
+- Adds `/pressure-observations`, which returns current METAR sea-level-pressure observations from a padded area around the map view and excludes observations older than three hours.
+- Generates the pressure field locally in the browser using distance-weighted interpolation and draws labeled isobars with a high-contrast halo so the contours remain readable over all basemaps and other weather layers.
+- Uses zoom-aware contour spacing: **4 mb** at wide-area zooms, **2 mb** at regional zooms, and **1 mb** at close zooms, so Bay/Delta pressure gradients remain visible without overcrowding statewide views.
+- Refreshes the isobar layer after map movement while keeping it display-only: it does not change selected location, wind station, currents station, planning thresholds, or report calculations.
+- Clearly labels the layer as an **interpolated observational field**, not an official NOAA analyzed surface chart; sparse-data and insufficient-range cases are reported in the map status area rather than silently drawing misleading contours.
+- Keeps the v214 iOS Map Overlays dismissal behavior and all v213/v211 wind-barb and shared-units behavior unchanged.
+- Advanced runtime identity to **Version 1.9.3 · Build v215**.
 
 ## v214 / 1.9.3 changes
 
@@ -986,17 +1021,17 @@ This section is the authoritative development handoff for this repository. A new
 <!-- PROJECT-STATE:BEGIN -->
 
 - Public app version: **1.9.3**
-- Generated source build: **v214**
-- Next generated source build: **v215**
+- Generated source build: **v216**
+- Next generated source build: **v217**
 - Authoritative repository: **https://github.com/richard-mauri/pittsburg-saildata**
 - Authoritative branch: **main**
-- Release status: **v214 / 1.9.3 release candidate**
+- Release status: **v216 / 1.9.3 release candidate**
 
 ### Managed-file checkpoints
 
 | Repository file | SHA-256 |
 | --- | --- |
-| `main.go` | `cf85890eda0c9a767c31a598b457be1e51c1189eefe406b8b9e91caae10d2100` |
+| `main.go` | `345c21f5d65cbfe1a7c78164b39e781c9b798cd8fcd7a9bf5fc7311e98ef0840` |
 | `assets/yogiisms.txt` | `4ebf00217e194ee26a8e8fe38237b298800b36ead0c64accdbb82f623c142371` |
 | `assets/fishing_reports.json` | `02b01de77784153157c6a4a60d6ad21e286f7c191bbe204fed605659ea15ca5e` |
 | `check-project-state.sh` | `85fa5062e2ae4509174b6843ebc0066f4a94e2f2e90001230ca74c07aeb500dc` |
@@ -1013,7 +1048,7 @@ The generated build number is immutable. Any change to generated Go source bytes
 
 The public application version and generated build are separate identities. The current runtime identity is expected to render as:
 
-`Version 1.9.3 · Build v214`
+`Version 1.9.3 · Build v217`
 
 For future public pushes, increment the patch/micro version (`1.9.2` → `1.9.3` → `1.9.4`, and so on). Existing Git release tags are immutable: never reuse or move an existing version tag.
 
@@ -1073,11 +1108,11 @@ The **Local Conditions** panel is permanently reserved beside the Lat/Lon contro
 
 Dynamic HTML responses use no-cache headers so Safari/Dock WebView clients pick up new builds without requiring repeated manual website-data clearing. Runtime HTML displays both public version and generated build.
 
-Map controls place **Map Types**, **Map Overlays**, and **Center Map** on one row. The scale/status readout appears in the lower-right and reports approximate nautical miles, statute miles, and Leaflet zoom. Map Overlays is organized into accordion-style Weather & Hazards, Offshore Fishing, and Observations groups. In v188 the menu uses pure-CSS upward positioning with a bounded internal scroll area, avoiding browser-dependent viewport-positioning JavaScript in the map initialization path.
+Map controls place **Map Types**, **Map Overlays**, and **Center Map** on one row. The scale/status readout appears in the lower-right and reports approximate nautical miles, statute miles, and Leaflet zoom. Map Overlays is organized into accordion-style **Weather & Hazards**, **Wind & Pressure**, **Terrain & Seafloor**, and **Observations** groups. Wind barbs and observational isobars are intentionally grouped together because they are commonly interpreted as one wind/pressure picture; Saildrone remains under Observations. On narrow/iOS screens the overlay menu uses the fixed viewport-sheet behavior added in v212-v214 so Leaflet controls cannot cover it.
 
 NOAA Nautical Chart is considered practical at **Zoom 9+**. If Nautical is the preferred basemap and the user zooms below 9, Street Map is shown temporarily with a notice; Nautical automatically returns at Zoom 9+. Legitimate inland/no-chart blank areas at supported zooms are left unchanged.
 
-Map overlays include NWS forecast zone, NOAA HMS qualitative smoke, NOAA/NDBC Marine / Bay wind barbs, Aviation Weather Center METAR Land / Inland wind barbs, **Sea Surface Temp**, NOAA/NESDIS cloud cover, and NEXRAD radar. The two wind-barb layers share buffered viewport loading but use independent observation networks; zoom-dependent collision thinning keeps wide-area views readable. Sea Surface Temp is deferred/disabled in v195; the future approach is documented in this README, variable `analysed_sst`, a daily global Level-4 blended SST field at about 5 km resolution. v191 uses the PFEL/ERD host and its matching `nesdis...` dataset identifier for the primary path, with a matching Central-host fallback only for SST imagery. v189 uses the current NOAA NESDIS ERDDAP identifier after the older `noaacwBLENDEDsstDNDaily` path stopped serving the deployed overlay. `/sst-info` resolves the latest available dataset time and `/sst-overlay` renders the current map bounds through ERDDAP `griddap` as a transparent PNG using a fixed **35–95°F** wide-area fishing-oriented scale. Because the ERDDAP source image is linear in latitude while Leaflet is EPSG:3857 Web Mercator, v180 server-side reprojects the SST scanlines into Web Mercator before returning the PNG. The browser displays that reprojected PNG as a normal Leaflet image overlay at 0.50 opacity. CoastWatch's native transparent/no-data edge is preserved and no secondary coastline mask is applied. The wider fixed range avoids painting most warm tropical/subtropical water with one saturated hottest color while preserving cross-view comparability. At low zooms, Leaflet world wrapping can extend the viewport outside -180°/+180°. v183 keeps the reliable single-image path: it clips the visible viewport to the one 360° world copy containing the map center, translates that interval into NOAA's canonical longitude range, and displays the returned SST image over only that clipped interval. The projection fix improves geographic alignment at wide map extents; the approximately 5 km source grid still limits shoreline-scale detail. Saildrone Observations is a separate optional moving-platform layer backed by NOAA PMEL public ERDDAP; it displays the latest available position and met-ocean readings from configured 2026 missions and is not treated as a persistent local station network. v187 discovers each mission's ERDDAP schema before requesting data, requires only time/position for plotting, and treats wind, SST, salinity, currents, and wave measurements as optional enrichments. HMS smoke uses the current warm yellow → amber → burnt-orange light/medium/heavy palette. Smoke is qualitative satellite analysis, not AQI or measured PM2.5.
+Map overlays include NWS forecast zone, NOAA HMS qualitative smoke, NOAA/NDBC Marine / Bay wind barbs, Aviation Weather Center METAR Land / Inland wind barbs, **Surface Pressure / Isobars**, **Sea Surface Temp**, NOAA/NESDIS cloud cover, and NEXRAD radar. The two wind-barb layers share buffered viewport loading but use independent observation networks; zoom-dependent collision thinning keeps wide-area views readable. Sea Surface Temp is deferred/disabled in v195; the future approach is documented in this README, variable `analysed_sst`, a daily global Level-4 blended SST field at about 5 km resolution. v191 uses the PFEL/ERD host and its matching `nesdis...` dataset identifier for the primary path, with a matching Central-host fallback only for SST imagery. v189 uses the current NOAA NESDIS ERDDAP identifier after the older `noaacwBLENDEDsstDNDaily` path stopped serving the deployed overlay. `/sst-info` resolves the latest available dataset time and `/sst-overlay` renders the current map bounds through ERDDAP `griddap` as a transparent PNG using a fixed **35–95°F** wide-area fishing-oriented scale. Because the ERDDAP source image is linear in latitude while Leaflet is EPSG:3857 Web Mercator, v180 server-side reprojects the SST scanlines into Web Mercator before returning the PNG. The browser displays that reprojected PNG as a normal Leaflet image overlay at 0.50 opacity. CoastWatch's native transparent/no-data edge is preserved and no secondary coastline mask is applied. The wider fixed range avoids painting most warm tropical/subtropical water with one saturated hottest color while preserving cross-view comparability. At low zooms, Leaflet world wrapping can extend the viewport outside -180°/+180°. v183 keeps the reliable single-image path: it clips the visible viewport to the one 360° world copy containing the map center, translates that interval into NOAA's canonical longitude range, and displays the returned SST image over only that clipped interval. The projection fix improves geographic alignment at wide map extents; the approximately 5 km source grid still limits shoreline-scale detail. Saildrone Observations is a separate optional moving-platform layer backed by NOAA PMEL public ERDDAP; it displays the latest available position and met-ocean readings from configured 2026 missions and is not treated as a persistent local station network. v187 discovers each mission's ERDDAP schema before requesting data, requires only time/position for plotting, and treats wind, SST, salinity, currents, and wave measurements as optional enrichments. HMS smoke uses the current warm yellow → amber → burnt-orange light/medium/heavy palette. Smoke is qualitative satellite analysis, not AQI or measured PM2.5.
 
 The Welcome page reflects the current Conditions Now / Planning and Details workflow and retains the randomized Yogi Berra quotation. `assets/yogiisms.txt` currently contains the expanded 59-line quote set.
 

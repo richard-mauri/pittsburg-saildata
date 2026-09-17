@@ -28,7 +28,7 @@ import (
 
 const (
 	appVersion                      = "1.9.3"
-	buildVersion                    = "v214"
+	buildVersion                    = "v217"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -1987,15 +1987,17 @@ func runServer(
 	// keeping a short server-side cache avoids repeated full-feed downloads as
 	// the user pans the map.
 	type cachedMetarObservation struct {
-		Station string
-		Time    time.Time
-		Lat     float64
-		Lon     float64
-		Wdir    float64
-		HasWdir bool
-		Wspd    float64
-		Wgst    float64
-		HasWgst bool
+		Station     string
+		Time        time.Time
+		Lat         float64
+		Lon         float64
+		Wdir        float64
+		HasWdir     bool
+		Wspd        float64
+		Wgst        float64
+		HasWgst     bool
+		PressureMB  float64
+		HasPressure bool
 	}
 	var metarCacheMu sync.Mutex
 	var metarCacheAt time.Time
@@ -2034,13 +2036,15 @@ func runServer(
 		defer gz.Close()
 
 		type metarXML struct {
-			Station string `xml:"station_id"`
-			ObsTime string `xml:"observation_time"`
-			Lat     string `xml:"latitude"`
-			Lon     string `xml:"longitude"`
-			Wdir    string `xml:"wind_dir_degrees"`
-			Wspd    string `xml:"wind_speed_kt"`
-			Wgst    string `xml:"wind_gust_kt"`
+			Station     string `xml:"station_id"`
+			ObsTime     string `xml:"observation_time"`
+			Lat         string `xml:"latitude"`
+			Lon         string `xml:"longitude"`
+			Wdir        string `xml:"wind_dir_degrees"`
+			Wspd        string `xml:"wind_speed_kt"`
+			Wgst        string `xml:"wind_gust_kt"`
+			Pressure    string `xml:"sea_level_pressure_mb"`
+			PressureSLP string `xml:"slp_mb"`
 		}
 		var payload struct {
 			Data struct {
@@ -2077,6 +2081,15 @@ func runServer(
 				!math.IsNaN(wgst) && !math.IsInf(wgst, 0) && wgst >= 0 {
 				item.Wgst = wgst
 				item.HasWgst = true
+			}
+			pressureText := strings.TrimSpace(m.Pressure)
+			if pressureText == "" {
+				pressureText = strings.TrimSpace(m.PressureSLP)
+			}
+			if pressure, err := strconv.ParseFloat(pressureText, 64); err == nil &&
+				!math.IsNaN(pressure) && !math.IsInf(pressure, 0) && pressure >= 850 && pressure <= 1100 {
+				item.PressureMB = pressure
+				item.HasPressure = true
 			}
 			result = append(result, item)
 		}
@@ -2256,6 +2269,125 @@ func runServer(
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "private, max-age=60")
 		if err := json.NewEncoder(w).Encode(map[string]interface{}{"observations": items, "errors": errorsOut}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+
+	mux.HandleFunc("/pressure-observations", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		q := r.URL.Query()
+		parseBound := func(key string) (float64, error) {
+			text := strings.TrimSpace(q.Get(key))
+			if text == "" {
+				return 0, fmt.Errorf("%s is required", key)
+			}
+			value, err := strconv.ParseFloat(text, 64)
+			if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
+				return 0, fmt.Errorf("invalid %s %q", key, text)
+			}
+			return value, nil
+		}
+
+		minLat, err := parseBound("min_lat")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		maxLat, err := parseBound("max_lat")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		minLon, err := parseBound("min_lon")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		maxLon, err := parseBound("max_lon")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if minLat < -90 || maxLat > 90 || minLat >= maxLat || minLon < -180 || maxLon > 180 || minLon >= maxLon {
+			http.Error(w, "invalid pressure-observation bounds", http.StatusBadRequest)
+			return
+		}
+
+		// Pull pressure observations from a generous halo around the visible map.
+		// The additional stations stabilize the interpolated pressure field near
+		// viewport edges without affecting the displayed map extent.
+		latSpan := maxLat - minLat
+		lonSpan := maxLon - minLon
+		latPad := math.Max(1.0, math.Min(6.0, latSpan*0.65))
+		lonPad := math.Max(1.0, math.Min(8.0, lonSpan*0.65))
+		queryMinLat := math.Max(-90, minLat-latPad)
+		queryMaxLat := math.Min(90, maxLat+latPad)
+		queryMinLon := math.Max(-180, minLon-lonPad)
+		queryMaxLon := math.Min(180, maxLon+lonPad)
+
+		type pressureObservation struct {
+			Station    string  `json:"station"`
+			Time       string  `json:"time,omitempty"`
+			Lat        float64 `json:"lat"`
+			Lon        float64 `json:"lon"`
+			PressureMB float64 `json:"pressure_mb"`
+		}
+		items := make([]pressureObservation, 0, 128)
+		metars, metarErr := fetchCurrentMetars()
+		if metarErr != nil {
+			http.Error(w, "Aviation Weather Center METAR cache: "+metarErr.Error(), http.StatusBadGateway)
+			return
+		}
+		latest := time.Time{}
+		cutoff := time.Now().UTC().Add(-3 * time.Hour)
+		for _, m := range metars {
+			if !m.HasPressure ||
+				m.Lat < queryMinLat || m.Lat > queryMaxLat ||
+				m.Lon < queryMinLon || m.Lon > queryMaxLon {
+				continue
+			}
+			if !m.Time.IsZero() && m.Time.UTC().Before(cutoff) {
+				continue
+			}
+			if m.Time.After(latest) {
+				latest = m.Time
+			}
+			item := pressureObservation{
+				Station:    m.Station,
+				Lat:        m.Lat,
+				Lon:        m.Lon,
+				PressureMB: math.Round(m.PressureMB*10) / 10,
+			}
+			if !m.Time.IsZero() {
+				item.Time = m.Time.UTC().Format(time.RFC3339)
+			}
+			items = append(items, item)
+		}
+		sort.Slice(items, func(i, j int) bool {
+			return items[i].Station < items[j].Station
+		})
+
+		payload := struct {
+			Updated      string                `json:"updated,omitempty"`
+			Observations []pressureObservation `json:"observations"`
+			Source       string                `json:"source"`
+			Note         string                `json:"note"`
+		}{
+			Observations: items,
+			Source:       "NOAA/NWS Aviation Weather Center METAR sea-level pressure",
+			Note:         "Pressure contours are interpolated locally from current METAR mean sea-level pressure observations and are a planning aid, not an official surface-analysis product.",
+		}
+		if !latest.IsZero() {
+			payload.Updated = latest.UTC().Format(time.RFC3339)
+		}
+
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "private, max-age=60")
+		if err := json.NewEncoder(w).Encode(payload); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 	})
@@ -5944,7 +6076,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 <section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Open the full planning dashboard for location, wind, currents, forecasts, map layers, and customization controls.</p></div><a id="planning-page-link" class="planning-page-link" href="{{.PlanningDetailsURL}}">Planning and Details →</a></section>
 {{else}}
 <section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Full planning dashboard and customization controls.</p></div><a class="planning-page-link" href="{{.ConditionsURL}}">← Back to Conditions Now</a></section>
-<section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map to choose a sailing location, then use Find stations near selected location. The latitude/longitude fields always show the current map center; you may edit them and use Center Map → Latitude & Longitude to pan there without changing the selected sailing location. My location also centers the map only. Panning changes the view, not the selected ★ location. Click a nearby wind station to pin its details and preview the associated currents station, then use the selection link in the map panel to commit the wind-station choice. Candidate stations and distances always refer to the selected location.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-nautical-zoom-note" class="map-nautical-zoom-note" hidden aria-live="polite">Nautical chart available at Zoom 9+.</div><div id="map-resize-handle" class="map-resize-handle" role="separator" aria-label="Resize map vertically" aria-orientation="horizontal" aria-valuemin="260" aria-valuemax="900" aria-valuenow="390" aria-grabbed="false" tabindex="0" title="Drag up or down to resize map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-state-controls" aria-label="Map controls"><details id="map-types-menu" class="map-overlays-menu"><summary>Map Types</summary><div class="map-overlays-panel"><label class="map-overlay-toggle"><input type="radio" name="map-type" value="map"> <span>Street Map</span></label><label id="map-type-nautical-label" class="map-overlay-toggle"><input id="map-type-nautical" type="radio" name="map-type" value="nautical"> <span>Nautical Chart <small>(Zoom 9+)</small></span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="satellite"> <span>Satellite</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="hybrid"> <span>Hybrid</span></label></div></details><details id="map-overlays-menu" class="map-overlays-menu"><summary>Map Overlays</summary><div class="map-overlays-panel"><details class="map-overlay-group"><summary>Weather &amp; Hazards</summary><div class="map-overlay-group-body"><label id="map-marine-zone-control" class="map-overlay-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-smoke"> <span>Satellite smoke (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-clouds"> <span>Satellite Cloud Cover (NOAA)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-radar"> <span>Weather radar (NOAA/NWS)</span></label></div></details><details class="map-overlay-group" open><summary>Terrain &amp; Seafloor</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-structure"> <span>Topography &amp; Bathymetry (NOAA ETOPO + offshore feature names)</span></label></div></details><details class="map-overlay-group"><summary>Observations</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-wind-barbs"> <span>Marine / Bay Wind Barbs (NOAA/NDBC)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-inland-wind-barbs"> <span>Land / Inland Wind Barbs (METAR)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-saildrone"> <span>Saildrone Observations (NOAA PMEL)</span></label></div></details></div></details><details id="map-center-menu" class="map-overlays-menu"><summary>Center Map</summary><div class="map-overlays-panel map-center-panel"><button type="button" id="map-geolocate" class="map-center-action" title="Center the map on your device location without changing the selected location">My location</button><button type="button" id="map-nav-coordinates" class="map-center-action" title="Center the map on the latitude and longitude shown below">Latitude &amp; Longitude</button><button type="button" id="map-nav-selected" class="map-center-action" {{if not .MapHasRequest}}disabled{{end}}>Selected location</button><button type="button" id="map-nav-wind" class="map-center-action" {{if not .MapHasWind}}disabled{{end}}>Selected wind station</button><button type="button" id="map-nav-current" class="map-center-action" {{if not .MapHasCurrent}}disabled{{end}}>Selected currents station</button></div></details><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if .MapHasRequest}}false{{else}}true{{end}}" {{if not .MapHasRequest}}disabled{{end}}>Clear selected location, station &amp; candidates</button></div><div class="map-location-info-grid"><div class="map-coordinate-entry" aria-label="Map center coordinates"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLat}}" aria-label="Map center latitude"></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLon}}" aria-label="Map center longitude"></div><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div id="selected-location-weather" class="selected-location-weather" aria-live="polite"><div class="selected-location-weather-head"><strong>Local Conditions</strong><span id="selected-location-weather-updated" class="selected-location-weather-updated">{{if .SelectedWeatherUpdated}}Updated {{.SelectedWeatherUpdated}}{{end}}</span></div><div id="selected-location-weather-place" class="selected-location-weather-place">{{if .MapHasRequest}}{{if .SelectedWeatherLocation}}{{.SelectedWeatherLocation}}{{else}}Near selected location{{end}}{{else}}Select a location for local conditions{{end}}</div><div id="selected-location-weather-content" {{if not .MapHasRequest}}hidden{{end}}><div class="selected-location-weather-metrics"><span class="selected-location-weather-metric"><b>Air temp:</b> <span id="selected-location-weather-air">{{if .SelectedWeatherAirTemp}}{{.SelectedWeatherAirTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>High:</b> <span id="selected-location-weather-high">{{if .SelectedWeatherHighTemp}}{{.SelectedWeatherHighTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>Low:</b> <span id="selected-location-weather-low">{{if .SelectedWeatherLowTemp}}{{.SelectedWeatherLowTemp}}{{else}}—{{end}}</span></span></div><p id="selected-location-weather-forecast" class="selected-location-weather-forecast" {{if not .SelectedWeatherShortForecast}}hidden{{end}}>{{.SelectedWeatherShortForecast}}</p><p id="selected-location-weather-error" class="selected-location-weather-error" {{if not .SelectedWeatherError}}hidden{{end}}>{{.SelectedWeatherError}}</p><p class="selected-location-weather-note">NWS point forecast near the selected location. Air temperature is the current-hour forecast, not a direct observation.</p></div></div></div><div class="map-controls"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Select a location to find stations</span><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><details class="map-overlay-help"><summary>Map overlay details</summary><div class="map-overlay-help-body">Topography & Bathymetry combines NOAA/NCEI ETOPO land topography and seafloor bathymetry with NOAA Marine Cadastre official named offshore features. Fishing-relevant features such as seamounts, banks, ridges, hills, knolls, shoals, reefs, rises, plateaus, pinnacles, and escarpments are labeled locally for better contrast. It is intended for fishing-planning context, not navigation; smaller pinnacles may not appear in the global relief model. Marine / Bay Wind Barbs uses live NOAA/NDBC station observations from all active stations with usable wind inside the buffered map viewport; standard meteorological barbs show wind-from direction and speed, and stale observations are faded. Land / Inland Wind Barbs is a separate optional layer sourced from Aviation Weather Center’s complete current-METAR cache and filtered locally to the buffered viewport, including many ASOS/AWOS airport sites. Both controls are display-only and do not change the selected wind station or sailing location. Wind-barb tooltips follow the shared page Wind units preference; barb geometry remains based on standard knot increments. Saildrone Observations uses NOAA PMEL public ERDDAP mission data and plots the latest reported position and met-ocean readings from configured 2026 NOAA Saildrone missions; availability is mission-dependent and these moving platforms are not a fixed station network. Exact positions are plotted only when the source provides them; fisherman shorthand such as “20×20” is shown as a derived approximate position with an uncertainty circle, and broad reports such as “Cordell to Monterey” are shown as regional zones rather than fake point coordinates. Satellite Cloud Cover uses NOAA/NESDIS GOES imagery rendered for the current map view; daylight areas appear natural-color-like and nighttime areas use infrared imagery. Radar uses Iowa State IEM's Web-Mercator CONUS NEXRAD N0Q WMS layer; a clear/transparent radar layer can simply mean no precipitation echoes are present.</div></details><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-weather-overlay-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div id="map-structure-status" class="map-structure-status" hidden></div><div id="map-windbarb-status" class="map-windbarb-status" hidden></div><div id="map-saildrone-status" class="map-saildrone-status" hidden></div><div class="map-layer-note">Drag the handle directly below the map to make the map taller or shorter. Keyboard users can focus the handle and use ↑/↓ (Shift for larger steps).</div><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span><span class="map-key"><span class="map-dot saildrone" aria-hidden="true"></span>Saildrone latest position</span></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
+<section class="card full map-card"><div class="map-intro"><div><h2>Choose Location</h2><div class="map-help">Click the map to choose a sailing location, then use Find stations near selected location. The latitude/longitude fields always show the current map center; you may edit them and use Center Map → Latitude & Longitude to pan there without changing the selected sailing location. My location also centers the map only. Panning changes the view, not the selected ★ location. Click a nearby wind station to pin its details and preview the associated currents station, then use the selection link in the map panel to commit the wind-station choice. Candidate stations and distances always refer to the selected location.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-nautical-zoom-note" class="map-nautical-zoom-note" hidden aria-live="polite">Nautical chart available at Zoom 9+.</div><div id="map-resize-handle" class="map-resize-handle" role="separator" aria-label="Resize map vertically" aria-orientation="horizontal" aria-valuemin="260" aria-valuemax="900" aria-valuenow="390" aria-grabbed="false" tabindex="0" title="Drag up or down to resize map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-state-controls" aria-label="Map controls"><details id="map-types-menu" class="map-overlays-menu"><summary>Map Types</summary><div class="map-overlays-panel"><label class="map-overlay-toggle"><input type="radio" name="map-type" value="map"> <span>Street Map</span></label><label id="map-type-nautical-label" class="map-overlay-toggle"><input id="map-type-nautical" type="radio" name="map-type" value="nautical"> <span>Nautical Chart <small>(Zoom 9+)</small></span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="satellite"> <span>Satellite</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="hybrid"> <span>Hybrid</span></label></div></details><details id="map-overlays-menu" class="map-overlays-menu"><summary>Map Overlays</summary><div class="map-overlays-panel"><details class="map-overlay-group"><summary>Weather &amp; Hazards</summary><div class="map-overlay-group-body"><label id="map-marine-zone-control" class="map-overlay-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-smoke"> <span>Satellite smoke (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-clouds"> <span>Satellite Cloud Cover (NOAA)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-radar"> <span>Weather radar (NOAA/NWS)</span></label></div></details><details class="map-overlay-group"><summary>Wind &amp; Pressure</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-wind-barbs"> <span>Marine / Bay Wind Barbs (NOAA/NDBC)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-inland-wind-barbs"> <span>Land / Inland Wind Barbs (METAR)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-pressure"> <span>Surface Pressure / Isobars (NOAA/NWS METAR)</span></label></div></details><details class="map-overlay-group" open><summary>Terrain &amp; Seafloor</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-structure"> <span>Topography &amp; Bathymetry (NOAA ETOPO + offshore feature names)</span></label></div></details><details class="map-overlay-group"><summary>Observations</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-saildrone"> <span>Saildrone Observations (NOAA PMEL)</span></label></div></details></div></details><details id="map-center-menu" class="map-overlays-menu"><summary>Center Map</summary><div class="map-overlays-panel map-center-panel"><button type="button" id="map-geolocate" class="map-center-action" title="Center the map on your device location without changing the selected location">My location</button><button type="button" id="map-nav-coordinates" class="map-center-action" title="Center the map on the latitude and longitude shown below">Latitude &amp; Longitude</button><button type="button" id="map-nav-selected" class="map-center-action" {{if not .MapHasRequest}}disabled{{end}}>Selected location</button><button type="button" id="map-nav-wind" class="map-center-action" {{if not .MapHasWind}}disabled{{end}}>Selected wind station</button><button type="button" id="map-nav-current" class="map-center-action" {{if not .MapHasCurrent}}disabled{{end}}>Selected currents station</button></div></details><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates}}false{{else}}true{{end}}" {{if not (or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates)}}disabled{{end}}>Clear selected location, station &amp; candidates</button></div><div class="map-location-info-grid"><div class="map-coordinate-entry" aria-label="Map center coordinates"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLat}}" aria-label="Map center latitude"></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLon}}" aria-label="Map center longitude"></div><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div id="selected-location-weather" class="selected-location-weather" aria-live="polite"><div class="selected-location-weather-head"><strong>Local Conditions</strong><span id="selected-location-weather-updated" class="selected-location-weather-updated">{{if .SelectedWeatherUpdated}}Updated {{.SelectedWeatherUpdated}}{{end}}</span></div><div id="selected-location-weather-place" class="selected-location-weather-place">{{if .MapHasRequest}}{{if .SelectedWeatherLocation}}{{.SelectedWeatherLocation}}{{else}}Near selected location{{end}}{{else}}Select a location for local conditions{{end}}</div><div id="selected-location-weather-content" {{if not .MapHasRequest}}hidden{{end}}><div class="selected-location-weather-metrics"><span class="selected-location-weather-metric"><b>Air temp:</b> <span id="selected-location-weather-air">{{if .SelectedWeatherAirTemp}}{{.SelectedWeatherAirTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>High:</b> <span id="selected-location-weather-high">{{if .SelectedWeatherHighTemp}}{{.SelectedWeatherHighTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>Low:</b> <span id="selected-location-weather-low">{{if .SelectedWeatherLowTemp}}{{.SelectedWeatherLowTemp}}{{else}}—{{end}}</span></span></div><p id="selected-location-weather-forecast" class="selected-location-weather-forecast" {{if not .SelectedWeatherShortForecast}}hidden{{end}}>{{.SelectedWeatherShortForecast}}</p><p id="selected-location-weather-error" class="selected-location-weather-error" {{if not .SelectedWeatherError}}hidden{{end}}>{{.SelectedWeatherError}}</p><p class="selected-location-weather-note">NWS point forecast near the selected location. Air temperature is the current-hour forecast, not a direct observation.</p></div></div></div><div class="map-controls"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Select a location to find stations</span><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><details class="map-overlay-help"><summary>Map overlay details</summary><div class="map-overlay-help-body">Topography & Bathymetry combines NOAA/NCEI ETOPO land topography and seafloor bathymetry with NOAA Marine Cadastre official named offshore features. Fishing-relevant features such as seamounts, banks, ridges, hills, knolls, shoals, reefs, rises, plateaus, pinnacles, and escarpments are labeled locally for better contrast. It is intended for fishing-planning context, not navigation; smaller pinnacles may not appear in the global relief model. Marine / Bay Wind Barbs uses live NOAA/NDBC station observations from all active stations with usable wind inside the buffered map viewport; standard meteorological barbs show wind-from direction and speed, and stale observations are faded. Land / Inland Wind Barbs is a separate optional layer sourced from Aviation Weather Center’s complete current-METAR cache and filtered locally to the buffered viewport, including many ASOS/AWOS airport sites. Both controls are display-only and do not change the selected wind station or sailing location. Wind-barb tooltips follow the shared page Wind units preference; barb geometry remains based on standard knot increments. Saildrone Observations uses NOAA PMEL public ERDDAP mission data and plots the latest reported position and met-ocean readings from configured 2026 NOAA Saildrone missions; availability is mission-dependent and these moving platforms are not a fixed station network. Exact positions are plotted only when the source provides them; fisherman shorthand such as “20×20” is shown as a derived approximate position with an uncertainty circle, and broad reports such as “Cordell to Monterey” are shown as regional zones rather than fake point coordinates. Satellite Cloud Cover uses NOAA/NESDIS GOES imagery rendered for the current map view; daylight areas appear natural-color-like and nighttime areas use infrared imagery. Radar uses Iowa State IEM's Web-Mercator CONUS NEXRAD N0Q WMS layer; a clear/transparent radar layer can simply mean no precipitation echoes are present. Surface Pressure / Isobars uses current NOAA/NWS Aviation Weather Center METAR mean sea-level-pressure observations. The browser interpolates those point observations into contour lines at a zoom-appropriate interval; it is useful pressure-gradient context but is not an official analyzed surface chart.</div></details><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-weather-overlay-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-pressure-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div id="map-structure-status" class="map-structure-status" hidden></div><div id="map-windbarb-status" class="map-windbarb-status" hidden></div><div id="map-saildrone-status" class="map-saildrone-status" hidden></div><div class="map-layer-note">Drag the handle directly below the map to make the map taller or shorter. Keyboard users can focus the handle and use ↑/↓ (Shift for larger steps).</div><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span><span class="map-key"><span class="map-dot saildrone" aria-hidden="true"></span>Saildrone latest position</span></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
 {{if .WindError}}<section class="card full error-card"><h2>Wind station selection unavailable</h2><p class="error-message">{{.WindError}}</p><p class="error-help">The page is still available so you can inspect the request and nearby station diagnostics. Try nearby coordinates or an explicit NDBC station ID.</p></section>{{end}}
 <section class="card full wind-card"><div class="wind-card-head"><h2>Wind</h2></div>
 <div class="metrics">
@@ -6087,6 +6219,14 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   map.createPane("radarOverlayPane");
   map.getPane("radarOverlayPane").style.zIndex = 440;
   map.getPane("radarOverlayPane").style.pointerEvents = "none";
+
+  map.createPane("pressureOverlayPane");
+  map.getPane("pressureOverlayPane").style.zIndex = 445;
+  map.getPane("pressureOverlayPane").style.pointerEvents = "none";
+
+  map.createPane("pressureLabelPane");
+  map.getPane("pressureLabelPane").style.zIndex = 446;
+  map.getPane("pressureLabelPane").style.pointerEvents = "none";
 
   map.createPane("forecastZoneHaloPane");
   map.getPane("forecastZoneHaloPane").style.zIndex = 455;
@@ -6417,6 +6557,11 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       attribution: "NWS NEXRAD radar via Iowa State IEM"
     }
   );
+
+  var pressureLineLayer = L.layerGroup();
+  var pressureLabelLayer = L.layerGroup();
+  var pressureRequestSerial = 0;
+  var pressureRefreshTimer = null;
 
   function setSaildroneStatus(message, isError) {
     var status = document.getElementById("map-saildrone-status");
@@ -7072,6 +7217,307 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     }
   });
 
+
+  function setPressureStatus(message, isError) {
+    var status = document.getElementById("map-pressure-status");
+    if (!status) return;
+    message = String(message || "").trim();
+    status.hidden = !message;
+    status.textContent = message;
+    status.style.color = isError ? "#9a352f" : "";
+  }
+
+  function pressureContourIntervalMB() {
+    var zoom = map.getZoom();
+    if (zoom >= 8) return 1;
+    if (zoom >= 6) return 2;
+    return 4;
+  }
+
+  function pressureObservationURL(bounds) {
+    var params = new URLSearchParams();
+    params.set("min_lat", bounds.getSouth().toFixed(5));
+    params.set("max_lat", bounds.getNorth().toFixed(5));
+    params.set("min_lon", bounds.getWest().toFixed(5));
+    params.set("max_lon", bounds.getEast().toFixed(5));
+    return "/pressure-observations?" + params.toString();
+  }
+
+  function pressureGridValue(points, lat, lon, cosLat) {
+    var weighted = 0;
+    var weightSum = 0;
+    var exact = null;
+    for (var i = 0; i < points.length; i++) {
+      var point = points[i];
+      var dx = (Number(point.lon) - lon) * cosLat;
+      var dy = Number(point.lat) - lat;
+      var d2 = dx * dx + dy * dy;
+      var pressure = Number(point.pressure_mb);
+      if (!Number.isFinite(pressure)) continue;
+      if (d2 < 0.0004) {
+        exact = pressure;
+        break;
+      }
+      // Shepard-style interpolation. The small floor prevents one nearby
+      // station from creating an unrealistically sharp bullseye.
+      var weight = 1 / Math.pow(d2 + 0.0125, 1.15);
+      weighted += pressure * weight;
+      weightSum += weight;
+    }
+    if (exact !== null) return exact;
+    return weightSum > 0 ? weighted / weightSum : NaN;
+  }
+
+  function pressureEdgeCross(level, a, b) {
+    var aHigh = a.v >= level;
+    var bHigh = b.v >= level;
+    if (aHigh === bHigh || !Number.isFinite(a.v) || !Number.isFinite(b.v)) return null;
+    var denom = b.v - a.v;
+    var t = Math.abs(denom) < 1e-9 ? 0.5 : (level - a.v) / denom;
+    t = Math.max(0, Math.min(1, t));
+    return [
+      a.lat + (b.lat - a.lat) * t,
+      a.lon + (b.lon - a.lon) * t
+    ];
+  }
+
+  function renderPressureContours(points, bounds) {
+    pressureLineLayer.clearLayers();
+    pressureLabelLayer.clearLayers();
+
+    if (!Array.isArray(points) || points.length < 6) {
+      return {segments:0, levels:0, min:null, max:null, interval:pressureContourIntervalMB()};
+    }
+
+    var size = map.getSize();
+    var cols = Math.max(30, Math.min(64, Math.round(size.x / 14)));
+    var rows = Math.max(24, Math.min(52, Math.round(size.y / 14)));
+    var north = bounds.getNorth();
+    var south = bounds.getSouth();
+    var west = bounds.getWest();
+    var east = bounds.getEast();
+    var midLat = (north + south) / 2;
+    var cosLat = Math.max(0.2, Math.cos(midLat * Math.PI / 180));
+    var grid = new Array(rows);
+    var minValue = Infinity;
+    var maxValue = -Infinity;
+
+    for (var r = 0; r < rows; r++) {
+      var lat = north - (north - south) * r / (rows - 1);
+      grid[r] = new Array(cols);
+      for (var c = 0; c < cols; c++) {
+        var lon = west + (east - west) * c / (cols - 1);
+        var value = pressureGridValue(points, lat, lon, cosLat);
+        grid[r][c] = {lat:lat, lon:lon, v:value};
+        if (Number.isFinite(value)) {
+          minValue = Math.min(minValue, value);
+          maxValue = Math.max(maxValue, value);
+        }
+      }
+    }
+
+    if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) {
+      return {segments:0, levels:0, min:null, max:null, interval:pressureContourIntervalMB()};
+    }
+
+    var interval = pressureContourIntervalMB();
+    var firstLevel = Math.ceil(minValue / interval) * interval;
+    var lastLevel = Math.floor(maxValue / interval) * interval;
+    var levelCount = 0;
+    var segmentCount = 0;
+    var mapCenter = map.getCenter();
+
+    for (var level = firstLevel; level <= lastLevel + 0.001; level += interval) {
+      var segments = [];
+      var bestLabel = null;
+      var bestLabelDistance = Infinity;
+
+      for (var rr = 0; rr < rows - 1; rr++) {
+        for (var cc = 0; cc < cols - 1; cc++) {
+          var a = grid[rr][cc];
+          var b = grid[rr][cc + 1];
+          var c2 = grid[rr + 1][cc + 1];
+          var d = grid[rr + 1][cc];
+          if (![a.v,b.v,c2.v,d.v].every(Number.isFinite)) continue;
+
+          var crossings = [];
+          var cross;
+          cross = pressureEdgeCross(level, a, b); if (cross) crossings.push(cross);
+          cross = pressureEdgeCross(level, b, c2); if (cross) crossings.push(cross);
+          cross = pressureEdgeCross(level, c2, d); if (cross) crossings.push(cross);
+          cross = pressureEdgeCross(level, d, a); if (cross) crossings.push(cross);
+
+          var pairs = [];
+          if (crossings.length === 2) {
+            pairs.push([crossings[0], crossings[1]]);
+          } else if (crossings.length === 4) {
+            var centerValue = (a.v + b.v + c2.v + d.v) / 4;
+            if (centerValue >= level) {
+              pairs.push([crossings[0], crossings[3]]);
+              pairs.push([crossings[1], crossings[2]]);
+            } else {
+              pairs.push([crossings[0], crossings[1]]);
+              pairs.push([crossings[2], crossings[3]]);
+            }
+          }
+
+          pairs.forEach(function(pair) {
+            segments.push(pair);
+            segmentCount++;
+            var mlat = (pair[0][0] + pair[1][0]) / 2;
+            var mlon = (pair[0][1] + pair[1][1]) / 2;
+            var dx = (mlon - mapCenter.lng) * cosLat;
+            var dy = mlat - mapCenter.lat;
+            var dist2 = dx * dx + dy * dy;
+            if (dist2 < bestLabelDistance) {
+              bestLabelDistance = dist2;
+              bestLabel = [mlat, mlon];
+            }
+          });
+        }
+      }
+
+      if (segments.length === 0) continue;
+      levelCount++;
+
+      L.polyline(segments, {
+        pane: "pressureOverlayPane",
+        color: "#ffffff",
+        weight: 4.2,
+        opacity: 0.72,
+        interactive: false,
+        lineCap: "round",
+        lineJoin: "round"
+      }).addTo(pressureLineLayer);
+
+      L.polyline(segments, {
+        pane: "pressureOverlayPane",
+        color: "#59318a",
+        weight: 1.8,
+        opacity: 0.94,
+        interactive: false,
+        lineCap: "round",
+        lineJoin: "round"
+      }).addTo(pressureLineLayer);
+
+      if (bestLabel) {
+        var labelIcon = L.divIcon({
+          className: "",
+          html: '<span style="display:inline-block;padding:1px 4px;border:1px solid #59318a;border-radius:4px;background:rgba(255,255,255,.88);color:#422467;font:600 10px/1.25 system-ui,-apple-system,BlinkMacSystemFont,sans-serif;white-space:nowrap;">' +
+            Math.round(level) + ' mb</span>',
+          iconSize: null
+        });
+        L.marker(bestLabel, {
+          pane: "pressureLabelPane",
+          icon: labelIcon,
+          interactive: false
+        }).addTo(pressureLabelLayer);
+      }
+    }
+
+    return {
+      segments: segmentCount,
+      levels: levelCount,
+      min: minValue,
+      max: maxValue,
+      interval: interval
+    };
+  }
+
+  function refreshPressureOverlay() {
+    if (!mapState.pressureOverlayVisible) return;
+    var requestSerial = ++pressureRequestSerial;
+    var bounds = map.getBounds();
+    setPressureStatus("Loading current sea-level pressure observations…", false);
+
+    fetch(pressureObservationURL(bounds), {headers: {"Accept":"application/json"}})
+      .then(function(response) {
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        return response.json();
+      })
+      .then(function(payload) {
+        if (!mapState.pressureOverlayVisible || requestSerial !== pressureRequestSerial) return;
+        var observations = Array.isArray(payload.observations) ? payload.observations : [];
+        var result = renderPressureContours(observations, bounds);
+
+        if (!map.hasLayer(pressureLineLayer)) pressureLineLayer.addTo(map);
+        if (!map.hasLayer(pressureLabelLayer)) pressureLabelLayer.addTo(map);
+
+        if (observations.length < 6) {
+          setPressureStatus(
+            "Surface Pressure / Isobars · only " + observations.length +
+            " current METAR pressure observations available near this view; at least 6 are needed for contours.",
+            true
+          );
+          return;
+        }
+        if (result.levels === 0) {
+          setPressureStatus(
+            "Surface Pressure / Isobars · " + observations.length +
+            " current METAR pressure observations · pressure range is too small for a " +
+            result.interval + " mb contour in this view.",
+            false
+          );
+          return;
+        }
+
+        var updatedText = "";
+        if (payload.updated) {
+          var updated = new Date(payload.updated);
+          if (!Number.isNaN(updated.getTime())) {
+            updatedText = " · latest observation " +
+              updated.toLocaleTimeString([], {hour:"numeric", minute:"2-digit"});
+          }
+        }
+        setPressureStatus(
+          "Surface Pressure / Isobars · " + observations.length +
+          " METAR pressure observations · " + result.interval +
+          " mb interval · interpolated observational field" + updatedText +
+          " · planning context, not an official analyzed surface chart.",
+          false
+        );
+      })
+      .catch(function(err) {
+        if (!mapState.pressureOverlayVisible || requestSerial !== pressureRequestSerial) return;
+        pressureLineLayer.clearLayers();
+        pressureLabelLayer.clearLayers();
+        setPressureStatus(
+          "Surface Pressure / Isobars could not be loaded: " +
+          String(err && err.message ? err.message : err || "unknown error"),
+          true
+        );
+      });
+  }
+
+  function schedulePressureRefresh() {
+    if (!mapState.pressureOverlayVisible) return;
+    if (pressureRefreshTimer) window.clearTimeout(pressureRefreshTimer);
+    pressureRefreshTimer = window.setTimeout(function() {
+      pressureRefreshTimer = null;
+      refreshPressureOverlay();
+    }, 220);
+  }
+
+  function setPressureOverlayVisible(visible) {
+    mapState.pressureOverlayVisible = !!visible;
+    if (!mapState.pressureOverlayVisible) {
+      pressureRequestSerial++;
+      if (pressureRefreshTimer) {
+        window.clearTimeout(pressureRefreshTimer);
+        pressureRefreshTimer = null;
+      }
+      pressureLineLayer.clearLayers();
+      pressureLabelLayer.clearLayers();
+      if (map.hasLayer(pressureLineLayer)) map.removeLayer(pressureLineLayer);
+      if (map.hasLayer(pressureLabelLayer)) map.removeLayer(pressureLabelLayer);
+      setPressureStatus("", false);
+      return;
+    }
+    if (!map.hasLayer(pressureLineLayer)) pressureLineLayer.addTo(map);
+    if (!map.hasLayer(pressureLabelLayer)) pressureLabelLayer.addTo(map);
+    refreshPressureOverlay();
+  }
+
   function updateRecenterControls() {
     var selectedButton = document.getElementById("map-nav-selected");
     var windButton = document.getElementById("map-nav-wind");
@@ -7181,7 +7627,8 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     inlandWindBarbsVisible: false,
     saildroneVisible: false,
     cloudOverlayVisible: false,
-    radarOverlayVisible: false
+    radarOverlayVisible: false,
+    pressureOverlayVisible: false
   };
 
   var sourcePoints = [];
@@ -8142,6 +8589,14 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     });
   }
 
+  var pressureCheckbox = document.getElementById("map-show-pressure");
+  if (pressureCheckbox) {
+    pressureCheckbox.checked = !!mapState.pressureOverlayVisible;
+    pressureCheckbox.addEventListener("change", function() {
+      setPressureOverlayVisible(!!pressureCheckbox.checked);
+    });
+  }
+
   ["drag", "move", "zoom"].forEach(function(eventName) {
     map.on(eventName, function() {
       syncCoordinateInputsToMapCenter();
@@ -8154,6 +8609,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     updateMapScaleStatus();
     if (mapState.structureOverlayVisible) scheduleStructureRefresh();
     if (mapState.cloudOverlayVisible) scheduleCloudRefresh();
+    if (mapState.pressureOverlayVisible) schedulePressureRefresh();
     if (mapState.windBarbsVisible || mapState.inlandWindBarbsVisible) scheduleWindBarbRefresh();
     if (mapState.saildroneVisible && saildroneLayer) updateSaildroneViewportStatus();
 
@@ -8219,9 +8675,14 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     }
 
     if (reset) {
-      var hasSelectedLocation = !!mapState.selectedLocation;
-      reset.disabled = !hasSelectedLocation;
-      reset.setAttribute("aria-disabled", hasSelectedLocation ? "false" : "true");
+      var hasClearableMapState =
+        !!mapState.selectedLocation ||
+        !!normalizeWindStationID(mapState.selectedWindStationID) ||
+        !!selectedWindMarker ||
+        !!currentStationMarker ||
+        mapState.windCandidates.length > 0;
+      reset.disabled = !hasClearableMapState;
+      reset.setAttribute("aria-disabled", hasClearableMapState ? "false" : "true");
     }
 
     updateRecenterControls();
@@ -9120,7 +9581,13 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 
   if (reset) {
     reset.addEventListener("click", function() {
-      if (!mapState.selectedLocation) return;
+      var hasClearableMapState =
+        !!mapState.selectedLocation ||
+        !!normalizeWindStationID(mapState.selectedWindStationID) ||
+        !!selectedWindMarker ||
+        !!currentStationMarker ||
+        mapState.windCandidates.length > 0;
+      if (!hasClearableMapState) return;
 
       mapState.selectedLocation = null;
       mapState.selectedWindStationID = "";
