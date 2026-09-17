@@ -7,12 +7,38 @@ The default wind station is **PSBC1**.
 ## Current release
 
 **Public version: 1.9.3**  
-**Generated source lineage: v217**
+**Generated source lineage: v232**
 
 **Current SST status:** deferred/disabled in v195; see **Deferred SST — future approach** below.
 **Current chlorophyll status:** both Chlorophyll Field and Chlorophyll Contours are deferred/disabled in v198.
 
 Version 1.9.2 builds on the streamlined browser workflow with clearer observation freshness, better page-loading feedback, and an updated Welcome page that matches the current planning and map functionality. The main conditions page now focuses on **Conditions Now**, including compact wind metrics and a one-day tidal-current graph. The rest of the dashboard is available from a separate **Planning and Details** page, which preserves the active query state and provides the full set of planning, map, current, wind, forecast, and customization controls.
+
+
+## v232 wind-chart Safari artifact fix
+
+- Fixes the stray vertical line at the far left of the **Latest wind readings** graph and the small clipped gust fragment that could appear above it in Safari/WebKit on both macOS and iOS.
+- The interactive chart inspector no longer relies on the SVG `hidden` attribute, which WebKit could partially paint before the inspector was activated.
+- Inspector visibility is now controlled explicitly with `display:none` / `display`, and its cursor line and marker circles are initialized at the chart's actual plot boundary instead of SVG coordinate zero.
+- Sustained-wind and gust data, chart scaling, history selection, tap/drag inspection, keyboard inspection, and mobile label sizing are unchanged.
+- Advanced runtime identity to **Version 1.9.3 · Build v232**.
+
+## v231 iOS wind-readings scroll cue
+
+- The **Latest wind readings** table keeps its compact independently scrollable list on narrow/mobile screens.
+- Because iOS Safari normally hides its native overlay scrollbar until scrolling begins, the list now shows a subtle bottom fade and **Scroll for more ↓** cue whenever additional readings are below the visible area.
+- The cue automatically disappears when the user reaches the end of the readings and reappears if the list is scrolled upward again.
+- The cue is only shown when the list actually overflows; short histories that fit completely in the panel do not show it.
+- Changing the wind-history interval resets the readings list to the top and recalculates the cue after the updated observations are rendered.
+- Desktop layout and the wind-history data itself are unchanged.
+
+## v230 UI consistency
+
+- Map Types, Map Overlays, and Center Map now show an explicit **× close button on desktop as well as mobile**.
+- Clicking outside any of those map menus now closes it on macOS/desktop browsers too.
+- Narrow/mobile layouts retain dismissal-only outside taps so the same tap cannot also select a map location or activate a control beneath the sheet.
+- Existing modal information popups continue to provide their visible × button, backdrop/outside dismissal, and Escape dismissal.
+- Native `<details>/<summary>` opening behavior remains untouched to avoid the prior iOS Safari Map Overlays regression.
 
 ## What it does
 
@@ -83,6 +109,7 @@ Browser wind features include:
 - draggable/tappable inspection cursor that snaps to actual observations
 - compact Latest Wind Readings table with a sticky header and roughly three visible rows
 - shared page-level wind units control: knots or MPH, synchronized between Conditions Now and Planning and Details
+- shared page-level distance units control: nautical miles or statute miles, synchronized between Conditions Now and Planning and Details
 
 The recent-wind selector uses:
 
@@ -146,7 +173,7 @@ For multi-day reports, the overall planning result uses the worst status present
 
 The interactive Leaflet map keeps selected location, committed stations, candidate stations, and map viewport as distinct pieces of state.
 
-A user establishes the selected sailing location by clicking the map. The selected location is distinct from the map viewport center, and panning or zooming does not change it.
+A user establishes the selected location by clicking the map. The selected location is distinct from the map viewport center, and panning or zooming does not change it.
 
 The latitude and longitude fields are intended to display the current map viewport center. v127 resolves those input elements directly during each Leaflet synchronization and listens across drag/move/zoom completion paths. A user may edit either field normally; typing does not select a sailing location or move the map. The edited pair is applied only by choosing **Center Map → Latitude & Longitude**, which validates the coordinates and pans the map there while preserving zoom.
 
@@ -164,7 +191,7 @@ The **Map Types**, **Map Overlays**, and **Center Map** dropdowns share one map-
 
 Recenter actions preserve the current zoom level. The selected currents station associated with the active wind station is always shown on the map when available; there is no separate visibility checkbox. Clearing the selected location also clears the committed wind-station map selection, its associated currents-station marker, and the wind-station candidates derived from that location. The clear action removes `lat`, `lon`, `station`, `current_station`, and `bin` from the current browser URL while leaving the latitude/longitude fields showing the current viewport center. The button is labeled **Clear selected location, station & candidates**.
 
-The Choose Location card reserves a compact **Local Conditions** panel beside the Latitude/Longitude controls on wider screens, stacking below them on narrow displays. Keeping that panel present before a location is selected avoids a large card-height jump when weather data appears. When a selected ★ sailing location exists, the panel uses the NWS point forecast for that latitude/longitude and displays the NWS nearby city/state from `relativeLocation`, the current-hour forecast air temperature, the next applicable daytime high and nighttime low, and a short forecast phrase. This weather context is informational only and does not alter wind-station or currents-station selection.
+The **Location** card reserves a compact **Local Conditions** panel beside the Latitude/Longitude controls on wider screens, stacking below them on narrow displays. The visible instructions are intentionally brief; an **ⓘ About location selection** popover explains selected-location versus map-center behavior, Center Map actions, and nearby-station selection on demand. The help popover has an explicit **×** close control, closes when the user taps outside it, and treats the first outside tap as dismissal-only so the same tap does not activate the map or another control underneath. When a selected ★ location exists, the panel uses the NWS point forecast for that latitude/longitude and displays the NWS nearby city/state from `relativeLocation`, the current-hour forecast air temperature, the next applicable daytime high and nighttime low, and a short forecast phrase. This weather context is informational only and does not alter wind-station or currents-station selection.
 
 ## Map Types
 
@@ -177,7 +204,7 @@ The **Map Types** dropdown provides mutually exclusive basemaps:
 
 Changing basemap does not change location, station, forecast, current, or planning state.
 
-The map also shows a live scale/status label in the lower-right corner. It reports the approximate horizontal distance represented by a short screen sample in both nautical miles and statute miles, together with the current Leaflet zoom level. NOAA Nautical Chart is available at Zoom 9 or closer. If Nautical is the preferred map type and the user zooms farther out than Zoom 9, the app temporarily displays Street Map and automatically restores Nautical when the map returns to Zoom 9+; the Nautical preference is retained.
+The map also shows a compact live scale/status row immediately below the map. It reports one distance system at a time—nautical miles or statute miles, according to the shared Distance units preference—together with the current Leaflet zoom level. The previous pixel-count text and dual-unit display are removed. NOAA Nautical Chart is available at Zoom 9 or closer. If Nautical is the preferred map type and the user zooms farther out than Zoom 9, the app temporarily displays Street Map and automatically restores Nautical when the map returns to Zoom 9+; the Nautical preference is retained.
 
 ## Map overlays
 
@@ -475,6 +502,114 @@ These are reference stations, not a hard-coded application whitelist. Active sta
 `main.go` remains intentionally large and contains substantial browser HTML, CSS, JavaScript, Leaflet behavior, HTTP orchestration, and report presentation logic.
 
 A future refactor should be treated as a separate behavior-preserving project after the current UI and release behavior are stable. The safest direction would be to move browser templates/static assets out of `main.go` first, then separate HTTP/report orchestration while preserving the existing `wind.go` and `currents.go` data-source boundaries.
+
+## v229 / 1.9.3 changes
+
+- Moves the always-visible **Map Legend** into a compact **ⓘ Map legend** dialog while preserving the existing selected-location, wind-station, current-station, nearby-station, and Saildrone symbols.
+- Moves the separate always-visible **Map & Data Sources** card into a compact **ⓘ Map & data sources** dialog alongside the map legend control. The source wording and navigation disclaimer are preserved.
+- Both map information dialogs reuse the established desktop dialog / iOS bottom-sheet pattern with a dedicated **× close button**, backdrop/outside-tap dismissal, Escape-key dismissal, internal scrolling, and safe-area handling.
+- Improves **Latest Wind Speed** graph readability on narrow/iOS screens by using a mobile-sized SVG viewBox instead of scaling the fixed 760-unit desktop chart down to phone width. Mobile rendering now uses larger axis/tick labels, more axis room, and at most four time labels while retaining every wind and gust observation in the plotted series.
+- Desktop wind-chart dimensions remain essentially unchanged. No observation retrieval, wind conversion, station selection, map data source, or map-layer behavior changed.
+- Advanced runtime identity to **Version 1.9.3 · Build v229**.
+
+## v228 / 1.9.3 changes
+
+- Moves the long **Tidal Current** chart explanation out of the always-visible card body and into a compact **ⓘ About tidal current chart** dialog while keeping the concise flood/ebb/slack explanation visible.
+- Moves the Planning Hint **How these settings work** explanation into a compact **ⓘ About planning settings** dialog while keeping the actual planning controls, daily statuses, and disclaimer visible.
+- Reuses the established dialog/sheet interaction pattern: dedicated header row, visible **× close button**, backdrop/outside-tap dismissal, Escape-key dismissal, internal scrolling, iOS safe-area handling, and background-scroll suppression while open.
+- Preserves the existing NOAA current-chart explanation, threshold logic, planning settings, current calculations, classifications, and report semantics; this is a presentation-only cleanup.
+- Advanced runtime identity to **Version 1.9.3 · Build v228**.
+
+## v227 / 1.9.3 changes
+
+- Replaces the always-visible **Tidal & Lunar Context** card with a compact full-width trigger, reducing the Planning and Details page length while preserving the existing tidal/lunar calculations and wording.
+- Opens the same tidal/lunar content in a dismissible dialog on desktop and a bottom-sheet style panel on narrow/mobile screens.
+- Adds a dedicated **× close button**, backdrop/outside-tap dismissal, Escape-key dismissal, internal scrolling, iOS safe-area handling, and background-scroll suppression while the dialog is open.
+- Keeps the existing `tide-context-card` content ID inside the dialog so current-date partial refreshes continue updating the tidal/lunar content; the compact trigger label and dialog title also refresh with the selected date.
+- No tide calculations, lunar-cycle calculations, current predictions, thresholds, map behavior, overlay behavior, or report semantics changed.
+- Advanced runtime identity to **Version 1.9.3 · Build v227**.
+
+## v226 / 1.9.3 changes
+
+- Reworks the **ⓘ About location selection** popup so its title and **× close button** occupy a dedicated header row. The help body begins below that header, eliminating the v225 text overlap.
+- Keeps the location-help header sticky on narrow/mobile layouts while the help body scrolls beneath it; the close button retains its 44 px touch target on phones.
+- Changes the **Planning and Details / Back to Conditions Now** pill background from navy to the same blue used by **Find nearby stations** and **Clear location & stations**, removing an unnecessary visual mismatch between primary navigation/actions.
+- No location-selection, station-selection, map, overlay, unit, weather, current, or report behavior changes.
+- Advanced runtime identity to **Version 1.9.3 · Build v226**.
+
+## v225 / 1.9.3 changes
+
+- Adds an explicit **× close button** to the **ⓘ About location selection** help popover, including a 44 px touch target on narrow/mobile layouts.
+- Adds reliable outside-tap/click dismissal for the location help. Taps inside the help remain interactive, and tapping the ⓘ summary still uses native `<details>` toggle behavior.
+- Makes the first outside tap dismissal-only so closing the help on iOS does not also select a map point or activate a control underneath.
+- Escape now closes the location help as well as an open mobile map menu.
+- No map-selection, station-selection, weather, overlay, or report behavior changes beyond help-popover dismissal.
+- Advanced runtime identity to **Version 1.9.3 · Build v225**.
+
+## v224 / 1.9.3 changes
+
+- Renames the Planning and Details map card from **Choose Location** to the more general **Location**.
+- Replaces the long always-visible location instructions with one short sentence: click the map to select a location for local conditions and nearby stations.
+- Adds an **ⓘ About location selection** popover beside the Location heading. The popover explains selected-location versus map-center state, Center Map behavior, Latitude/Longitude centering, nearby-station discovery, and committing a candidate wind station.
+- Removes sailing-specific wording from the active location/map help where it is not needed; the underlying selected-location, station-selection, weather, and map behavior is unchanged.
+- Uses a compact anchored help popover on larger screens and a bounded fixed, scrollable help sheet on narrow/mobile screens.
+- Advanced runtime identity to **Version 1.9.3 · Build v224**.
+
+## v223 / 1.9.3 changes
+
+- Fixes the remaining mobile **Map Overlays** visibility regression introduced in v221. The menu was opening, but its panel could be positioned completely off-screen on narrow displays.
+- Root cause: the older desktop-only `#map-overlays-menu` bottom-positioning rule had higher CSS specificity than the newer generic mobile fixed-sheet rule, so Safari kept `bottom: calc(100% + 6px)` even after the panel switched to `position: fixed`.
+- Adds an explicit narrow-screen `#map-overlays-menu > .map-overlays-panel` override with matching specificity so the sheet is anchored inside the viewport using the safe-area bottom inset.
+- Keeps native `<details>/<summary>` opening behavior, the mobile **× close button**, outside-tap dismissal, Escape dismissal, scrolling, and all overlay data behavior unchanged.
+- **Map Types** and **Center Map** retain the v222 behavior; this correction is specific to the Map Overlays positioning conflict.
+- Advanced runtime identity to **Version 1.9.3 · Build v223**.
+
+## v222 / 1.9.3 changes
+
+- Fixes the v221 iOS regression where **Map Overlays** could fail to open after the shared mobile menu-coordination logic was added.
+- Restores native `<details>/<summary>` opening behavior for **Map Types**, **Map Overlays**, and **Center Map**; no JavaScript toggle listener participates in opening or coordinating those menus.
+- Keeps the v221 **× close buttons** on all three mobile/narrow-screen sheets. Each close button only closes its own already-open menu.
+- Keeps outside-tap dismissal and Escape-key dismissal. The first outside tap remains dismissal-only so it cannot activate the map underneath.
+- Removes the v221 behavior that automatically closed another map menu through `toggle` event handling, favoring the simpler Safari-safe native interaction path.
+- Desktop behavior and all map/overlay data behavior are unchanged.
+- Advanced runtime identity to **Version 1.9.3 · Build v222**.
+
+## v221 / 1.9.3 changes
+
+- Adds a prominent **× close button** to the mobile/narrow-screen **Map Types**, **Map Overlays**, and **Center Map** sheets.
+- The close control uses a 44 px touch target, remains available at the top while the sheet scrolls, and closes only the menu without changing map or overlay state.
+- Extends the existing mobile fixed-sheet treatment to all three map menus for consistent iOS behavior.
+- Keeps outside-tap dismissal and Escape-key dismissal; the first outside tap remains dismissal-only so it cannot accidentally activate the map underneath.
+- Opening one mobile map menu automatically closes either of the other two if it is already open.
+- Desktop dropdown behavior remains unchanged.
+- Advanced runtime identity to **Version 1.9.3 · Build v221**.
+
+## v220 / 1.9.3 changes
+
+- Fixes the below-map scale readout so it follows the browser's current **Distance units** selector rather than relying only on the server-rendered distance-unit value.
+- The scale now resolves units from the live selector first, then the `distance_unit` URL parameter, with the server-rendered value only as a fallback.
+- Changing **Nautical Miles / Miles** updates the scale immediately before the normal navigation refresh, preventing Safari/iOS from showing `nmi` while the selector displays **Miles**.
+- Leaves the v219 distance calculations, below-map scale placement, candidate/current distance formatting, and all overlay behavior unchanged.
+- Advanced runtime identity to **Version 1.9.3 · Build v220**.
+
+## v219 / 1.9.3 changes
+
+- Adds a shared page-level **Distance units** preference beside **Wind units** immediately below the hero image on both Conditions Now and Planning and Details. Distance choices are **Nautical Miles** and **Miles**, persisted through the `distance_unit` query parameter.
+- Moves the live map scale completely out of the Leaflet map and into a compact status row immediately below the map, eliminating overlap with markers, popups, attribution, and touch targets.
+- Simplifies the scale text by removing the screen-pixel sample and showing only the selected distance system plus zoom, for example `Scale: 3.64 nmi · Zoom 10` or `Scale: 4.18 mi · Zoom 10`.
+- Applies the selected distance unit to nearby wind-station distances and currents-station preview distances used by the map candidate workflow.
+- Keeps all internal geographic distance calculations in nautical miles and converts only for display.
+- Retains the v218 matched Find/Clear station controls, iOS popup stacking fixes, wind barbs, isobars, and overlay behavior unchanged.
+- Advanced runtime identity to **Version 1.9.3 · Build v219**.
+
+## v218 / 1.9.3 changes
+
+- Fixes iOS/narrow-screen wind-station candidate popups so Leaflet popup content renders above the custom map scale/status badge and attribution controls instead of being obscured by them.
+- Makes the map scale/status badge and attribution non-interactive for pointer/touch input; on narrow screens the bottom-right control stack is also kept below the popup pane so station-selection links remain tappable.
+- Reorganizes the primary location/station actions into a matched pair directly below the Map Types / Map Overlays / Center Map row: **Find nearby stations** and **Clear location & stations**.
+- Gives both actions the same size, color, height, and pill styling; they remain side by side when space allows and stack full-width on narrow phones.
+- Keeps existing station-selection, candidate-search, clear-state, overlays, wind barbs, isobars, and iOS Map Overlays sheet behavior unchanged.
+- Advanced runtime identity to **Version 1.9.3 · Build v218**.
 
 ## v217 / 1.9.3 changes
 
@@ -1021,17 +1156,17 @@ This section is the authoritative development handoff for this repository. A new
 <!-- PROJECT-STATE:BEGIN -->
 
 - Public app version: **1.9.3**
-- Generated source build: **v216**
-- Next generated source build: **v217**
+- Generated source build: **v229**
+- Next generated source build: **v231**
 - Authoritative repository: **https://github.com/richard-mauri/pittsburg-saildata**
 - Authoritative branch: **main**
-- Release status: **v216 / 1.9.3 release candidate**
+- Release status: **v229 / 1.9.3 release candidate**
 
 ### Managed-file checkpoints
 
 | Repository file | SHA-256 |
 | --- | --- |
-| `main.go` | `345c21f5d65cbfe1a7c78164b39e781c9b798cd8fcd7a9bf5fc7311e98ef0840` |
+| `main.go` | `95b9651edd569badd5c4419c43e2b02f6d2446a7811ea86cfeb1d5315a0c6ae8` |
 | `assets/yogiisms.txt` | `4ebf00217e194ee26a8e8fe38237b298800b36ead0c64accdbb82f623c142371` |
 | `assets/fishing_reports.json` | `02b01de77784153157c6a4a60d6ad21e286f7c191bbe204fed605659ea15ca5e` |
 | `check-project-state.sh` | `85fa5062e2ae4509174b6843ebc0066f4a94e2f2e90001230ca74c07aeb500dc` |
@@ -1048,7 +1183,7 @@ The generated build number is immutable. Any change to generated Go source bytes
 
 The public application version and generated build are separate identities. The current runtime identity is expected to render as:
 
-`Version 1.9.3 · Build v217`
+`Version 1.9.3 · Build v229`
 
 For future public pushes, increment the patch/micro version (`1.9.2` → `1.9.3` → `1.9.4`, and so on). Existing Git release tags are immutable: never reuse or move an existing version tag.
 
@@ -1094,11 +1229,11 @@ The current browser architecture is intentionally split into two pages. **Condit
 
 Conditions Now displays the active wind/current station context, compact wind metrics, a one-day tidal-current graph, and the latest actual wind-observation timestamp plus freshness age in the heading: `CONDITIONS NOW — AS OF <time> · <age>`.
 
-The shared **Wind units: Knots / MPH** control appears immediately below the hero image on both Conditions Now and Planning and Details. It uses the same `wind_unit` query state on both pages so the preference remains synchronized during navigation.
+The shared **Wind units: Knots / MPH** and **Distance units: Nautical Miles / Miles** controls appear immediately below the hero image on both Conditions Now and Planning and Details. They use `wind_unit` and `distance_unit` query state so both preferences remain synchronized during navigation.
 
 Planning and Details includes location selection, nearby wind-station discovery, current-station context, 1/3/7-day current planning, wind history from 1h through 24h, NWS forecast context, Local Conditions at a selected point, map types, independent map overlays, and Center Map controls.
 
-The **Choose Location** card treats selected sailing location and map viewport center as separate state. Latitude/Longitude display the viewport center and can be edited without side effects; **Center Map → Latitude & Longitude** explicitly applies those values. Candidate wind stations appear only after an actual selected location exists.
+The **Location** card treats selected location and map viewport center as separate state. Latitude/Longitude display the viewport center and can be edited without side effects; **Center Map → Latitude & Longitude** explicitly applies those values. Candidate wind stations appear only after an actual selected location exists. Detailed behavior is available from the card’s **ⓘ About location selection** popover.
 
 The **Center Map** menu uses momentary actions for My location, Latitude & Longitude, selected location, selected wind station, and selected currents station. Centering pans without changing zoom or report selection state.
 
@@ -1108,7 +1243,7 @@ The **Local Conditions** panel is permanently reserved beside the Lat/Lon contro
 
 Dynamic HTML responses use no-cache headers so Safari/Dock WebView clients pick up new builds without requiring repeated manual website-data clearing. Runtime HTML displays both public version and generated build.
 
-Map controls place **Map Types**, **Map Overlays**, and **Center Map** on one row. The scale/status readout appears in the lower-right and reports approximate nautical miles, statute miles, and Leaflet zoom. Map Overlays is organized into accordion-style **Weather & Hazards**, **Wind & Pressure**, **Terrain & Seafloor**, and **Observations** groups. Wind barbs and observational isobars are intentionally grouped together because they are commonly interpreted as one wind/pressure picture; Saildrone remains under Observations. On narrow/iOS screens the overlay menu uses the fixed viewport-sheet behavior added in v212-v214 so Leaflet controls cannot cover it.
+Map controls place **Map Types**, **Map Overlays**, and **Center Map** on one row. The compact scale/status readout now sits below the map and reports only the selected distance unit plus Leaflet zoom. Map Overlays is organized into accordion-style **Weather & Hazards**, **Wind & Pressure**, **Terrain & Seafloor**, and **Observations** groups. Wind barbs and observational isobars are intentionally grouped together because they are commonly interpreted as one wind/pressure picture; Saildrone remains under Observations. On narrow/iOS screens the overlay menu uses the fixed viewport-sheet behavior added in v212-v214 so Leaflet controls cannot cover it.
 
 NOAA Nautical Chart is considered practical at **Zoom 9+**. If Nautical is the preferred basemap and the user zooms below 9, Street Map is shown temporarily with a notice; Nautical automatically returns at Zoom 9+. Legitimate inland/no-chart blank areas at supported zooms are left unchanged.
 
@@ -1128,7 +1263,7 @@ When migrating development to a new conversation, provide or point the assistant
 
 > Read the **Development State and Chat Handoff** section of README.md, treat GitHub `main` as authoritative, and continue from the recorded generated build. Generate complete `main-updated-vNN.go` candidates, never overwrite `main.go`, run `gofmt`, and provide SHA-256 hashes and download links.
 
-The next source candidate should therefore be **v214** unless a newer local candidate is supplied.
+The next source candidate should therefore be **v231** unless a newer local candidate is supplied.
 
 
 
