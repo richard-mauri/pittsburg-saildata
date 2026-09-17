@@ -7,7 +7,7 @@ The default wind station is **PSBC1**.
 ## Current release
 
 **Public version: 1.9.3**  
-**Generated source lineage: v211**
+**Generated source lineage: v214**
 
 **Current SST status:** deferred/disabled in v195; see **Deferred SST — future approach** below.
 **Current chlorophyll status:** both Chlorophyll Field and Chlorophyll Contours are deferred/disabled in v198.
@@ -162,7 +162,7 @@ The **Map Types**, **Map Overlays**, and **Center Map** dropdowns share one map-
 
 **My location** uses browser geolocation only as a map-centering action. It does not commit a new selected location, change station selection, or alter report calculations. Center Map items do not remain selected after use, so the same action can be invoked repeatedly after manually panning the map.
 
-Recenter actions preserve the current zoom level. The selected currents station associated with the active wind station is always shown on the map when available; there is no separate visibility checkbox. Clearing the selected location also clears the wind-station candidates derived from that location, removes the selected-location URL parameters, and leaves the latitude/longitude fields showing the current viewport center. The button is labeled **Clear selected location & candidates**.
+Recenter actions preserve the current zoom level. The selected currents station associated with the active wind station is always shown on the map when available; there is no separate visibility checkbox. Clearing the selected location also clears the committed wind-station map selection, its associated currents-station marker, and the wind-station candidates derived from that location. The clear action removes `lat`, `lon`, `station`, `current_station`, and `bin` from the current browser URL while leaving the latitude/longitude fields showing the current viewport center. The button is labeled **Clear selected location, station & candidates**.
 
 The Choose Location card reserves a compact **Local Conditions** panel beside the Latitude/Longitude controls on wider screens, stacking below them on narrow displays. Keeping that panel present before a location is selected avoids a large card-height jump when weather data appears. When a selected ★ sailing location exists, the panel uses the NWS point forecast for that latitude/longitude and displays the NWS nearby city/state from `relativeLocation`, the current-hour forecast air temperature, the next applicable daytime high and nighttime low, and a short forecast phrase. This weather context is informational only and does not alter wind-station or currents-station selection.
 
@@ -469,6 +469,33 @@ These are reference stations, not a hard-coded application whitelist. Active sta
 `main.go` remains intentionally large and contains substantial browser HTML, CSS, JavaScript, Leaflet behavior, HTTP orchestration, and report presentation logic.
 
 A future refactor should be treated as a separate behavior-preserving project after the current UI and release behavior are stable. The safest direction would be to move browser templates/static assets out of `main.go` first, then separate HTTP/report orchestration while preserving the existing `wind.go` and `currents.go` data-source boundaries.
+
+## v214 / 1.9.3 changes
+
+- Refines the v212 iOS/narrow-screen **Map Overlays** fixed sheet so it can be dismissed by tapping anywhere outside the open panel instead of requiring a second tap on the **Map Overlays** button.
+- Taps inside the Map Overlays sheet, including overlay checkboxes and accordion controls, keep the sheet open so multiple layers can still be changed in one visit.
+- The first outside tap is dismissal-only: it is intercepted before the underlying Leaflet map or another control can receive the same touch, avoiding accidental map-location selection while closing the sheet.
+- Adds Escape-key dismissal for keyboard users without changing desktop overlay positioning or any map-layer behavior.
+- Keeps the v213 selected-location/station clear behavior and all wind-barb loading, caching, unit, and data-source behavior unchanged.
+- Advanced runtime identity to **Version 1.9.3 · Build v214**.
+
+## v213 / 1.9.3 changes
+
+- Expands the map clear action to **Clear selected location, station & candidates**.
+- Clearing now removes the committed selected-wind-station marker/state in addition to the selected sailing location and nearby candidate markers.
+- Also removes the currents-station marker associated with that selected wind station so it cannot remain as stale map state after the wind selection is cleared.
+- Removes `lat`, `lon`, `station`, `current_station`, and `bin` from the current browser URL with `history.replaceState`, so subsequent navigation/reload no longer carries the cleared explicit station/current overrides.
+- Existing wind-barb overlay state is left intact, so a barb previously hidden beneath the selected wind-station marker becomes immediately tappable after clearing.
+- Keeps the v212 iOS Map Overlays sheet fix and all wind-barb data/loading behavior unchanged.
+- Advanced runtime identity to **Version 1.9.3 · Build v213**.
+
+## v212 / 1.9.3 changes
+
+- Fixes the iOS/narrow-screen Map Overlays interaction bug where Leaflet scale/attribution controls could render above the overlay panel and intercept taps.
+- On viewports 700 px wide or narrower, the Map Overlays panel now becomes a fixed viewport sheet with an application-level z-index above Leaflet controls.
+- The mobile panel respects iOS safe-area insets, uses dynamic viewport height (`100dvh`), and scrolls internally with momentum touch scrolling when its contents exceed the available height.
+- Desktop/tablet overlay positioning and all map-layer behavior are unchanged.
+- Advanced runtime identity to **Version 1.9.3 · Build v212**.
 
 ## v211 / 1.9.3 changes
 
@@ -959,17 +986,17 @@ This section is the authoritative development handoff for this repository. A new
 <!-- PROJECT-STATE:BEGIN -->
 
 - Public app version: **1.9.3**
-- Generated source build: **v211**
-- Next generated source build: **v212**
+- Generated source build: **v214**
+- Next generated source build: **v215**
 - Authoritative repository: **https://github.com/richard-mauri/pittsburg-saildata**
 - Authoritative branch: **main**
-- Release status: **v211 / 1.9.3 release candidate**
+- Release status: **v214 / 1.9.3 release candidate**
 
 ### Managed-file checkpoints
 
 | Repository file | SHA-256 |
 | --- | --- |
-| `main.go` | `731da9d163fa8ac73d2864b7a88a3ae7002577811fbd9010e88351e53284497d` |
+| `main.go` | `cf85890eda0c9a767c31a598b457be1e51c1189eefe406b8b9e91caae10d2100` |
 | `assets/yogiisms.txt` | `4ebf00217e194ee26a8e8fe38237b298800b36ead0c64accdbb82f623c142371` |
 | `assets/fishing_reports.json` | `02b01de77784153157c6a4a60d6ad21e286f7c191bbe204fed605659ea15ca5e` |
 | `check-project-state.sh` | `85fa5062e2ae4509174b6843ebc0066f4a94e2f2e90001230ca74c07aeb500dc` |
@@ -986,7 +1013,7 @@ The generated build number is immutable. Any change to generated Go source bytes
 
 The public application version and generated build are separate identities. The current runtime identity is expected to render as:
 
-`Version 1.9.3 · Build v211`
+`Version 1.9.3 · Build v214`
 
 For future public pushes, increment the patch/micro version (`1.9.2` → `1.9.3` → `1.9.4`, and so on). Existing Git release tags are immutable: never reuse or move an existing version tag.
 
@@ -1040,7 +1067,7 @@ The **Choose Location** card treats selected sailing location and map viewport c
 
 The **Center Map** menu uses momentary actions for My location, Latitude & Longitude, selected location, selected wind station, and selected currents station. Centering pans without changing zoom or report selection state.
 
-The selected currents station associated with the active wind station is shown automatically when available. **Clear selected location & candidates** removes the selected location and its derived wind candidates.
+The selected currents station associated with the active wind station is shown automatically when available. **Clear selected location, station & candidates** removes the selected location, committed wind-station map selection, associated currents-station marker, and derived wind candidates while leaving active wind-barb overlays in place.
 
 The **Local Conditions** panel is permanently reserved beside the Lat/Lon controls on wider screens to avoid layout jumps. For a selected location it uses NWS point metadata/forecast data to show nearby city/state, current-hour forecast temperature, expected high/low, and a short forecast phrase.
 
@@ -1066,7 +1093,7 @@ When migrating development to a new conversation, provide or point the assistant
 
 > Read the **Development State and Chat Handoff** section of README.md, treat GitHub `main` as authoritative, and continue from the recorded generated build. Generate complete `main-updated-vNN.go` candidates, never overwrite `main.go`, run `gofmt`, and provide SHA-256 hashes and download links.
 
-The next source candidate should therefore be **v212** unless a newer local candidate is supplied.
+The next source candidate should therefore be **v214** unless a newer local candidate is supplied.
 
 
 
