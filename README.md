@@ -7,7 +7,7 @@ The default wind station is **PSBC1**.
 ## Current release
 
 **Public version: 1.9.3**  
-**Generated source lineage: v243**
+**Generated source lineage: v245**
 
 **Current SST status:** deferred/disabled in v195; see **Deferred SST — future approach** below.
 **Current chlorophyll status:** both Chlorophyll Field and Chlorophyll Contours are deferred/disabled in v198.
@@ -16,6 +16,25 @@ Version 1.9.2 builds on the streamlined browser workflow with clearer observatio
 
 
 
+
+## v245 Conditions Now navigation progress
+
+- Adds the existing full-page loading spinner treatment to the welcome-page **Open Conditions Now** action, displaying **Loading Conditions Now…** while the initial conditions report is generated.
+- Adds the same progress treatment to **Back to Conditions Now** from Planning and Details.
+- Refactors the report-page navigation loader so it can show route-specific text: **Loading Planning and Details…** when opening the planning dashboard and **Loading Conditions Now…** when returning to the streamlined view.
+- Restores the loader correctly on browser `pageshow`, including back/forward-cache navigation, so a stale loading screen cannot remain visible after returning to a page.
+- Leaves report calculations, URL/state preservation, NOAA data retrieval, map overlays, and v244 slow-overlay progress behavior unchanged.
+- Runtime identity remains public **Version 1.9.3** and advances generated build to **v245**.
+
+## v244 slow-overlay progress feedback
+
+- Adds persistent progress feedback while **Marine / Bay Wind Barbs** and **Land / Inland Wind Barbs** are waiting for their observation request to complete.
+- Wind-barb loading now starts with **Loading wind barbs…** and, after three seconds, updates once per second with the active source set and elapsed time so a slow first load does not look stalled.
+- Adds the same elapsed-time feedback to **Surface Pressure / Isobars**, beginning with **Loading surface pressure observations…** and changing to a **Still loading…** message after three seconds.
+- Progress timers stop immediately when a request completes, fails, is superseded by a newer map request, or the corresponding overlay is disabled.
+- Does not change the NOAA/NDBC, Aviation Weather Center METAR, caching, thinning, pressure interpolation, contour, or rendering logic.
+- Keeps the v243 restored `/smoke-overlay` route and the default-collapsed Map Overlay categories unchanged.
+- Runtime identity remains public **Version 1.9.3** and advances generated build to **v244**.
 
 ## v243 smoke route restoration and collapsed overlay groups
 
@@ -1274,11 +1293,11 @@ This section is the authoritative development handoff for this repository. A new
 <!-- PROJECT-STATE:BEGIN -->
 
 - Public app version: **1.9.3**
-- Generated source build: **v243**
-- Next generated source build: **v244**
+- Generated source build: **v245**
+- Next generated source build: **v246**
 - Authoritative repository: **https://github.com/richard-mauri/pittsburg-saildata**
 - Authoritative branch: **main**
-- Release status: **v243 / 1.9.3 release candidate**
+- Release status: **v245 / 1.9.3 release candidate**
 
 ### Managed-file checkpoints
 

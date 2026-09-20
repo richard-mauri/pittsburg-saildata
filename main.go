@@ -30,7 +30,7 @@ import (
 
 const (
 	appVersion                      = "1.9.3"
-	buildVersion                    = "v243"
+	buildVersion                    = "v245"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -5929,7 +5929,7 @@ h3{margin:1.2rem 0 .35rem;color:var(--navy)}
 .note{color:var(--muted)}
 .github-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:12px}
 .github-actions a{display:block;text-decoration:none;border:1px solid var(--line);border-radius:14px;padding:12px 14px;color:var(--blue);font-weight:800;background:#fbfdfe}
-.footer{margin-top:18px;text-align:center;color:var(--muted);font-size:.88rem}.hero .yogiism{margin:16px 0 0;max-width:720px;color:#fff;font-style:italic;font-size:.96rem;line-height:1.4;opacity:.96}
+.footer{margin-top:18px;text-align:center;color:var(--muted);font-size:.88rem}.hero .yogiism{margin:16px 0 0;max-width:720px;color:#fff;font-style:italic;font-size:.96rem;line-height:1.4;opacity:.96}.page-loading-overlay{position:fixed;inset:0;z-index:6000;display:flex;align-items:center;justify-content:center;background:rgba(245,250,252,.82);backdrop-filter:blur(2px);opacity:0;visibility:hidden;pointer-events:none;transition:opacity .12s ease,visibility .12s ease}.page-loading-overlay.active{opacity:1;visibility:visible;pointer-events:auto}.page-loading-box{display:flex;align-items:center;gap:12px;padding:15px 18px;border:1px solid var(--line);border-radius:16px;background:#fff;box-shadow:0 14px 38px rgba(8,43,69,.18);color:var(--navy);font-weight:850}.page-loading-spinner{width:30px;height:30px;border:4px solid #d8e7ed;border-top-color:var(--blue);border-radius:50%;animation:page-loading-spin .8s linear infinite}@keyframes page-loading-spin{to{transform:rotate(360deg)}}@media (prefers-reduced-motion:reduce){.page-loading-spinner{animation-duration:1.8s}}
 @media(max-width:680px){.grid{grid-template-columns:1fr}.github-actions{grid-template-columns:1fr}.hero{min-height:340px;padding:26px 22px}}
 </style>
 </head>
@@ -5940,7 +5940,7 @@ h3{margin:1.2rem 0 .35rem;color:var(--navy)}
 <h1>Check conditions now. Plan with the details.</h1>
 <p>A free planning dashboard for sailors, paddlers, and other people on the water. Start with current wind and the one-day current outlook, then open Planning and Details for location weather, station choices, forecasts, current timing, maps, and overlays.</p>
 <div class="cta-row">
-<a class="cta primary" href="/report?format=html">Open Conditions Now</a>
+<a id="welcome-conditions-link" class="cta primary" href="/report?format=html">Open Conditions Now</a>
 <a class="cta secondary" href="https://github.com/richard-mauri/pittsburg-saildata">View on GitHub</a>
 </div>
 {{if .Yogiism}}<div class="yogiism">“{{.Yogiism}}” — Yogi Berra</div>{{end}}
@@ -6006,6 +6006,29 @@ h3{margin:1.2rem 0 .35rem;color:var(--navy)}
 
 <div class="footer">Mauri's Weather & Water Conditions · Conditions-planning utility, not a navigation system.<br>Version {{.AppVersion}} · Build {{.BuildVersion}}</div>
 </main>
+<div id="welcome-loading-overlay" class="page-loading-overlay" aria-hidden="true"><div class="page-loading-box" role="status" aria-live="polite"><span class="page-loading-spinner" aria-hidden="true"></span><span>Loading Conditions Now…</span></div></div>
+<script>
+(function(){
+  var link = document.getElementById("welcome-conditions-link");
+  var overlay = document.getElementById("welcome-loading-overlay");
+  if (!link || !overlay) return;
+
+  function hideWelcomeLoader() {
+    overlay.classList.remove("active");
+    overlay.setAttribute("aria-hidden", "true");
+    link.removeAttribute("aria-disabled");
+  }
+
+  link.addEventListener("click", function(event) {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    overlay.classList.add("active");
+    overlay.setAttribute("aria-hidden", "false");
+    link.setAttribute("aria-disabled", "true");
+  });
+
+  window.addEventListener("pageshow", hideWelcomeLoader);
+})();
+</script>
 </body>
 </html>`))
 
@@ -6252,7 +6275,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 <section id="bottom-line-card" class="card full bottom{{if .PlanningPeriodClass}} planning-{{.PlanningPeriodClass}}{{end}}"><h2 class="conditions-now-heading"><span>CONDITIONS NOW</span>{{if .WindObserved}}<span class="conditions-now-asof">AS OF {{.WindObserved}}{{if .WindObservedAge}} · {{.WindObservedAge}}{{end}}</span>{{end}}</h2><div class="bottom-source-context">{{if .BottomLineWindSource}}<div><strong>Wind station:</strong> {{.BottomLineWindSource}}</div>{{end}}{{if .BottomLineCurrentSource}}<div><strong>Currents station:</strong> {{.BottomLineCurrentSource}}</div>{{else}}<div><strong>Currents station:</strong> unavailable</div>{{end}}</div>{{if .PlanningPeriodCause}}<p><strong>{{.PlanningPeriodCause}}</strong></p>{{end}}{{if .PlanningPeriodDetail}}<p>{{.PlanningPeriodDetail}}</p>{{end}}{{if not .WindError}}<div class="bottom-wind-summary" aria-label="Latest wind observation"><div class="metrics"><div class="metric"><div class="label">Direction</div><div class="value">{{if .WindDirection}}{{.WindDirection}}{{else}}—{{end}}</div></div><div class="metric"><div class="label">Wind</div><div class="value">{{if .WindSpeed}}{{.WindSpeed}}{{else}}—{{end}}</div></div><div class="metric"><div class="label">Gust</div><div class="value">{{if .WindGust}}{{.WindGust}}{{else}}—{{end}}</div></div><div class="metric"><div class="label">Air temp</div><div class="value">{{if .WindAirTemp}}{{.WindAirTemp}}{{else}}—{{end}}</div></div></div></div>{{end}}{{if .BottomLineCurrentChart}}<div class="chart-explainer"><strong>1-day tidal current outlook.</strong> Above zero = flood; below zero = ebb; crossings = slack water.</div><div class="current-chart-wrap">{{.BottomLineCurrentChart}}</div>{{else}}{{range .BottomLineNarrative}}<p>{{.}}</p>{{else}}{{if .WindError}}<p>Summary unavailable.</p>{{end}}{{end}}{{end}}</section>
 <section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Open the full planning dashboard for location, wind, currents, forecasts, map layers, and customization controls.</p></div><a id="planning-page-link" class="planning-page-link" href="{{.PlanningDetailsURL}}">Planning and Details →</a></section>
 {{else}}
-<section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Full planning dashboard and customization controls.</p></div><a class="planning-page-link" href="{{.ConditionsURL}}">← Back to Conditions Now</a></section>
+<section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Full planning dashboard and customization controls.</p></div><a id="conditions-page-link" class="planning-page-link" href="{{.ConditionsURL}}">← Back to Conditions Now</a></section>
 <section class="card full map-card"><div class="map-intro"><div><div class="map-intro-title"><h2>Location</h2><details class="location-help"><summary aria-label="About location selection" title="About location selection">ⓘ</summary><div class="location-help-panel"><div class="location-help-header"><strong>About location selection</strong><button type="button" class="location-help-close" aria-label="Close location information" title="Close">×</button></div><div class="location-help-body"><p><strong>Selected location</strong> is the point used for Local Conditions and nearby-station searches. Click the map to set or change it.</p><p>Panning, zooming, My location, and Center Map only change the map view. The latitude/longitude fields show the map center; editing them and choosing <strong>Center Map → Latitude &amp; Longitude</strong> does not change the selected location.</p><p><strong>Find nearby stations</strong> searches around the selected location. Open a candidate station on the map to review it and commit it as the wind source; the associated currents station is previewed with it.</p></div></div></details></div><div class="map-help">Click the map to select a location for local conditions and nearby stations.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-nautical-zoom-note" class="map-nautical-zoom-note" hidden aria-live="polite">Nautical chart available at Zoom 9+.</div><div id="map-resize-handle" class="map-resize-handle" role="separator" aria-label="Resize map vertically" aria-orientation="horizontal" aria-valuemin="260" aria-valuemax="900" aria-valuenow="390" aria-grabbed="false" tabindex="0" title="Drag up or down to resize map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-scale-row" aria-label="Map scale"><span id="map-scale-status" class="map-scale-status" role="status" aria-live="polite"></span></div><div class="map-state-controls" aria-label="Map controls"><details id="map-types-menu" class="map-overlays-menu"><summary>Map Types</summary><div class="map-overlays-panel"><button type="button" class="map-menu-close" aria-label="Close Map Types" title="Close">×</button><label class="map-overlay-toggle"><input type="radio" name="map-type" value="map"> <span>Street Map</span></label><label id="map-type-nautical-label" class="map-overlay-toggle"><input id="map-type-nautical" type="radio" name="map-type" value="nautical"> <span>Nautical Chart <small>(Zoom 9+)</small></span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="satellite"> <span>Satellite</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="hybrid"> <span>Hybrid</span></label></div></details><details id="map-overlays-menu" class="map-overlays-menu"><summary>Map Overlays</summary><div class="map-overlays-panel"><button type="button" class="map-menu-close" aria-label="Close Map Overlays" title="Close">×</button><details class="map-overlay-group"><summary>Weather &amp; Hazards</summary><div class="map-overlay-group-body"><label id="map-marine-zone-control" class="map-overlay-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-smoke"> <span>Satellite smoke (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-clouds"> <span>Satellite Cloud Cover (NOAA)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-radar"> <span>Weather radar (NOAA/NWS)</span></label></div></details><details class="map-overlay-group"><summary>Wind &amp; Pressure</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-wind-barbs"> <span>Marine / Bay Wind Barbs (NOAA/NDBC)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-inland-wind-barbs"> <span>Land / Inland Wind Barbs (METAR)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-pressure"> <span>Surface Pressure / Isobars (NOAA/NWS METAR)</span></label></div></details><details class="map-overlay-group"><summary>Terrain &amp; Seafloor</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-structure"> <span>Topography &amp; Bathymetry (NOAA ETOPO + offshore feature names)</span></label></div></details><details class="map-overlay-group"><summary>Marine Places</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marinas"> <span>Marinas <small id="map-marine-count-marinas"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="boatyards"> <span>Boatyards &amp; Repair <small id="map-marine-count-boatyards"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="fuel_docks"> <span>Fuel Docks <small id="map-marine-count-fuel_docks"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="launch_ramps"> <span>Launch Ramps <small id="map-marine-count-launch_ramps"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marine_supply"> <span>Marine Supply <small id="map-marine-count-marine_supply"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="yacht_clubs"> <span>Yacht Clubs <small id="map-marine-count-yacht_clubs"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="waterfront_restaurants"> <span>Waterfront Restaurants <small id="map-marine-count-waterfront_restaurants"></small></span></label></div></details><details class="map-overlay-group"><summary>Observations</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-saildrone"> <span>Saildrone Observations (NOAA PMEL)</span></label></div></details></div></details><details id="map-center-menu" class="map-overlays-menu"><summary>Center Map</summary><div class="map-overlays-panel map-center-panel"><button type="button" class="map-menu-close" aria-label="Close Center Map" title="Close">×</button><button type="button" id="map-geolocate" class="map-center-action" title="Center the map on your device location without changing the selected location">My location</button><button type="button" id="map-nav-coordinates" class="map-center-action" title="Center the map on the latitude and longitude shown below">Latitude &amp; Longitude</button><button type="button" id="map-nav-selected" class="map-center-action" {{if not .MapHasRequest}}disabled{{end}}>Selected location</button><button type="button" id="map-nav-wind" class="map-center-action" {{if not .MapHasWind}}disabled{{end}}>Selected wind station</button><button type="button" id="map-nav-current" class="map-center-action" {{if not .MapHasCurrent}}disabled{{end}}>Selected currents station</button></div></details></div><div class="map-primary-actions" aria-label="Location and station actions"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Find nearby stations</span><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates}}false{{else}}true{{end}}" {{if not (or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates)}}disabled{{end}}>Clear location &amp; stations</button></div><div class="map-location-info-grid"><div class="map-coordinate-entry" aria-label="Map center coordinates"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLat}}" aria-label="Map center latitude"></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLon}}" aria-label="Map center longitude"></div><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div id="selected-location-weather" class="selected-location-weather" aria-live="polite"><div class="selected-location-weather-head"><strong>Local Conditions</strong><span id="selected-location-weather-updated" class="selected-location-weather-updated">{{if .SelectedWeatherUpdated}}Updated {{.SelectedWeatherUpdated}}{{end}}</span></div><div id="selected-location-weather-place" class="selected-location-weather-place">{{if .MapHasRequest}}{{if .SelectedWeatherLocation}}{{.SelectedWeatherLocation}}{{else}}Near selected location{{end}}{{else}}Select a location for local conditions{{end}}</div><div id="selected-location-weather-content" {{if not .MapHasRequest}}hidden{{end}}><div class="selected-location-weather-metrics"><span class="selected-location-weather-metric"><b>Air temp:</b> <span id="selected-location-weather-air">{{if .SelectedWeatherAirTemp}}{{.SelectedWeatherAirTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>High:</b> <span id="selected-location-weather-high">{{if .SelectedWeatherHighTemp}}{{.SelectedWeatherHighTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>Low:</b> <span id="selected-location-weather-low">{{if .SelectedWeatherLowTemp}}{{.SelectedWeatherLowTemp}}{{else}}—{{end}}</span></span></div><p id="selected-location-weather-forecast" class="selected-location-weather-forecast" {{if not .SelectedWeatherShortForecast}}hidden{{end}}>{{.SelectedWeatherShortForecast}}</p><p id="selected-location-weather-error" class="selected-location-weather-error" {{if not .SelectedWeatherError}}hidden{{end}}>{{.SelectedWeatherError}}</p><p class="selected-location-weather-note">NWS point forecast near the selected location. Air temperature is the current-hour forecast, not a direct observation.</p></div></div></div><div class="map-controls"><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><details class="map-overlay-help"><summary>Map overlay details</summary><div class="map-overlay-help-body">Topography & Bathymetry combines NOAA/NCEI ETOPO land topography and seafloor bathymetry with NOAA Marine Cadastre official named offshore features. Fishing-relevant features such as seamounts, banks, ridges, hills, knolls, shoals, reefs, rises, plateaus, pinnacles, and escarpments are labeled locally for better contrast. It is intended for fishing-planning context, not navigation; smaller pinnacles may not appear in the global relief model. Marine / Bay Wind Barbs uses live NOAA/NDBC station observations from all active stations with usable wind inside the buffered map viewport; standard meteorological barbs show wind-from direction and speed, and stale observations are faded. Land / Inland Wind Barbs is a separate optional layer sourced from Aviation Weather Center’s complete current-METAR cache and filtered locally to the buffered viewport, including many ASOS/AWOS airport sites. Both controls are display-only and do not change the selected wind station or selected location. Wind-barb tooltips follow the shared page Wind units preference; barb geometry remains based on standard knot increments. Saildrone Observations uses NOAA PMEL public ERDDAP mission data and plots the latest reported position and met-ocean readings from configured 2026 NOAA Saildrone missions; availability is mission-dependent and these moving platforms are not a fixed station network. Exact positions are plotted only when the source provides them; fisherman shorthand such as “20×20” is shown as a derived approximate position with an uncertainty circle, and broad reports such as “Cordell to Monterey” are shown as regional zones rather than fake point coordinates. Satellite Cloud Cover uses NOAA/NESDIS GOES imagery rendered for the current map view; daylight areas appear natural-color-like and nighttime areas use infrared imagery. Radar uses Iowa State IEM's Web-Mercator CONUS NEXRAD N0Q WMS layer; a clear/transparent radar layer can simply mean no precipitation echoes are present. Surface Pressure / Isobars uses current NOAA/NWS Aviation Weather Center METAR mean sea-level-pressure observations. The browser interpolates those point observations into contour lines at a zoom-appropriate interval; it is useful pressure-gradient context but is not an official analyzed surface chart.</div></details><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-weather-overlay-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-pressure-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div id="map-structure-status" class="map-structure-status" hidden></div><div id="map-windbarb-status" class="map-windbarb-status" hidden></div><div id="map-saildrone-status" class="map-saildrone-status" hidden></div><div class="map-layer-note">Drag the handle directly below the map to make the map taller or shorter. Keyboard users can focus the handle and use ↑/↓ (Shift for larger steps).</div><div class="info-popup-row map-info-popup-row"><button id="map-legend-open" class="info-popup-open" type="button" aria-haspopup="dialog" aria-controls="map-legend-modal">ⓘ Map legend</button><button id="map-sources-open" class="info-popup-open" type="button" aria-haspopup="dialog" aria-controls="map-sources-modal">ⓘ Map &amp; data sources</button></div><div id="map-legend-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-legend-title"><div class="info-popup-dialog-head"><h2 id="map-legend-title">Map Legend</h2><button id="map-legend-close" class="info-popup-close" type="button" aria-label="Close map legend" title="Close">×</button></div><div class="info-popup-body"><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span><span class="map-key"><span class="map-dot saildrone" aria-hidden="true"></span>Saildrone latest position</span></div><div class="map-legend"><span class="map-key"><span class="map-dot marine marina" aria-hidden="true"></span>Marina</span><span class="map-key"><span class="map-dot marine boatyard" aria-hidden="true"></span>Boatyard &amp; repair</span><span class="map-key"><span class="map-dot marine fuel" aria-hidden="true"></span>Fuel dock</span><span class="map-key"><span class="map-dot marine ramp" aria-hidden="true"></span>Launch ramp</span><span class="map-key"><span class="map-dot marine supply" aria-hidden="true"></span>Marine supply</span><span class="map-key"><span class="map-dot marine club" aria-hidden="true"></span>Yacht club</span><span class="map-key"><span class="map-dot marine restaurant" aria-hidden="true"></span>Waterfront restaurant</span></div></div></div></div><div id="map-sources-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-sources-title"><div class="info-popup-dialog-head"><h2 id="map-sources-title">Map &amp; Data Sources</h2><button id="map-sources-close" class="info-popup-close" type="button" aria-label="Close map and data sources" title="Close">×</button></div><div class="info-popup-body"><p class="map-sources-note">Base maps: <strong>Street Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service and is available at Zoom 9 or closer; <strong>Satellite</strong> uses Esri World Imagery; <strong>Hybrid</strong> combines Esri imagery with place/boundary labels. NWS forecast-zone, NOAA smoke, <strong>Sea Surface Temp</strong>, <strong>Satellite Cloud Cover</strong>, and radar layers remain independent overlays. The nautical chart layer is for planning/reference and does not replace official navigation products.</p></div></div></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
 {{if .WindError}}<section class="card full error-card"><h2>Wind station selection unavailable</h2><p class="error-message">{{.WindError}}</p><p class="error-help">The page is still available so you can inspect the request and nearby station diagnostics. Try nearby coordinates or an explicit NDBC station ID.</p></section>{{end}}
 <section class="card full wind-card"><div class="wind-card-head"><h2>Wind</h2></div>
@@ -6321,7 +6344,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 
 <section id="full-report-card" class="card full details-link-card"><div><h2>Need the details?</h2><p class="details-note">Open the complete text-style report, including diagnostic and supporting information.</p></div><a class="details-link" href="{{.FullDetailsURL}}">View full report details →</a></section>
 {{end}}</div>
-<div class="footer"><strong>Mauri's Weather & Water Conditions</strong><br>NOAA/NDBC observations + NWS forecast context + NOAA CO-OPS current predictions + curated marine-place overlays · Conditions-planning aid, not a navigation system<br>Version {{.AppVersion}} · Build {{.BuildVersion}}</div></main><div id="planning-loading-overlay" class="page-loading-overlay" aria-hidden="true"><div class="page-loading-box" role="status" aria-live="polite"><span class="page-loading-spinner" aria-hidden="true"></span><span>Loading Planning and Details…</span></div></div><script>
+<div class="footer"><strong>Mauri's Weather & Water Conditions</strong><br>NOAA/NDBC observations + NWS forecast context + NOAA CO-OPS current predictions + curated marine-place overlays · Conditions-planning aid, not a navigation system<br>Version {{.AppVersion}} · Build {{.BuildVersion}}</div></main><div id="planning-loading-overlay" class="page-loading-overlay" aria-hidden="true"><div class="page-loading-box" role="status" aria-live="polite"><span class="page-loading-spinner" aria-hidden="true"></span><span id="page-loading-message">Loading…</span></div></div><script>
 (function(){
   var el = document.getElementById("sailing-location-map");
   if (!el || typeof L === "undefined") return;
@@ -7007,6 +7030,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   var pressureLabelLayer = L.layerGroup();
   var pressureRequestSerial = 0;
   var pressureRefreshTimer = null;
+  var pressureProgressTimer = null;
 
   function setSaildroneStatus(message, isError) {
     var status = document.getElementById("map-saildrone-status");
@@ -7672,6 +7696,37 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     status.style.color = isError ? "#9a352f" : "";
   }
 
+  function stopPressureProgress() {
+    if (pressureProgressTimer) {
+      window.clearInterval(pressureProgressTimer);
+      pressureProgressTimer = null;
+    }
+  }
+
+  function startPressureProgress(requestSerial) {
+    stopPressureProgress();
+    var startedAt = Date.now();
+    setPressureStatus("Loading surface pressure observations…", false);
+    pressureProgressTimer = window.setInterval(function() {
+      if (!mapState.pressureOverlayVisible ||
+          requestSerial !== pressureRequestSerial) {
+        stopPressureProgress();
+        return;
+      }
+      var elapsedSeconds = Math.max(
+        1,
+        Math.round((Date.now() - startedAt) / 1000)
+      );
+      if (elapsedSeconds >= 3) {
+        setPressureStatus(
+          "Still loading surface pressure observations… " +
+          elapsedSeconds + " seconds elapsed.",
+          false
+        );
+      }
+    }, 1000);
+  }
+
   function pressureContourIntervalMB() {
     var zoom = map.getZoom();
     if (zoom >= 8) return 1;
@@ -7873,7 +7928,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     if (!mapState.pressureOverlayVisible) return;
     var requestSerial = ++pressureRequestSerial;
     var bounds = map.getBounds();
-    setPressureStatus("Loading current sea-level pressure observations…", false);
+    startPressureProgress(requestSerial);
 
     fetch(pressureObservationURL(bounds), {headers: {"Accept":"application/json"}})
       .then(function(response) {
@@ -7882,6 +7937,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       })
       .then(function(payload) {
         if (!mapState.pressureOverlayVisible || requestSerial !== pressureRequestSerial) return;
+        stopPressureProgress();
         var observations = Array.isArray(payload.observations) ? payload.observations : [];
         var result = renderPressureContours(observations, bounds);
 
@@ -7924,6 +7980,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       })
       .catch(function(err) {
         if (!mapState.pressureOverlayVisible || requestSerial !== pressureRequestSerial) return;
+        stopPressureProgress();
         pressureLineLayer.clearLayers();
         pressureLabelLayer.clearLayers();
         setPressureStatus(
@@ -7947,6 +8004,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     mapState.pressureOverlayVisible = !!visible;
     if (!mapState.pressureOverlayVisible) {
       pressureRequestSerial++;
+      stopPressureProgress();
       if (pressureRefreshTimer) {
         window.clearTimeout(pressureRefreshTimer);
         pressureRefreshTimer = null;
@@ -8084,6 +8142,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   var windBarbCacheMaxAgeMS = 20 * 60 * 1000;
   var windBarbDataErrors = [];
   var windBarbRequestSerial = 0;
+  var windBarbProgressTimer = null;
   var windBarbRefreshTimer = null;
   var windBarbLoadedBounds = null;
   var marineZoneLayer = null;
@@ -8571,6 +8630,43 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     status.style.color = isError ? "#9a352f" : "";
   }
 
+  function stopWindBarbProgress() {
+    if (windBarbProgressTimer) {
+      window.clearInterval(windBarbProgressTimer);
+      windBarbProgressTimer = null;
+    }
+  }
+
+  function startWindBarbProgress(requestSerial) {
+    stopWindBarbProgress();
+    var startedAt = Date.now();
+    setWindBarbStatus("Loading wind barbs…", false);
+    windBarbProgressTimer = window.setInterval(function() {
+      if ((!mapState.windBarbsVisible && !mapState.inlandWindBarbsVisible) ||
+          requestSerial !== windBarbRequestSerial) {
+        stopWindBarbProgress();
+        return;
+      }
+      var elapsedSeconds = Math.max(
+        1,
+        Math.round((Date.now() - startedAt) / 1000)
+      );
+      if (elapsedSeconds >= 3) {
+        var sourceText =
+          mapState.windBarbsVisible && mapState.inlandWindBarbsVisible
+            ? "NOAA/NDBC and METAR observations"
+            : mapState.windBarbsVisible
+              ? "NOAA/NDBC observations"
+              : "METAR observations";
+        setWindBarbStatus(
+          "Still loading wind barbs… fetching " + sourceText +
+          " · " + elapsedSeconds + " seconds elapsed.",
+          false
+        );
+      }
+    }, 1000);
+  }
+
   function windDirectionDegrees(value) {
     var key = String(value || "").trim().toUpperCase().replace(/[^A-Z]/g, "");
     var points = {N:0,NNE:22.5,NE:45,ENE:67.5,E:90,ESE:112.5,SE:135,SSE:157.5,S:180,SSW:202.5,SW:225,WSW:247.5,W:270,WNW:292.5,NW:315,NNW:337.5};
@@ -8779,7 +8875,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 
     var requestBounds = bufferedWindBarbBounds(visibleBounds);
     var requestSerial = ++windBarbRequestSerial;
-    setWindBarbStatus("Loading wind observations for buffered map view…", false);
+    startWindBarbProgress(requestSerial);
 
     var endpoint =
       "/wind-barbs?min_lat=" + encodeURIComponent(requestBounds.getSouth().toFixed(5)) +
@@ -8797,6 +8893,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       })
       .then(function(payload) {
         if ((!mapState.windBarbsVisible && !mapState.inlandWindBarbsVisible) || requestSerial !== windBarbRequestSerial) return;
+        stopWindBarbProgress();
         var observations = payload && Array.isArray(payload.observations) ? payload.observations : [];
         windBarbDataErrors = payload && Array.isArray(payload.errors) ? payload.errors.map(String) : [];
         mergeWindBarbObservations(observations);
@@ -8805,6 +8902,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       })
       .catch(function(err) {
         if ((!mapState.windBarbsVisible && !mapState.inlandWindBarbsVisible) || requestSerial !== windBarbRequestSerial) return;
+        stopWindBarbProgress();
         setWindBarbStatus("Wind barbs unavailable: " + err.message, true);
       });
   }
@@ -8822,6 +8920,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     mapState.windBarbsVisible = !!visible;
     if (!mapState.windBarbsVisible && !mapState.inlandWindBarbsVisible) {
       windBarbRequestSerial++;
+      stopWindBarbProgress();
       if (windBarbRefreshTimer) {
         window.clearTimeout(windBarbRefreshTimer);
         windBarbRefreshTimer = null;
@@ -8842,6 +8941,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     mapState.inlandWindBarbsVisible = !!visible;
     if (!mapState.windBarbsVisible && !mapState.inlandWindBarbsVisible) {
       windBarbRequestSerial++;
+      stopWindBarbProgress();
       if (windBarbRefreshTimer) {
         window.clearTimeout(windBarbRefreshTimer);
         windBarbRefreshTimer = null;
@@ -10655,24 +10755,38 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 })();
 
 (function(){
-  var link = document.getElementById("planning-page-link");
+  var planningLink = document.getElementById("planning-page-link");
+  var conditionsLink = document.getElementById("conditions-page-link");
   var overlay = document.getElementById("planning-loading-overlay");
-  if (!link || !overlay) return;
+  var message = document.getElementById("page-loading-message");
+  if (!overlay) return;
 
-  function hidePlanningLoader() {
-    overlay.classList.remove("active");
-    overlay.setAttribute("aria-hidden", "true");
-    link.removeAttribute("aria-disabled");
+  function allNavigationLinks() {
+    return [planningLink, conditionsLink].filter(Boolean);
   }
 
-  link.addEventListener("click", function(event) {
-    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-    overlay.classList.add("active");
-    overlay.setAttribute("aria-hidden", "false");
-    link.setAttribute("aria-disabled", "true");
-  });
+  function hidePageLoader() {
+    overlay.classList.remove("active");
+    overlay.setAttribute("aria-hidden", "true");
+    allNavigationLinks().forEach(function(link) {
+      link.removeAttribute("aria-disabled");
+    });
+  }
 
-  window.addEventListener("pageshow", hidePlanningLoader);
+  function wireNavigationLink(link, loadingText) {
+    if (!link) return;
+    link.addEventListener("click", function(event) {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      if (message) message.textContent = loadingText;
+      overlay.classList.add("active");
+      overlay.setAttribute("aria-hidden", "false");
+      link.setAttribute("aria-disabled", "true");
+    });
+  }
+
+  wireNavigationLink(planningLink, "Loading Planning and Details…");
+  wireNavigationLink(conditionsLink, "Loading Conditions Now…");
+  window.addEventListener("pageshow", hidePageLoader);
 })();
 </script>
 </body></html>`))
