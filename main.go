@@ -1,8 +1,10 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"encoding/binary"
 	"encoding/json"
 	"encoding/xml"
 	"flag"
@@ -28,7 +30,7 @@ import (
 
 const (
 	appVersion                      = "1.9.3"
-	buildVersion                    = "v241"
+	buildVersion                    = "v243"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -2089,6 +2091,42 @@ func runServer(
 		}
 	})
 
+	mux.HandleFunc("/smoke-overlay", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		analysisDate, collection, err := fetchNOAAHMSSmoke()
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "private, max-age=300")
+
+		if err != nil {
+			if encodeErr := json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": err.Error(),
+			}); encodeErr != nil {
+				http.Error(w, encodeErr.Error(), http.StatusInternalServerError)
+			}
+			return
+		}
+
+		if collection == nil {
+			if encodeErr := json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": "NOAA HMS satellite smoke analysis returned no usable data.",
+			}); encodeErr != nil {
+				http.Error(w, encodeErr.Error(), http.StatusInternalServerError)
+			}
+			return
+		}
+
+		if encodeErr := json.NewEncoder(w).Encode(map[string]interface{}{
+			"analysis_date": analysisDate,
+			"geojson":       collection,
+		}); encodeErr != nil {
+			http.Error(w, encodeErr.Error(), http.StatusInternalServerError)
+		}
+	})
+
 	mux.HandleFunc("/pressure-observations", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2986,26 +3024,337 @@ func fetchNOAAHMSKML(sourceURL string) ([]byte, int, error) {
 	return body, resp.StatusCode, nil
 }
 
+type hmsDBFField struct {
+	name   string
+	offset int
+	length int
+}
+
+func parseHMSDBFDensities(body []byte) ([]string, error) {
+	if len(body) < 32 {
+		return nil, fmt.Errorf("NOAA HMS DBF is too short")
+	}
+
+	recordCount := int(binary.LittleEndian.Uint32(body[4:8]))
+	headerLength := int(binary.LittleEndian.Uint16(body[8:10]))
+	recordLength := int(binary.LittleEndian.Uint16(body[10:12]))
+	if recordCount < 0 || headerLength < 33 || recordLength < 2 || headerLength > len(body) {
+		return nil, fmt.Errorf("NOAA HMS DBF has an invalid header")
+	}
+
+	fields := make([]hmsDBFField, 0, 12)
+	offset := 1
+	for pos := 32; pos+32 <= headerLength; pos += 32 {
+		if body[pos] == 0x0D {
+			break
+		}
+		rawName := body[pos : pos+11]
+		if nul := bytes.IndexByte(rawName, 0); nul >= 0 {
+			rawName = rawName[:nul]
+		}
+		name := strings.TrimSpace(string(rawName))
+		length := int(body[pos+16])
+		if length <= 0 {
+			continue
+		}
+		fields = append(fields, hmsDBFField{
+			name:   name,
+			offset: offset,
+			length: length,
+		})
+		offset += length
+	}
+
+	densityField := hmsDBFField{}
+	foundDensity := false
+	for _, field := range fields {
+		if strings.EqualFold(field.name, "density") {
+			densityField = field
+			foundDensity = true
+			break
+		}
+	}
+	if !foundDensity {
+		return nil, fmt.Errorf("NOAA HMS DBF has no Density field")
+	}
+
+	densities := make([]string, 0, recordCount)
+	for i := 0; i < recordCount; i++ {
+		start := headerLength + i*recordLength
+		end := start + recordLength
+		if start < 0 || end > len(body) {
+			break
+		}
+		record := body[start:end]
+		if len(record) == 0 || record[0] == '*' {
+			densities = append(densities, "light")
+			continue
+		}
+		fieldStart := densityField.offset
+		fieldEnd := fieldStart + densityField.length
+		if fieldStart < 0 || fieldEnd > len(record) {
+			densities = append(densities, "light")
+			continue
+		}
+		densities = append(
+			densities,
+			normalizeHMSSmokeDensity(string(record[fieldStart:fieldEnd])),
+		)
+	}
+	return densities, nil
+}
+
+func parseHMSShapefile(
+	body []byte,
+	densities []string,
+) (*hmsSmokeFeatureCollection, error) {
+	if len(body) < 100 {
+		return nil, fmt.Errorf("NOAA HMS shapefile is too short")
+	}
+
+	collection := &hmsSmokeFeatureCollection{
+		Type:     "FeatureCollection",
+		Features: make([]hmsSmokeFeature, 0),
+	}
+
+	recordIndex := 0
+	for pos := 100; pos+8 <= len(body); {
+		contentWords := int(binary.BigEndian.Uint32(body[pos+4 : pos+8]))
+		contentBytes := contentWords * 2
+		recordStart := pos + 8
+		recordEnd := recordStart + contentBytes
+		if contentBytes < 4 || recordEnd > len(body) {
+			break
+		}
+
+		record := body[recordStart:recordEnd]
+		shapeType := int32(binary.LittleEndian.Uint32(record[0:4]))
+		if shapeType == 0 {
+			recordIndex++
+			pos = recordEnd
+			continue
+		}
+
+		// Polygon (5), PolygonZ (15), and PolygonM (25) share the same
+		// initial polygon/point layout. Z/M payloads follow the XY points
+		// and are not needed by the browser overlay.
+		if shapeType != 5 && shapeType != 15 && shapeType != 25 {
+			recordIndex++
+			pos = recordEnd
+			continue
+		}
+		if len(record) < 44 {
+			recordIndex++
+			pos = recordEnd
+			continue
+		}
+
+		numParts := int(int32(binary.LittleEndian.Uint32(record[36:40])))
+		numPoints := int(int32(binary.LittleEndian.Uint32(record[40:44])))
+		if numParts <= 0 || numPoints < 3 {
+			recordIndex++
+			pos = recordEnd
+			continue
+		}
+
+		partsStart := 44
+		pointsStart := partsStart + 4*numParts
+		pointsEnd := pointsStart + 16*numPoints
+		if pointsStart > len(record) || pointsEnd > len(record) {
+			recordIndex++
+			pos = recordEnd
+			continue
+		}
+
+		partStarts := make([]int, numParts+1)
+		validParts := true
+		for i := 0; i < numParts; i++ {
+			partStarts[i] = int(int32(binary.LittleEndian.Uint32(
+				record[partsStart+4*i : partsStart+4*i+4],
+			)))
+			if partStarts[i] < 0 || partStarts[i] >= numPoints {
+				validParts = false
+				break
+			}
+		}
+		partStarts[numParts] = numPoints
+		if !validParts {
+			recordIndex++
+			pos = recordEnd
+			continue
+		}
+
+		density := "light"
+		if recordIndex < len(densities) && strings.TrimSpace(densities[recordIndex]) != "" {
+			density = densities[recordIndex]
+		}
+
+		for part := 0; part < numParts; part++ {
+			first := partStarts[part]
+			last := partStarts[part+1]
+			if first < 0 || last > numPoints || last-first < 3 {
+				continue
+			}
+
+			ring := make([][]float64, 0, last-first+1)
+			for pointIndex := first; pointIndex < last; pointIndex++ {
+				pointOffset := pointsStart + 16*pointIndex
+				lonBits := binary.LittleEndian.Uint64(record[pointOffset : pointOffset+8])
+				latBits := binary.LittleEndian.Uint64(record[pointOffset+8 : pointOffset+16])
+				lon := math.Float64frombits(lonBits)
+				lat := math.Float64frombits(latBits)
+				if math.IsNaN(lon) || math.IsNaN(lat) ||
+					math.IsInf(lon, 0) || math.IsInf(lat, 0) ||
+					lon < -180 || lon > 180 || lat < -90 || lat > 90 {
+					continue
+				}
+				ring = append(ring, []float64{lon, lat})
+			}
+			if len(ring) < 3 {
+				continue
+			}
+
+			firstPoint := ring[0]
+			lastPoint := ring[len(ring)-1]
+			if firstPoint[0] != lastPoint[0] || firstPoint[1] != lastPoint[1] {
+				ring = append(ring, []float64{firstPoint[0], firstPoint[1]})
+			}
+
+			collection.Features = append(collection.Features, hmsSmokeFeature{
+				Type: "Feature",
+				Properties: hmsSmokeProperty{
+					Density: density,
+				},
+				Geometry: hmsSmokeGeometry{
+					Type:        "Polygon",
+					Coordinates: [][][]float64{ring},
+				},
+			})
+		}
+
+		recordIndex++
+		pos = recordEnd
+	}
+
+	if len(collection.Features) == 0 {
+		return nil, fmt.Errorf("NOAA HMS shapefile contained no usable smoke polygons")
+	}
+	return collection, nil
+}
+
+func parseNOAAHMSSmokeZip(body []byte) (*hmsSmokeFeatureCollection, error) {
+	reader, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		return nil, fmt.Errorf("open NOAA HMS smoke ZIP: %w", err)
+	}
+
+	var shpBody []byte
+	var dbfBody []byte
+	for _, file := range reader.File {
+		name := strings.ToLower(strings.TrimSpace(file.Name))
+		if !strings.HasSuffix(name, ".shp") && !strings.HasSuffix(name, ".dbf") {
+			continue
+		}
+		rc, err := file.Open()
+		if err != nil {
+			return nil, err
+		}
+		data, readErr := ioutil.ReadAll(io.LimitReader(rc, 12<<20))
+		closeErr := rc.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+		switch {
+		case strings.HasSuffix(name, ".shp"):
+			shpBody = data
+		case strings.HasSuffix(name, ".dbf"):
+			dbfBody = data
+		}
+	}
+
+	if len(shpBody) == 0 || len(dbfBody) == 0 {
+		return nil, fmt.Errorf("NOAA HMS smoke ZIP is missing .shp or .dbf data")
+	}
+
+	densities, err := parseHMSDBFDensities(dbfBody)
+	if err != nil {
+		return nil, err
+	}
+	return parseHMSShapefile(shpBody, densities)
+}
+
+func fetchNOAAHMSSmokeZip(sourceURL string) ([]byte, time.Time, error) {
+	req, err := http.NewRequest(http.MethodGet, sourceURL, nil)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	req.Header.Set("User-Agent", "pittsburg-saildata/"+appVersion)
+
+	client := &http.Client{Timeout: 12 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, time.Time{}, fmt.Errorf("NOAA returned HTTP %d", resp.StatusCode)
+	}
+
+	body, err := ioutil.ReadAll(io.LimitReader(resp.Body, 12<<20))
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+
+	var modified time.Time
+	if value := strings.TrimSpace(resp.Header.Get("Last-Modified")); value != "" {
+		if parsed, parseErr := http.ParseTime(value); parseErr == nil {
+			modified = parsed.UTC()
+		}
+	}
+	return body, modified, nil
+}
+
 func fetchNOAAHMSSmoke() (string, *hmsSmokeFeatureCollection, error) {
-	// Use NOAA's dated HMS archive directly. The general "current" KML URL
-	// is not consistently accessible to server-side clients, while the dated
-	// archive is the documented persistent product location.
+	// NOAA's dated KML publication stopped advancing in September 2026 while
+	// the ArcGIS/WFS-derived shapefile product continued to update. Prefer
+	// NOAA's compact current smoke shapefile ZIP and retain recent dated
+	// shapefiles as a fallback.
+	currentURL :=
+		"https://satepsanone.nesdis.noaa.gov/pub/FIRE/web/HMS/" +
+			"Smoke_Polygons/Shapefile/ArcGIS_WFS_source/hms_smoke.zip"
+
+	if body, modified, err := fetchNOAAHMSSmokeZip(currentURL); err == nil {
+		if collection, parseErr := parseNOAAHMSSmokeZip(body); parseErr == nil &&
+			collection != nil && len(collection.Features) > 0 {
+			dateText := "latest"
+			if !modified.IsZero() {
+				dateText = modified.Format("Jan 2, 2006")
+			}
+			return dateText, collection, nil
+		}
+	}
+
 	now := time.Now().UTC()
 	for daysBack := 0; daysBack <= 7; daysBack++ {
 		day := now.AddDate(0, 0, -daysBack)
 		dateText := day.Format("20060102")
 		sourceURL := fmt.Sprintf(
-			"https://satepsanone.nesdis.noaa.gov/pub/FIRE/web/HMS/Smoke_Polygons/KML/%s/%s/hms_smoke%s.kml",
+			"https://satepsanone.nesdis.noaa.gov/pub/FIRE/web/HMS/"+
+				"Smoke_Polygons/Shapefile/%s/%s/hms_smoke%s.zip",
 			day.Format("2006"),
 			day.Format("01"),
 			dateText,
 		)
 
-		body, _, err := fetchNOAAHMSKML(sourceURL)
+		body, _, err := fetchNOAAHMSSmokeZip(sourceURL)
 		if err != nil {
 			continue
 		}
-		collection, err := parseNOAAHMSSmokeKML(body)
+		collection, err := parseNOAAHMSSmokeZip(body)
 		if err != nil || collection == nil || len(collection.Features) == 0 {
 			continue
 		}
@@ -3013,7 +3362,8 @@ func fetchNOAAHMSSmoke() (string, *hmsSmokeFeatureCollection, error) {
 	}
 
 	return "", nil, fmt.Errorf(
-		"NOAA HMS satellite smoke analysis is temporarily unavailable; no recent dated analysis could be loaded.",
+		"NOAA HMS satellite smoke analysis is temporarily unavailable; " +
+			"no current or recent shapefile analysis could be loaded.",
 	)
 }
 
@@ -5903,7 +6253,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 <section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Open the full planning dashboard for location, wind, currents, forecasts, map layers, and customization controls.</p></div><a id="planning-page-link" class="planning-page-link" href="{{.PlanningDetailsURL}}">Planning and Details →</a></section>
 {{else}}
 <section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Full planning dashboard and customization controls.</p></div><a class="planning-page-link" href="{{.ConditionsURL}}">← Back to Conditions Now</a></section>
-<section class="card full map-card"><div class="map-intro"><div><div class="map-intro-title"><h2>Location</h2><details class="location-help"><summary aria-label="About location selection" title="About location selection">ⓘ</summary><div class="location-help-panel"><div class="location-help-header"><strong>About location selection</strong><button type="button" class="location-help-close" aria-label="Close location information" title="Close">×</button></div><div class="location-help-body"><p><strong>Selected location</strong> is the point used for Local Conditions and nearby-station searches. Click the map to set or change it.</p><p>Panning, zooming, My location, and Center Map only change the map view. The latitude/longitude fields show the map center; editing them and choosing <strong>Center Map → Latitude &amp; Longitude</strong> does not change the selected location.</p><p><strong>Find nearby stations</strong> searches around the selected location. Open a candidate station on the map to review it and commit it as the wind source; the associated currents station is previewed with it.</p></div></div></details></div><div class="map-help">Click the map to select a location for local conditions and nearby stations.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-nautical-zoom-note" class="map-nautical-zoom-note" hidden aria-live="polite">Nautical chart available at Zoom 9+.</div><div id="map-resize-handle" class="map-resize-handle" role="separator" aria-label="Resize map vertically" aria-orientation="horizontal" aria-valuemin="260" aria-valuemax="900" aria-valuenow="390" aria-grabbed="false" tabindex="0" title="Drag up or down to resize map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-scale-row" aria-label="Map scale"><span id="map-scale-status" class="map-scale-status" role="status" aria-live="polite"></span></div><div class="map-state-controls" aria-label="Map controls"><details id="map-types-menu" class="map-overlays-menu"><summary>Map Types</summary><div class="map-overlays-panel"><button type="button" class="map-menu-close" aria-label="Close Map Types" title="Close">×</button><label class="map-overlay-toggle"><input type="radio" name="map-type" value="map"> <span>Street Map</span></label><label id="map-type-nautical-label" class="map-overlay-toggle"><input id="map-type-nautical" type="radio" name="map-type" value="nautical"> <span>Nautical Chart <small>(Zoom 9+)</small></span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="satellite"> <span>Satellite</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="hybrid"> <span>Hybrid</span></label></div></details><details id="map-overlays-menu" class="map-overlays-menu"><summary>Map Overlays</summary><div class="map-overlays-panel"><button type="button" class="map-menu-close" aria-label="Close Map Overlays" title="Close">×</button><details class="map-overlay-group"><summary>Weather &amp; Hazards</summary><div class="map-overlay-group-body"><label id="map-marine-zone-control" class="map-overlay-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-smoke"> <span>Satellite smoke (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-clouds"> <span>Satellite Cloud Cover (NOAA)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-radar"> <span>Weather radar (NOAA/NWS)</span></label></div></details><details class="map-overlay-group"><summary>Wind &amp; Pressure</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-wind-barbs"> <span>Marine / Bay Wind Barbs (NOAA/NDBC)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-inland-wind-barbs"> <span>Land / Inland Wind Barbs (METAR)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-pressure"> <span>Surface Pressure / Isobars (NOAA/NWS METAR)</span></label></div></details><details class="map-overlay-group" open><summary>Terrain &amp; Seafloor</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-structure"> <span>Topography &amp; Bathymetry (NOAA ETOPO + offshore feature names)</span></label></div></details><details class="map-overlay-group"><summary>Marine Places</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marinas"> <span>Marinas <small id="map-marine-count-marinas"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="boatyards"> <span>Boatyards &amp; Repair <small id="map-marine-count-boatyards"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="fuel_docks"> <span>Fuel Docks <small id="map-marine-count-fuel_docks"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="launch_ramps"> <span>Launch Ramps <small id="map-marine-count-launch_ramps"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marine_supply"> <span>Marine Supply <small id="map-marine-count-marine_supply"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="yacht_clubs"> <span>Yacht Clubs <small id="map-marine-count-yacht_clubs"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="waterfront_restaurants"> <span>Waterfront Restaurants <small id="map-marine-count-waterfront_restaurants"></small></span></label></div></details><details class="map-overlay-group"><summary>Observations</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-saildrone"> <span>Saildrone Observations (NOAA PMEL)</span></label></div></details></div></details><details id="map-center-menu" class="map-overlays-menu"><summary>Center Map</summary><div class="map-overlays-panel map-center-panel"><button type="button" class="map-menu-close" aria-label="Close Center Map" title="Close">×</button><button type="button" id="map-geolocate" class="map-center-action" title="Center the map on your device location without changing the selected location">My location</button><button type="button" id="map-nav-coordinates" class="map-center-action" title="Center the map on the latitude and longitude shown below">Latitude &amp; Longitude</button><button type="button" id="map-nav-selected" class="map-center-action" {{if not .MapHasRequest}}disabled{{end}}>Selected location</button><button type="button" id="map-nav-wind" class="map-center-action" {{if not .MapHasWind}}disabled{{end}}>Selected wind station</button><button type="button" id="map-nav-current" class="map-center-action" {{if not .MapHasCurrent}}disabled{{end}}>Selected currents station</button></div></details></div><div class="map-primary-actions" aria-label="Location and station actions"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Find nearby stations</span><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates}}false{{else}}true{{end}}" {{if not (or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates)}}disabled{{end}}>Clear location &amp; stations</button></div><div class="map-location-info-grid"><div class="map-coordinate-entry" aria-label="Map center coordinates"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLat}}" aria-label="Map center latitude"></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLon}}" aria-label="Map center longitude"></div><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div id="selected-location-weather" class="selected-location-weather" aria-live="polite"><div class="selected-location-weather-head"><strong>Local Conditions</strong><span id="selected-location-weather-updated" class="selected-location-weather-updated">{{if .SelectedWeatherUpdated}}Updated {{.SelectedWeatherUpdated}}{{end}}</span></div><div id="selected-location-weather-place" class="selected-location-weather-place">{{if .MapHasRequest}}{{if .SelectedWeatherLocation}}{{.SelectedWeatherLocation}}{{else}}Near selected location{{end}}{{else}}Select a location for local conditions{{end}}</div><div id="selected-location-weather-content" {{if not .MapHasRequest}}hidden{{end}}><div class="selected-location-weather-metrics"><span class="selected-location-weather-metric"><b>Air temp:</b> <span id="selected-location-weather-air">{{if .SelectedWeatherAirTemp}}{{.SelectedWeatherAirTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>High:</b> <span id="selected-location-weather-high">{{if .SelectedWeatherHighTemp}}{{.SelectedWeatherHighTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>Low:</b> <span id="selected-location-weather-low">{{if .SelectedWeatherLowTemp}}{{.SelectedWeatherLowTemp}}{{else}}—{{end}}</span></span></div><p id="selected-location-weather-forecast" class="selected-location-weather-forecast" {{if not .SelectedWeatherShortForecast}}hidden{{end}}>{{.SelectedWeatherShortForecast}}</p><p id="selected-location-weather-error" class="selected-location-weather-error" {{if not .SelectedWeatherError}}hidden{{end}}>{{.SelectedWeatherError}}</p><p class="selected-location-weather-note">NWS point forecast near the selected location. Air temperature is the current-hour forecast, not a direct observation.</p></div></div></div><div class="map-controls"><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><details class="map-overlay-help"><summary>Map overlay details</summary><div class="map-overlay-help-body">Topography & Bathymetry combines NOAA/NCEI ETOPO land topography and seafloor bathymetry with NOAA Marine Cadastre official named offshore features. Fishing-relevant features such as seamounts, banks, ridges, hills, knolls, shoals, reefs, rises, plateaus, pinnacles, and escarpments are labeled locally for better contrast. It is intended for fishing-planning context, not navigation; smaller pinnacles may not appear in the global relief model. Marine / Bay Wind Barbs uses live NOAA/NDBC station observations from all active stations with usable wind inside the buffered map viewport; standard meteorological barbs show wind-from direction and speed, and stale observations are faded. Land / Inland Wind Barbs is a separate optional layer sourced from Aviation Weather Center’s complete current-METAR cache and filtered locally to the buffered viewport, including many ASOS/AWOS airport sites. Both controls are display-only and do not change the selected wind station or selected location. Wind-barb tooltips follow the shared page Wind units preference; barb geometry remains based on standard knot increments. Saildrone Observations uses NOAA PMEL public ERDDAP mission data and plots the latest reported position and met-ocean readings from configured 2026 NOAA Saildrone missions; availability is mission-dependent and these moving platforms are not a fixed station network. Exact positions are plotted only when the source provides them; fisherman shorthand such as “20×20” is shown as a derived approximate position with an uncertainty circle, and broad reports such as “Cordell to Monterey” are shown as regional zones rather than fake point coordinates. Satellite Cloud Cover uses NOAA/NESDIS GOES imagery rendered for the current map view; daylight areas appear natural-color-like and nighttime areas use infrared imagery. Radar uses Iowa State IEM's Web-Mercator CONUS NEXRAD N0Q WMS layer; a clear/transparent radar layer can simply mean no precipitation echoes are present. Surface Pressure / Isobars uses current NOAA/NWS Aviation Weather Center METAR mean sea-level-pressure observations. The browser interpolates those point observations into contour lines at a zoom-appropriate interval; it is useful pressure-gradient context but is not an official analyzed surface chart.</div></details><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-weather-overlay-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-pressure-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div id="map-structure-status" class="map-structure-status" hidden></div><div id="map-windbarb-status" class="map-windbarb-status" hidden></div><div id="map-saildrone-status" class="map-saildrone-status" hidden></div><div class="map-layer-note">Drag the handle directly below the map to make the map taller or shorter. Keyboard users can focus the handle and use ↑/↓ (Shift for larger steps).</div><div class="info-popup-row map-info-popup-row"><button id="map-legend-open" class="info-popup-open" type="button" aria-haspopup="dialog" aria-controls="map-legend-modal">ⓘ Map legend</button><button id="map-sources-open" class="info-popup-open" type="button" aria-haspopup="dialog" aria-controls="map-sources-modal">ⓘ Map &amp; data sources</button></div><div id="map-legend-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-legend-title"><div class="info-popup-dialog-head"><h2 id="map-legend-title">Map Legend</h2><button id="map-legend-close" class="info-popup-close" type="button" aria-label="Close map legend" title="Close">×</button></div><div class="info-popup-body"><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span><span class="map-key"><span class="map-dot saildrone" aria-hidden="true"></span>Saildrone latest position</span></div><div class="map-legend"><span class="map-key"><span class="map-dot marine marina" aria-hidden="true"></span>Marina</span><span class="map-key"><span class="map-dot marine boatyard" aria-hidden="true"></span>Boatyard &amp; repair</span><span class="map-key"><span class="map-dot marine fuel" aria-hidden="true"></span>Fuel dock</span><span class="map-key"><span class="map-dot marine ramp" aria-hidden="true"></span>Launch ramp</span><span class="map-key"><span class="map-dot marine supply" aria-hidden="true"></span>Marine supply</span><span class="map-key"><span class="map-dot marine club" aria-hidden="true"></span>Yacht club</span><span class="map-key"><span class="map-dot marine restaurant" aria-hidden="true"></span>Waterfront restaurant</span></div></div></div></div><div id="map-sources-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-sources-title"><div class="info-popup-dialog-head"><h2 id="map-sources-title">Map &amp; Data Sources</h2><button id="map-sources-close" class="info-popup-close" type="button" aria-label="Close map and data sources" title="Close">×</button></div><div class="info-popup-body"><p class="map-sources-note">Base maps: <strong>Street Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service and is available at Zoom 9 or closer; <strong>Satellite</strong> uses Esri World Imagery; <strong>Hybrid</strong> combines Esri imagery with place/boundary labels. NWS forecast-zone, NOAA smoke, <strong>Sea Surface Temp</strong>, <strong>Satellite Cloud Cover</strong>, and radar layers remain independent overlays. The nautical chart layer is for planning/reference and does not replace official navigation products.</p></div></div></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
+<section class="card full map-card"><div class="map-intro"><div><div class="map-intro-title"><h2>Location</h2><details class="location-help"><summary aria-label="About location selection" title="About location selection">ⓘ</summary><div class="location-help-panel"><div class="location-help-header"><strong>About location selection</strong><button type="button" class="location-help-close" aria-label="Close location information" title="Close">×</button></div><div class="location-help-body"><p><strong>Selected location</strong> is the point used for Local Conditions and nearby-station searches. Click the map to set or change it.</p><p>Panning, zooming, My location, and Center Map only change the map view. The latitude/longitude fields show the map center; editing them and choosing <strong>Center Map → Latitude &amp; Longitude</strong> does not change the selected location.</p><p><strong>Find nearby stations</strong> searches around the selected location. Open a candidate station on the map to review it and commit it as the wind source; the associated currents station is previewed with it.</p></div></div></details></div><div class="map-help">Click the map to select a location for local conditions and nearby stations.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-nautical-zoom-note" class="map-nautical-zoom-note" hidden aria-live="polite">Nautical chart available at Zoom 9+.</div><div id="map-resize-handle" class="map-resize-handle" role="separator" aria-label="Resize map vertically" aria-orientation="horizontal" aria-valuemin="260" aria-valuemax="900" aria-valuenow="390" aria-grabbed="false" tabindex="0" title="Drag up or down to resize map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-scale-row" aria-label="Map scale"><span id="map-scale-status" class="map-scale-status" role="status" aria-live="polite"></span></div><div class="map-state-controls" aria-label="Map controls"><details id="map-types-menu" class="map-overlays-menu"><summary>Map Types</summary><div class="map-overlays-panel"><button type="button" class="map-menu-close" aria-label="Close Map Types" title="Close">×</button><label class="map-overlay-toggle"><input type="radio" name="map-type" value="map"> <span>Street Map</span></label><label id="map-type-nautical-label" class="map-overlay-toggle"><input id="map-type-nautical" type="radio" name="map-type" value="nautical"> <span>Nautical Chart <small>(Zoom 9+)</small></span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="satellite"> <span>Satellite</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="hybrid"> <span>Hybrid</span></label></div></details><details id="map-overlays-menu" class="map-overlays-menu"><summary>Map Overlays</summary><div class="map-overlays-panel"><button type="button" class="map-menu-close" aria-label="Close Map Overlays" title="Close">×</button><details class="map-overlay-group"><summary>Weather &amp; Hazards</summary><div class="map-overlay-group-body"><label id="map-marine-zone-control" class="map-overlay-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-smoke"> <span>Satellite smoke (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-clouds"> <span>Satellite Cloud Cover (NOAA)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-radar"> <span>Weather radar (NOAA/NWS)</span></label></div></details><details class="map-overlay-group"><summary>Wind &amp; Pressure</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-wind-barbs"> <span>Marine / Bay Wind Barbs (NOAA/NDBC)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-inland-wind-barbs"> <span>Land / Inland Wind Barbs (METAR)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-pressure"> <span>Surface Pressure / Isobars (NOAA/NWS METAR)</span></label></div></details><details class="map-overlay-group"><summary>Terrain &amp; Seafloor</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-structure"> <span>Topography &amp; Bathymetry (NOAA ETOPO + offshore feature names)</span></label></div></details><details class="map-overlay-group"><summary>Marine Places</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marinas"> <span>Marinas <small id="map-marine-count-marinas"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="boatyards"> <span>Boatyards &amp; Repair <small id="map-marine-count-boatyards"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="fuel_docks"> <span>Fuel Docks <small id="map-marine-count-fuel_docks"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="launch_ramps"> <span>Launch Ramps <small id="map-marine-count-launch_ramps"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marine_supply"> <span>Marine Supply <small id="map-marine-count-marine_supply"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="yacht_clubs"> <span>Yacht Clubs <small id="map-marine-count-yacht_clubs"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="waterfront_restaurants"> <span>Waterfront Restaurants <small id="map-marine-count-waterfront_restaurants"></small></span></label></div></details><details class="map-overlay-group"><summary>Observations</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-saildrone"> <span>Saildrone Observations (NOAA PMEL)</span></label></div></details></div></details><details id="map-center-menu" class="map-overlays-menu"><summary>Center Map</summary><div class="map-overlays-panel map-center-panel"><button type="button" class="map-menu-close" aria-label="Close Center Map" title="Close">×</button><button type="button" id="map-geolocate" class="map-center-action" title="Center the map on your device location without changing the selected location">My location</button><button type="button" id="map-nav-coordinates" class="map-center-action" title="Center the map on the latitude and longitude shown below">Latitude &amp; Longitude</button><button type="button" id="map-nav-selected" class="map-center-action" {{if not .MapHasRequest}}disabled{{end}}>Selected location</button><button type="button" id="map-nav-wind" class="map-center-action" {{if not .MapHasWind}}disabled{{end}}>Selected wind station</button><button type="button" id="map-nav-current" class="map-center-action" {{if not .MapHasCurrent}}disabled{{end}}>Selected currents station</button></div></details></div><div class="map-primary-actions" aria-label="Location and station actions"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Find nearby stations</span><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates}}false{{else}}true{{end}}" {{if not (or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates)}}disabled{{end}}>Clear location &amp; stations</button></div><div class="map-location-info-grid"><div class="map-coordinate-entry" aria-label="Map center coordinates"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLat}}" aria-label="Map center latitude"></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLon}}" aria-label="Map center longitude"></div><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div id="selected-location-weather" class="selected-location-weather" aria-live="polite"><div class="selected-location-weather-head"><strong>Local Conditions</strong><span id="selected-location-weather-updated" class="selected-location-weather-updated">{{if .SelectedWeatherUpdated}}Updated {{.SelectedWeatherUpdated}}{{end}}</span></div><div id="selected-location-weather-place" class="selected-location-weather-place">{{if .MapHasRequest}}{{if .SelectedWeatherLocation}}{{.SelectedWeatherLocation}}{{else}}Near selected location{{end}}{{else}}Select a location for local conditions{{end}}</div><div id="selected-location-weather-content" {{if not .MapHasRequest}}hidden{{end}}><div class="selected-location-weather-metrics"><span class="selected-location-weather-metric"><b>Air temp:</b> <span id="selected-location-weather-air">{{if .SelectedWeatherAirTemp}}{{.SelectedWeatherAirTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>High:</b> <span id="selected-location-weather-high">{{if .SelectedWeatherHighTemp}}{{.SelectedWeatherHighTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>Low:</b> <span id="selected-location-weather-low">{{if .SelectedWeatherLowTemp}}{{.SelectedWeatherLowTemp}}{{else}}—{{end}}</span></span></div><p id="selected-location-weather-forecast" class="selected-location-weather-forecast" {{if not .SelectedWeatherShortForecast}}hidden{{end}}>{{.SelectedWeatherShortForecast}}</p><p id="selected-location-weather-error" class="selected-location-weather-error" {{if not .SelectedWeatherError}}hidden{{end}}>{{.SelectedWeatherError}}</p><p class="selected-location-weather-note">NWS point forecast near the selected location. Air temperature is the current-hour forecast, not a direct observation.</p></div></div></div><div class="map-controls"><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><details class="map-overlay-help"><summary>Map overlay details</summary><div class="map-overlay-help-body">Topography & Bathymetry combines NOAA/NCEI ETOPO land topography and seafloor bathymetry with NOAA Marine Cadastre official named offshore features. Fishing-relevant features such as seamounts, banks, ridges, hills, knolls, shoals, reefs, rises, plateaus, pinnacles, and escarpments are labeled locally for better contrast. It is intended for fishing-planning context, not navigation; smaller pinnacles may not appear in the global relief model. Marine / Bay Wind Barbs uses live NOAA/NDBC station observations from all active stations with usable wind inside the buffered map viewport; standard meteorological barbs show wind-from direction and speed, and stale observations are faded. Land / Inland Wind Barbs is a separate optional layer sourced from Aviation Weather Center’s complete current-METAR cache and filtered locally to the buffered viewport, including many ASOS/AWOS airport sites. Both controls are display-only and do not change the selected wind station or selected location. Wind-barb tooltips follow the shared page Wind units preference; barb geometry remains based on standard knot increments. Saildrone Observations uses NOAA PMEL public ERDDAP mission data and plots the latest reported position and met-ocean readings from configured 2026 NOAA Saildrone missions; availability is mission-dependent and these moving platforms are not a fixed station network. Exact positions are plotted only when the source provides them; fisherman shorthand such as “20×20” is shown as a derived approximate position with an uncertainty circle, and broad reports such as “Cordell to Monterey” are shown as regional zones rather than fake point coordinates. Satellite Cloud Cover uses NOAA/NESDIS GOES imagery rendered for the current map view; daylight areas appear natural-color-like and nighttime areas use infrared imagery. Radar uses Iowa State IEM's Web-Mercator CONUS NEXRAD N0Q WMS layer; a clear/transparent radar layer can simply mean no precipitation echoes are present. Surface Pressure / Isobars uses current NOAA/NWS Aviation Weather Center METAR mean sea-level-pressure observations. The browser interpolates those point observations into contour lines at a zoom-appropriate interval; it is useful pressure-gradient context but is not an official analyzed surface chart.</div></details><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-weather-overlay-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-pressure-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div id="map-structure-status" class="map-structure-status" hidden></div><div id="map-windbarb-status" class="map-windbarb-status" hidden></div><div id="map-saildrone-status" class="map-saildrone-status" hidden></div><div class="map-layer-note">Drag the handle directly below the map to make the map taller or shorter. Keyboard users can focus the handle and use ↑/↓ (Shift for larger steps).</div><div class="info-popup-row map-info-popup-row"><button id="map-legend-open" class="info-popup-open" type="button" aria-haspopup="dialog" aria-controls="map-legend-modal">ⓘ Map legend</button><button id="map-sources-open" class="info-popup-open" type="button" aria-haspopup="dialog" aria-controls="map-sources-modal">ⓘ Map &amp; data sources</button></div><div id="map-legend-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-legend-title"><div class="info-popup-dialog-head"><h2 id="map-legend-title">Map Legend</h2><button id="map-legend-close" class="info-popup-close" type="button" aria-label="Close map legend" title="Close">×</button></div><div class="info-popup-body"><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span><span class="map-key"><span class="map-dot saildrone" aria-hidden="true"></span>Saildrone latest position</span></div><div class="map-legend"><span class="map-key"><span class="map-dot marine marina" aria-hidden="true"></span>Marina</span><span class="map-key"><span class="map-dot marine boatyard" aria-hidden="true"></span>Boatyard &amp; repair</span><span class="map-key"><span class="map-dot marine fuel" aria-hidden="true"></span>Fuel dock</span><span class="map-key"><span class="map-dot marine ramp" aria-hidden="true"></span>Launch ramp</span><span class="map-key"><span class="map-dot marine supply" aria-hidden="true"></span>Marine supply</span><span class="map-key"><span class="map-dot marine club" aria-hidden="true"></span>Yacht club</span><span class="map-key"><span class="map-dot marine restaurant" aria-hidden="true"></span>Waterfront restaurant</span></div></div></div></div><div id="map-sources-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-sources-title"><div class="info-popup-dialog-head"><h2 id="map-sources-title">Map &amp; Data Sources</h2><button id="map-sources-close" class="info-popup-close" type="button" aria-label="Close map and data sources" title="Close">×</button></div><div class="info-popup-body"><p class="map-sources-note">Base maps: <strong>Street Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service and is available at Zoom 9 or closer; <strong>Satellite</strong> uses Esri World Imagery; <strong>Hybrid</strong> combines Esri imagery with place/boundary labels. NWS forecast-zone, NOAA smoke, <strong>Sea Surface Temp</strong>, <strong>Satellite Cloud Cover</strong>, and radar layers remain independent overlays. The nautical chart layer is for planning/reference and does not replace official navigation products.</p></div></div></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
 {{if .WindError}}<section class="card full error-card"><h2>Wind station selection unavailable</h2><p class="error-message">{{.WindError}}</p><p class="error-help">The page is still available so you can inspect the request and nearby station diagnostics. Try nearby coordinates or an explicit NDBC station ID.</p></section>{{end}}
 <section class="card full wind-card"><div class="wind-card-head"><h2>Wind</h2></div>
 <div class="metrics">

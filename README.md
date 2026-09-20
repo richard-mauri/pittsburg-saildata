@@ -7,7 +7,7 @@ The default wind station is **PSBC1**.
 ## Current release
 
 **Public version: 1.9.3**  
-**Generated source lineage: v241**
+**Generated source lineage: v243**
 
 **Current SST status:** deferred/disabled in v195; see **Deferred SST — future approach** below.
 **Current chlorophyll status:** both Chlorophyll Field and Chlorophyll Contours are deferred/disabled in v198.
@@ -16,6 +16,23 @@ Version 1.9.2 builds on the streamlined browser workflow with clearer observatio
 
 
 
+
+## v243 smoke route restoration and collapsed overlay groups
+
+- Restores the missing `/smoke-overlay` HTTP route in `runServer()`, fixing the browser's 404 response when **Satellite smoke (NOAA HMS)** is enabled.
+- The restored endpoint calls the v242 NOAA HMS shapefile ingestion path and returns the established `analysis_date` plus GeoJSON payload expected by the existing browser overlay.
+- Smoke endpoint failures remain JSON errors rather than breaking the rest of the Planning and Details page.
+- Changes **Map Overlays** so every category starts collapsed, including **Terrain & Seafloor**. Users can expand only the group they want.
+- Runtime identity remains public **Version 1.9.3** and advances generated build to **v243**.
+
+## v242 NOAA HMS smoke-source repair
+
+- Repairs the **Satellite smoke (NOAA HMS)** overlay after NOAA's dated KML publication stopped advancing while the shapefile product continued to update.
+- Changes server-side HMS smoke retrieval to prefer NOAA's compact current `hms_smoke.zip` from the ArcGIS/WFS-derived shapefile source.
+- Adds a dependency-free Go parser for the zipped `.shp` and `.dbf` data, preserving the existing `/smoke-overlay` JSON/GeoJSON contract and the current Leaflet smoke rendering.
+- Falls back through up to seven recent dated NOAA HMS shapefile ZIPs when the compact current product is temporarily unavailable.
+- Keeps the existing Light / Medium / Heavy smoke-density styling and qualitative-smoke disclaimer; the overlay remains planning context, not AQI or measured PM2.5.
+- Runtime identity remains public **Version 1.9.3** and advances generated build to **v242**.
 
 ## v241 Marine Places website links
 
@@ -1257,11 +1274,11 @@ This section is the authoritative development handoff for this repository. A new
 <!-- PROJECT-STATE:BEGIN -->
 
 - Public app version: **1.9.3**
-- Generated source build: **v234**
-- Next generated source build: **v238**
+- Generated source build: **v243**
+- Next generated source build: **v244**
 - Authoritative repository: **https://github.com/richard-mauri/pittsburg-saildata**
 - Authoritative branch: **main**
-- Release status: **v234 / 1.9.3 release candidate**
+- Release status: **v243 / 1.9.3 release candidate**
 
 ### Managed-file checkpoints
 
