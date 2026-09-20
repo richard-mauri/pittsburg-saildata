@@ -1,0 +1,114 @@
+{
+  "add": [
+    {
+      "name": "Pittsburg Marina",
+      "category": "marinas",
+      "city": "Pittsburg, CA",
+      "lat": 38.03537,
+      "lon": -121.88355,
+      "address": "51 Marina Blvd, Pittsburg, CA 94565",
+      "note": "Pinned local override so this marina remains present even if upstream tagging changes."
+    },
+    {
+      "name": "Antioch City Marina",
+      "category": "marinas",
+      "city": "Antioch, CA",
+      "lat": 38.02002,
+      "lon": -121.82022,
+      "address": "5 Marina Plaza, Antioch, CA 94509",
+      "note": "Pinned local override so this marina remains present even if upstream tagging changes."
+    },
+    {
+      "name": "KKMI Richmond",
+      "aliases": [
+        "KKMI",
+        "Keefe Kaplan Maritime"
+      ],
+      "category": "boatyards",
+      "city": "Richmond, CA",
+      "lat": 37.91392,
+      "lon": -122.36762,
+      "address": "530 W Cutting Blvd, Richmond, CA 94804",
+      "note": "Pinned local override for a known Bay Area boatyard."
+    },
+    {
+      "name": "Emeryville Marina",
+      "category": "marinas",
+      "city": "Emeryville, CA",
+      "lat": 37.8348,
+      "lon": -122.3139,
+      "note": "Pinned local override so this marina remains present even if upstream tagging changes."
+    },
+    {
+      "name": "Pillar Point Harbor",
+      "category": "marinas",
+      "city": "Half Moon Bay, CA",
+      "lat": 37.503,
+      "lon": -122.486,
+      "note": "Pinned coastal anchor for the Half Moon Bay coverage area."
+    },
+    {
+      "name": "Santa Cruz Harbor",
+      "category": "marinas",
+      "city": "Santa Cruz, CA",
+      "lat": 36.9642,
+      "lon": -122.0008,
+      "note": "Pinned coastal anchor for the Santa Cruz coverage area."
+    },
+    {
+      "name": "Svendsen's Bay Marine",
+      "aliases": [
+        "Svendsens",
+        "Svendsen's",
+        "Svendsen Bay Marine"
+      ],
+      "city": "Richmond, CA",
+      "lat": 37.924944,
+      "lon": -122.372278,
+      "address": "310 W Cutting Blvd, Richmond, CA 94804",
+      "website": "https://sbm.baymaritime.com",
+      "phone": "(510) 237-0140",
+      "note": "Pinned local override for a known Richmond marine service facility.",
+      "category": "boatyards"
+    },
+    {
+      "name": "Svendsen's Bay Marine",
+      "aliases": [
+        "Svendsens",
+        "Svendsen's",
+        "Svendsen Bay Marine"
+      ],
+      "city": "Richmond, CA",
+      "lat": 37.924944,
+      "lon": -122.372278,
+      "address": "310 W Cutting Blvd, Richmond, CA 94804",
+      "website": "https://sbm.baymaritime.com",
+      "phone": "(510) 237-0140",
+      "note": "Pinned local override for a known Richmond marine service facility.",
+      "category": "marine_supply"
+    },
+    {
+      "name": "VeeJay Marine",
+      "aliases": [
+        "Vee Jay Marine",
+        "VeeJay Marine Services",
+        "Vee Jay Marine Services"
+      ],
+      "category": "boatyards",
+      "city": "Pittsburg, CA",
+      "lat": 38.038865,
+      "lon": -121.889066,
+      "address": "6 Bay Side Dr, Pittsburg, CA 94565",
+      "website": "https://www.veejaymarine.boats/",
+      "phone": "(925) 432-9244",
+      "note": "Pinned local override for the full-service Pittsburg boatyard; kept separate from Pittsburg Marina."
+    }
+  ],
+  "exclude": [
+    {
+      "name": "Pittsburg Marina",
+      "category": "boatyards"
+    }
+  ],
+  "patch": []
+}

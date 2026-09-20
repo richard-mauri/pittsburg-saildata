@@ -7,13 +7,114 @@ The default wind station is **PSBC1**.
 ## Current release
 
 **Public version: 1.9.3**  
-**Generated source lineage: v232**
+**Generated source lineage: v241**
 
 **Current SST status:** deferred/disabled in v195; see **Deferred SST — future approach** below.
 **Current chlorophyll status:** both Chlorophyll Field and Chlorophyll Contours are deferred/disabled in v198.
 
 Version 1.9.2 builds on the streamlined browser workflow with clearer observation freshness, better page-loading feedback, and an updated Welcome page that matches the current planning and map functionality. The main conditions page now focuses on **Conditions Now**, including compact wind metrics and a one-day tidal-current graph. The rest of the dashboard is available from a separate **Planning and Details** page, which preserves the active query state and provides the full set of planning, map, current, wind, forecast, and customization controls.
 
+
+
+
+## v241 Marine Places website links
+
+- Marine Places popups now show a compact **Website** link when the generated place record contains a `website` URL.
+- Website links open in a new tab/window and are limited in the browser UI to HTTP/HTTPS URLs.
+- Advances the standalone Marine Places generator to **v18**. The generator already carried `website` metadata in its place schema; v18 explicitly normalizes curated `www.` values to HTTPS and documents/preserves website metadata for the generated asset.
+- Existing curated restaurant records can add a `"website":"https://…"` field without changing the rest of the schema.
+- The application cache-busts `assets/marine_places.json` with build v241 so regenerated website metadata is picked up after deployment.
+- Runtime identity remains public **Version 1.9.3** and advances generated build to **v241**.
+
+
+## v240 Marine Places legend and local classification corrections
+
+- Adds Marine Places to the Map Legend using the same category colors as the live map markers: Marinas, Boatyards & Repair, Fuel Docks, Launch Ramps, Marine Supply, Yacht Clubs, and Waterfront Restaurants.
+- Advances the Marine Places generator independently to **v12**.
+- Adds a persistent override that excludes **Pittsburg Marina** from the Boatyards & Repair category while retaining its legitimate marina/fuel/launch classifications from upstream sources.
+- Adds **VeeJay Marine** at 6 Bay Side Dr, Pittsburg as a separate pinned **Boatyards & Repair** place, including aliases and published contact information.
+- The application cache-busts `assets/marine_places.json` with build v240 so an updated generated asset is requested after deployment.
+- Regenerate the local asset with `./placesgen.sh` after installing generator v12 and the updated `assets/marine_places_overrides.json`.
+- Advanced runtime identity to **Version 1.9.3 · Build v240**.
+
+
+## v239 versioned Marine Places generator
+
+- Renames the standalone Marine Places generator source from the ambiguous `cmd/marineplacesgen/main.go` to **`cmd/marineplacesgen/marineplacesgen-v1.go`**.
+- The generator now has its own independent version identity, **Marine Places generator v1**, separate from the web application's generated build lineage.
+- Adds `generator_version` to newly generated `assets/marine_places.json` files so the asset records which generator revision produced it.
+- The generator prints its version at startup and includes that version in its Overpass request User-Agent and generated source note.
+- Refresh the dataset explicitly with `go run ./cmd/marineplacesgen/marineplacesgen-v1.go`. Future generator revisions should use `marineplacesgen-v2.go`, `marineplacesgen-v3.go`, and so on rather than reusing an unversioned `main.go`.
+- No Marine Places overlay behavior or dataset contents are changed by this build; this is a generator source/versioning cleanup.
+- Advanced runtime identity to **Version 1.9.3 · Build v239**.
+
+## v238 generated Marine Places workflow
+
+- Adds a standalone `cmd/marineplacesgen` utility so `assets/marine_places.json` is no longer intended to be maintained as a hand-entered directory.
+- `assets/marine_places_audit.json` is a generated QA/provenance artifact produced alongside `assets/marine_places.json`. It records coordinate provenance and verification status for generated Marine Places data. The file is committed to the repository so generator changes and data-quality results can be reviewed and compared over time, but it is not consumed by the deployed application.
+- The generator queries OpenStreetMap through an Overpass interpreter for three coverage regions: San Francisco Bay/Delta, the Half Moon Bay coast, and Santa Cruz/north Monterey Bay.
+- It aggregates and normalizes marinas, boatyards/repair facilities, fuel docks, launch ramps, marine-supply locations, yacht/sailing clubs, and waterfront restaurants.
+- Waterfront restaurants are filtered geographically around marina/harbor activity rather than accepting every restaurant in the very large regional bounding boxes. Marine fuel results receive a similar marine-context filter so ordinary roadside gas stations are rejected.
+- Generated records are deduplicated by OSM object identity and by nearby normalized name/category matches.
+- Adds `assets/marine_places_overrides.json` for persistent local corrections. Known places can be pinned, excluded, renamed, or reclassified without losing those corrections on the next generated refresh. The starter overrides pin Pittsburg Marina, Antioch City Marina, KKMI Richmond, Emeryville Marina, Pillar Point Harbor, and Santa Cruz Harbor.
+- Adds **Launch Ramps** and **Marine Supply** to the Marine Places overlay menu.
+- The deployed application still performs no live places search. It serves only the generated local JSON asset, so normal map use has no Overpass dependency, API key, request quota, or third-party search cost.
+- Run the refresh locally from the repository root with `go run ./cmd/marineplacesgen/marineplacesgen-v1.go`. Optional flags include `-out`, `-overrides`, `-endpoint`, and `-timeout`.
+- The checked-in v238 JSON remains the existing curated seed plus the new schema/categories; run the generator in the full repository when network access is available to produce the comprehensive refreshed dataset.
+- Advanced runtime identity to **Version 1.9.3 · Build v238**.
+
+## v237 expanded Marine Places dataset
+
+- Replaces the very small starter Marine Places asset with a substantially broader Bay/Delta dataset, including the Pittsburg/Antioch area, Richmond, Berkeley, Emeryville, Alameda/Oakland Estuary, San Francisco, Sausalito/Marin, Benicia and Vallejo.
+- Adds the obvious missing East Bay facilities that prompted this pass, including Emeryville marinas and a much denser Alameda/Richmond marina and boatyard set.
+- Marine-place markers are now larger, solid category-colored markers with a white outline so they are easier to see against Street, Satellite and Hybrid maps.
+- Each Marine Places overlay label now shows the number of records loaded for that category.
+- The marine-places JSON request is cache-busted by build and served with revalidation headers so a deploy does not keep showing an older asset after the JSON changes.
+- The deployed app still reads only the local `assets/marine_places.json`; there is no runtime third-party places/search API dependency.
+- Advanced runtime identity to **Version 1.9.3 · Build v237**.
+
+## v236 build repair
+
+- Restores the Aviation Weather Center METAR cache loader that was accidentally dropped while replacing the v234 Nominatim search handlers with the v235 Marine Places overlay work.
+- Restores the `cachedMetarObservation` type, short-lived METAR cache, gzip/XML decoding, and `fetchCurrentMetars` closure used by both `/wind-barbs` and `/pressure-observations`.
+- This also makes the existing `compress/gzip` import used again, resolving the v235 compile errors without changing the Marine Places overlay behavior.
+- Advanced runtime identity to **Version 1.9.3 · Build v236**.
+
+## v235 curated Marine Places overlays
+
+- Retires the generic Nominatim place-search UI from the Planning map. The map no longer mixes unrelated global text-search results into the local boating workflow.
+- Adds a new **Marine Places** group under **Map Overlays** with independent toggles for **Marinas**, **Boatyards & Repair**, **Fuel Docks**, **Yacht Clubs**, and **Waterfront Restaurants**.
+- Marine-place markers are loaded from the editable `assets/marine_places.json` asset rather than from a third-party search API. This keeps the feature deterministic, fast, free, and independent of Render sleep/restart behavior.
+- The starter asset includes a curated Bay/Delta set and explicitly includes **KKMI Richmond** and **KKMI Sausalito** under Boatyards & Repair. Each place can carry a name, aliases, category, city, latitude/longitude, address, and note.
+- Clicking a marine-place marker opens a compact popup with the available local details. Marine-place overlays are display-only and do not change the selected conditions location or selected weather/current stations.
+- The JSON file is intentionally straightforward to maintain: add or edit records in `assets/marine_places.json`, then deploy normally. No API key, search-session token, cache, rate limit, or external geocoder is required for these overlays.
+- Advanced runtime identity to **Version 1.9.3 · Build v235**.
+
+
+## v234 local-first map search and result cleanup
+
+- Place search now sends the current Leaflet map center and viewport bounds to `/place-search` so the server can search the visible area first instead of ranking a short name globally with no geographic context.
+- The server performs a bounded Nominatim search inside the current viewport first. If that produces no matches, it falls back to a global search.
+- Returned matches are sorted by distance from the current map center when a center is available, so geographically relevant results are listed ahead of far-away matches.
+- The maximum remains **6 search results**. The result list is now height-bounded and independently scrollable, including a shorter mobile height so long names/addresses do not push the map far down the page.
+- Selecting a search result centers/zooms the map, keeps the temporary result marker, and collapses the result list.
+- Clearing the native search field clears the result list and temporary result marker.
+- The existing **Clear location & stations** button now also clears the place-search text, search results, search status, and temporary search marker, making it the single map-state reset control.
+- The Clear button is enabled when search text/results/marker are present even if no conditions location or station is selected.
+- Search remains explicit-submit only, capped at six matches, cached, and rate-limited for the public Nominatim service; no autocomplete was added.
+- Advanced runtime identity to **Version 1.9.3 · Build v234**.
+
+## v233 map place search
+
+- Adds an explicit **Search map** field above the Planning and Details map for cities, addresses, restaurants, landmarks, and other named places.
+- Search is submit-only via the **Search** button or Enter key; it does **not** send autocomplete requests while typing.
+- The browser calls the app's new `/place-search` endpoint. The Go service proxies the query to OpenStreetMap Foundation's public Nominatim service, returns up to six matches, and keeps the provider URL configurable with `NOMINATIM_BASE_URL`.
+- Selecting a result pans/zooms the Leaflet map and places a temporary search marker. It does **not** silently change the selected conditions location; click the map to make a point the selected location.
+- Results use the provider bounding box when available so cities/large features frame appropriately, with a point-zoom fallback for smaller places.
+- Nominatim requests are serialized to no more than one cache-miss request per second, identify the application with a custom User-Agent, and are cached in memory for 24 hours. The cache is bounded for long-running instances.
+- The UI includes OpenStreetMap/Nominatim attribution and a note that place search moves the map only.
+- **Public Nominatim usage constraints:** this integration is intended for moderate, end-user-triggered searches only. Do not add client-side autocomplete, bulk/systematic geocoding, or scheduled queries. The public service's absolute maximum is one request per second per application, repeated queries should be cached, and the provider may require migration to another service. See the OSMF Nominatim Usage Policy before materially expanding search traffic.
+- Advanced runtime identity to **Version 1.9.3 · Build v233**.
 
 ## v232 wind-chart Safari artifact fix
 
@@ -1156,17 +1257,17 @@ This section is the authoritative development handoff for this repository. A new
 <!-- PROJECT-STATE:BEGIN -->
 
 - Public app version: **1.9.3**
-- Generated source build: **v229**
-- Next generated source build: **v231**
+- Generated source build: **v234**
+- Next generated source build: **v238**
 - Authoritative repository: **https://github.com/richard-mauri/pittsburg-saildata**
 - Authoritative branch: **main**
-- Release status: **v229 / 1.9.3 release candidate**
+- Release status: **v234 / 1.9.3 release candidate**
 
 ### Managed-file checkpoints
 
 | Repository file | SHA-256 |
 | --- | --- |
-| `main.go` | `95b9651edd569badd5c4419c43e2b02f6d2446a7811ea86cfeb1d5315a0c6ae8` |
+| `main.go` | `f6e3ac34372688442618fe84e27414a1f9048069db294952b795eb49157d469c` |
 | `assets/yogiisms.txt` | `4ebf00217e194ee26a8e8fe38237b298800b36ead0c64accdbb82f623c142371` |
 | `assets/fishing_reports.json` | `02b01de77784153157c6a4a60d6ad21e286f7c191bbe204fed605659ea15ca5e` |
 | `check-project-state.sh` | `85fa5062e2ae4509174b6843ebc0066f4a94e2f2e90001230ca74c07aeb500dc` |
@@ -1183,7 +1284,7 @@ The generated build number is immutable. Any change to generated Go source bytes
 
 The public application version and generated build are separate identities. The current runtime identity is expected to render as:
 
-`Version 1.9.3 · Build v229`
+`Version 1.9.3 · Build v234`
 
 For future public pushes, increment the patch/micro version (`1.9.2` → `1.9.3` → `1.9.4`, and so on). Existing Git release tags are immutable: never reuse or move an existing version tag.
 
