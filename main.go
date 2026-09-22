@@ -30,7 +30,7 @@ import (
 
 const (
 	appVersion                      = "1.9.3"
-	buildVersion                    = "v245"
+	buildVersion                    = "v246"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -2372,6 +2372,78 @@ func runServer(
 		if err := json.NewEncoder(w).Encode(map[string]interface{}{
 			"candidates": items,
 		}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+
+	// Point-weather endpoint for the Local Conditions card. Keep this request
+	// independent of the marine-zone forecast so a missing marine text product
+	// cannot suppress otherwise valid NWS point forecast data.
+	mux.HandleFunc("/point-weather", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		lat, latErr := strconv.ParseFloat(strings.TrimSpace(r.URL.Query().Get("lat")), 64)
+		lon, lonErr := strconv.ParseFloat(strings.TrimSpace(r.URL.Query().Get("lon")), 64)
+		if latErr != nil || lonErr != nil || lat < -90 || lat > 90 || lon < -180 || lon > 180 {
+			http.Error(w, "valid lat and lon are required", http.StatusBadRequest)
+			return
+		}
+
+		weather, weatherErr := fetchPointWeatherForPoint(lat, lon, loc)
+		if weatherErr != nil {
+			weather.Error = weatherErr.Error()
+		}
+
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+		if err := json.NewEncoder(w).Encode(weather); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+
+	// Dynamic NWS marine forecast endpoint used when the selected map point
+	// changes. This endpoint was referenced by the browser but was not
+	// registered in v245.
+	mux.HandleFunc("/marine-forecast", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		lat, latErr := strconv.ParseFloat(strings.TrimSpace(r.URL.Query().Get("lat")), 64)
+		lon, lonErr := strconv.ParseFloat(strings.TrimSpace(r.URL.Query().Get("lon")), 64)
+		if latErr != nil || lonErr != nil || lat < -90 || lat > 90 || lon < -180 || lon > 180 {
+			http.Error(w, "valid lat and lon are required", http.StatusBadRequest)
+			return
+		}
+
+		zone, updated, periods, alerts, forecastErr :=
+			fetchMarineForecastForPoint(lat, lon, loc)
+
+		var geometry interface{}
+		if zone != "" {
+			if encoded := fetchMarineZoneGeometry(zone); encoded != "" {
+				_ = json.Unmarshal([]byte(encoded), &geometry)
+			}
+		}
+
+		payload := map[string]interface{}{
+			"zone":     zone,
+			"updated":  updated,
+			"periods":  periods,
+			"alerts":   alerts,
+			"geometry": geometry,
+		}
+		if forecastErr != nil {
+			payload["error"] = forecastErr.Error()
+		}
+
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+		if err := json.NewEncoder(w).Encode(payload); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 	})
@@ -9246,6 +9318,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 
   renderSearchControls();
 
+  var pointWeatherRequestSerial = 0;
   var marineForecastRequestSerial = 0;
   var offshoreTripRequestSerial = 0;
   var fishingPlanningRequestSerial = 0;
@@ -9293,6 +9366,44 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     }
 
     box.hidden = false;
+  }
+
+  function refreshPointWeatherForSelectedLocation() {
+    if (!mapState.selectedLocation) return;
+
+    renderSelectedLocationWeather({short_forecast: "Loading NWS point forecast…"});
+
+    var serial = ++pointWeatherRequestSerial;
+    var requestURL =
+      "/point-weather?lat=" +
+      encodeURIComponent(Number(mapState.selectedLocation.lat).toFixed(5)) +
+      "&lon=" +
+      encodeURIComponent(Number(mapState.selectedLocation.lon).toFixed(5));
+
+    fetch(requestURL, {
+      method: "GET",
+      headers: {"Accept": "application/json"},
+      cache: "no-store"
+    })
+      .then(function(response) {
+        if (!response.ok) {
+          return response.text().then(function(detail) {
+            throw new Error(String(detail || "HTTP " + response.status).trim());
+          });
+        }
+        return response.json();
+      })
+      .then(function(payload) {
+        if (serial !== pointWeatherRequestSerial) return;
+        renderSelectedLocationWeather(payload || {});
+      })
+      .catch(function(err) {
+        if (serial !== pointWeatherRequestSerial) return;
+        renderSelectedLocationWeather({
+          error: "NWS point weather could not be refreshed: " +
+            (err && err.message ? err.message : "unknown error")
+        });
+      });
   }
 
   function formatTripObservationTime(value) {
@@ -9669,13 +9780,10 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 
     if (card) card.hidden = !(periods.length || error);
     setMarineZoneOverlay(zone, payload.geometry || null);
-    renderSelectedLocationWeather(payload.weather || {});
   }
 
   function refreshMarineForecastForSelectedLocation() {
     if (!mapState.selectedLocation) return;
-
-    renderSelectedLocationWeather({short_forecast: "Loading NWS point forecast…"});
 
     var serial = ++marineForecastRequestSerial;
     var control = document.getElementById("map-marine-zone-control");
@@ -9729,9 +9837,6 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
             (err && err.message ? err.message : "unknown error");
         }
         if (card) card.hidden = false;
-        renderSelectedLocationWeather({
-          error: "NWS point weather could not be refreshed."
-        });
       });
   }
 
@@ -9781,6 +9886,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     renderSearchControls();
     updateRecenterControls();
     renderWindMarkers();
+    refreshPointWeatherForSelectedLocation();
     refreshMarineForecastForSelectedLocation();
     refreshOffshoreTripForSelectedLocation();
     return true;
@@ -10121,6 +10227,8 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   // from lat/lon carried in the URL. In that case selectSailingLocation() is
   // not invoked, so explicitly initialize the offshore planning card.
   if (mapState.selectedLocation) {
+    refreshPointWeatherForSelectedLocation();
+    refreshMarineForecastForSelectedLocation();
     refreshOffshoreTripForSelectedLocation();
   }
 
@@ -10138,6 +10246,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       mapState.selectedLocation = null;
       mapState.selectedWindStationID = "";
       mapState.windCandidates = [];
+      pointWeatherRequestSerial++;
       marineForecastRequestSerial++;
       setMarineZoneOverlay("", null);
       var marineForecastCard = document.getElementById("marine-forecast-card");
