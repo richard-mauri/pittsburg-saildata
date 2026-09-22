@@ -7,13 +7,65 @@ The default wind station is **PSBC1**.
 ## Current release
 
 **Public version: 1.9.3**  
-**Generated source lineage: v251**
+**Generated source lineage: v257**
 
 **Current SST status:** deferred/disabled in v195; see **Deferred SST — future approach** below.
 **Current chlorophyll status:** both Chlorophyll Field and Chlorophyll Contours are deferred/disabled in v198.
 
 Version 1.9.2 builds on the streamlined browser workflow with clearer observation freshness, better page-loading feedback, and an updated Welcome page that matches the current planning and map functionality. The main conditions page now focuses on **Conditions Now**, including compact wind metrics and a one-day tidal-current graph. The rest of the dashboard is available from a separate **Planning and Details** page, which preserves the active query state and provides the full set of planning, map, current, wind, forecast, and customization controls.
 
+
+## v257 Map Overlays popup-shell rewrite
+
+- Replaces the accumulated v252-v256 desktop popup sizing/anchoring workarounds with a single explicit positioning model for **Map Overlays**.
+- On desktop, the popup shell is now `position: fixed` and is placed from the actual **Map Overlays** trigger coordinates, clamped to a 12-pixel viewport safety margin. It is no longer bottom-anchored to the trigger with absolute positioning, so expanding a category cannot push the close control above the browser viewport.
+- Adds a dedicated popup toolbar containing **Clear all overlays** and the close **X**, keeping those controls together at the top of the shell.
+- Measures the popup's natural height and available space above/below the trigger. When the open category would make the popup too tall, only that category body receives the scrollable height; the accordion headers and toolbar remain outside that primary scroll area.
+- Repositions the desktop popup when it opens, when an accordion category toggles, and when the page is resized or scrolled. The existing narrow-screen bottom-sheet layout remains separate and unchanged.
+- Preserves overlay checkbox IDs and handlers, accordion behavior, **Clear all overlays**, v251 wind-barb z-order behavior, map state, and all data-loading/report logic.
+- Runtime identity remains public **Version 1.9.3** and advances generated app build to **v257**.
+
+
+## v256 Map Overlays viewport-geometry fit
+
+- Replaces the fixed expanded-category height cap with runtime viewport geometry on desktop.
+- Measures the actual vertical space above the **Map Overlays** control and clamps the entire bottom-anchored popup to that space, keeping its top edge and close **X** inside the viewport.
+- Measures the popup's fixed chrome (close control, **Clear all overlays**, and all accordion headers) and assigns only the remaining height to the currently expanded category body. Long Marine Places and future category contents therefore scroll internally without pushing the popup off-screen or clipping the bottom header.
+- Recalculates the fit whenever the Map Overlays popup opens, an accordion category toggles, the window is resized, or **Clear all overlays** collapses the categories.
+- Keeps the existing narrow-screen fixed-sheet behavior, v251 wind-barb z-order fix, and v250 clear-all behavior unchanged.
+- Runtime identity remains public **Version 1.9.3** and advances generated app build to **v256**.
+
+
+## v255 Map Overlays viewport-safe category scrolling
+
+- Tightens the maximum height of an expanded Map Overlays category body so opening Marine Places cannot push the popup top, close X, or lower accordion headers outside the visible viewport.
+- Long category contents now scroll sooner inside the expanded category while the outer popup remains compact and non-scrolling.
+- Keeps all overlay headers visible and preserves the v254 internal-scroll design, v251 wind-barb z-order fix, and v250 Clear all overlays behavior.
+- Runtime identity remains public **Version 1.9.3** and advances generated app build to **v255**.
+
+
+## v254 Map Overlays category-body scrolling
+
+- Keeps the Map Overlays popup itself compact and non-scrolling so the close X and every accordion header remain fully visible.
+- Constrains only the currently expanded category body; long Marine Places and future categories scroll inside their own section instead of clipping the popup.
+- Removes the negative close-button offset that allowed the X to be cut off at the top edge.
+- Preserves the v251 wind-barb z-order fix and v250 Clear all overlays behavior.
+- Runtime identity remains public **Version 1.9.3** and advances generated app build to **v254**.
+
+## v253 Map Overlays adaptive-height scrolling
+
+- Refines the v252 Map Overlays scrolling fix so the popup shrink-wraps to its actual content when the overlay categories are collapsed instead of filling most of the viewport with empty space.
+- On larger screens, the popup stays anchored to the Map Overlays control and grows naturally only as categories are expanded.
+- Caps the popup at `min(70vh, 560px)`; once its content exceeds that limit, the popup scrolls vertically rather than clipping lower categories or future Marine Places additions.
+- Keeps the existing narrow-screen fixed-sheet behavior, Clear all overlays action, category accordions, and v251 wind-barb visibility fix unchanged.
+- Runtime identity remains public **Version 1.9.3** and advances generated app build to **v253**.
+
+## v252 Map Overlays viewport scrolling
+
+- Constrains the Map Overlays panel to the browser viewport instead of allowing expanded overlay categories to extend beyond the visible screen.
+- The panel now uses its own vertical scrolling area, including momentum scrolling on touch devices, so long Marine Places lists and future overlay categories remain reachable instead of being clipped.
+- Keeps the existing Clear all overlays behavior, category accordions, overlay state, map state, and data-loading logic unchanged.
+- Runtime identity remains public **Version 1.9.3** and advances generated app build to **v252**.
 
 ## v251 wind-barb visibility over station markers
 
