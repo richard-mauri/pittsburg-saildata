@@ -2246,6 +2246,23 @@ func runServer(
 		}
 	})
 
+	// NOAA PMEL Saildrone observations used by the optional map overlay.
+	// Keep this endpoint independent of the rest of the report so enabling the
+	// overlay only fetches the moving-platform feed when requested.
+	mux.HandleFunc("/saildrone-observations", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		feed := fetchNOAASaildroneFeed()
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "private, max-age=300")
+		if err := json.NewEncoder(w).Encode(feed); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+
 	mux.HandleFunc("/wind-stations", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
