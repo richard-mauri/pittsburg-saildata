@@ -7,7 +7,7 @@ The default wind station is **PSBC1**.
 ## Current release
 
 **Public version: 1.9.3**  
-**Generated source lineage: v248**
+**Generated source lineage: v251**
 
 **Current SST status:** deferred/disabled in v195; see **Deferred SST — future approach** below.
 **Current chlorophyll status:** both Chlorophyll Field and Chlorophyll Contours are deferred/disabled in v198.
@@ -15,7 +15,41 @@ The default wind station is **PSBC1**.
 Version 1.9.2 builds on the streamlined browser workflow with clearer observation freshness, better page-loading feedback, and an updated Welcome page that matches the current planning and map functionality. The main conditions page now focuses on **Conditions Now**, including compact wind metrics and a one-day tidal-current graph. The rest of the dashboard is available from a separate **Planning and Details** page, which preserves the active query state and provides the full set of planning, map, current, wind, forecast, and customization controls.
 
 
+## v251 wind-barb visibility over station markers
 
+- Fixes the case where the wind-barb status reported observations as shown while nearby candidate-station triangle markers visually covered the barbs at the same coordinates.
+- Raises the dedicated `windBarbPane` above Leaflet's normal marker pane so wind-barb glyphs remain visible when candidate or selected station markers are present.
+- Makes the wind-barb pane non-interactive so the higher visual layer does not block clicks on station markers underneath; station markers remain the interaction target while barbs remain display context.
+- Wind-barb loading, observation selection, thinning, stale-observation fading, and status counts are unchanged.
+- Runtime identity remains public **Version 1.9.3** and advances generated app build to **v251**.
+
+
+
+
+## v250 Clear-all overlay category reset
+
+- Extends the v249 **Clear all overlays** control so it also collapses every open category inside the **Map Overlays** popup after disabling the active overlays.
+- The top-level **Map Overlays** popup remains open, leaving the control in a clean baseline state with all overlay checkboxes off and all category accordions closed.
+- The clear action continues to use each overlay's existing change handler, so active map layers and their status state are removed through the normal code paths.
+- Basemap choice, selected sailing location, selected wind/current stations, units, and report calculations remain unchanged.
+- Runtime identity remains public **Version 1.9.3** and advances generated app build to **v250**.
+
+## v249 Clear all map overlays
+
+- Adds a **Clear all overlays** button to the **Map Overlays** popup.
+- The button unchecks every checkbox-driven overlay and dispatches the existing change handlers so active weather, wind/pressure, terrain/seafloor, Marine Places, Saildrone, and forecast-zone layers are removed normally.
+- The Map Overlays popup stays open after clearing so the user can immediately choose a new overlay.
+- Basemap choice, map center, selected sailing location, wind/current stations, units, and report calculations are not changed by the clear action.
+- Runtime identity remains public **Version 1.9.3** and advances generated app build to **v249**.
+
+## Marine Places generator v20 Delta classification follow-up
+
+- Advances the Marine Places generator from v19 to **v20** after validating the new DBW Sacramento-San Joaquin Delta body-of-water discovery path.
+- A cached regeneration discovered **149 Delta DBW facility IDs across 22 body-of-water pages**, represented **141** of them in map-overlay categories, and left **8** records intentionally unclassified because they are DBW `NoFacility` or `Department/District` entries without a recognized boating-service category.
+- Adds service-based classifications for transient berths/tie-ups, launching valet service, dry storage, DBW restaurant service, and explicitly named docks while avoiding broad name-only marina classification.
+- `assets/marine_places_audit.json` now records the actual skipped Delta facilities with ID, name, type, address, services when present, and skip reason.
+- The regenerated asset contains **863 places**: 261 marinas, 102 boatyards/repair records, 81 fuel docks, 151 launch ramps, 81 marine-supply records, 34 yacht clubs, and 153 waterfront restaurants.
+- Vieira's Resort is now represented from the DBW source as a marina, fuel dock, launch ramp, boatyard/repair facility, and waterfront restaurant.
 
 ## v248 Delta Marine Places coverage repair
 
