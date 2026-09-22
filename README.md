@@ -7,7 +7,7 @@ The default wind station is **PSBC1**.
 ## Current release
 
 **Public version: 1.9.3**  
-**Generated source lineage: v245**
+**Generated source lineage: v248**
 
 **Current SST status:** deferred/disabled in v195; see **Deferred SST — future approach** below.
 **Current chlorophyll status:** both Chlorophyll Field and Chlorophyll Contours are deferred/disabled in v198.
@@ -16,6 +16,35 @@ Version 1.9.2 builds on the streamlined browser workflow with clearer observatio
 
 
 
+
+## v248 Delta Marine Places coverage repair
+
+- Advances the deployed application from **v247** to **v248** using the actual v247 source as the baseline, preserving the v247 Saildrone work and the v246 Local Conditions/marine-forecast work.
+- Adds **Marine Places generator v19**, which fixes Delta discovery structurally rather than with one-off facility overrides.
+- The DBW pass now crawls California State Parks/Division of Boating and Waterways **Body of Water** pages whose normalized names begin with **Sacramento-SanJoaquinDelta**, and merges those facility IDs with the existing city-based DBW discovery pass.
+- This removes the prior dependence on a short hard-coded Delta city list for rural resorts, marinas, launch ramps, fuel docks, repair facilities, and other boating infrastructure.
+- DBW service lines now contribute **Fuel Docks**, **Boatyards & Repair**, and **Marine Supply** classifications when those services are explicitly listed. Generic restaurant service is not converted into a named restaurant marker because the DBW facility record does not identify a restaurant name.
+- `assets/marine_places_audit.json` now includes `dbw_delta_discovery` coverage counters so Delta body pages, discovered facility IDs, represented facilities, missing-coordinate skips, and uncategorized facilities can be reviewed after each regeneration.
+- Generator output schema advances to **12** and records **generator_version: v19**.
+- The browser Marine Places request cache key advances from the old **build=v241** value to **build=v248**, ensuring the regenerated Delta dataset is fetched after deployment.
+- Runtime identity remains public **Version 1.9.3** and advances generated app build to **v248**.
+
+### Regenerating the repaired Delta dataset
+
+Place `marineplacesgen-v19.go` in Downloads and run `./placesgen.sh -refresh` from the repository root. The helper installs the newest `marineplacesgen-*.go` candidate as `cmd/marineplacesgen.go` and regenerates `assets/marine_places.json` plus `assets/marine_places_audit.json`. Review the `dbw_delta_discovery` block before committing the regenerated assets.
+
+## v247 Saildrone observations
+
+- Preserves the deployed **v247** Saildrone observation work as the baseline for v248.
+- The Planning map includes an optional NOAA PMEL Saildrone observations layer backed by the server-side `/saildrone-observations` endpoint.
+- Saildrone markers show the latest platform position and available wind, water temperature, salinity, current, and wave information, with observation-age and viewport status messaging.
+- v248 does not alter this Saildrone behavior.
+
+## v246 Local Conditions and marine-forecast restoration
+
+- Preserves the v246 selected-location **Local Conditions** weather path and `/point-weather` behavior.
+- Preserves the restored `/marine-forecast` server route used by the browser forecast context.
+- v248 does not change these weather or forecast paths.
 
 ## v245 Conditions Now navigation progress
 
@@ -1293,11 +1322,11 @@ This section is the authoritative development handoff for this repository. A new
 <!-- PROJECT-STATE:BEGIN -->
 
 - Public app version: **1.9.3**
-- Generated source build: **v245**
-- Next generated source build: **v246**
+- Generated source build: **v248**
+- Next generated source build: **v249**
 - Authoritative repository: **https://github.com/richard-mauri/pittsburg-saildata**
 - Authoritative branch: **main**
-- Release status: **v245 / 1.9.3 release candidate**
+- Release status: **v248 / 1.9.3 release candidate**
 
 ### Managed-file checkpoints
 
