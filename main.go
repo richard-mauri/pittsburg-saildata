@@ -30,7 +30,7 @@ import (
 
 const (
 	appVersion                      = "1.9.3"
-	buildVersion                    = "v257"
+	buildVersion                    = "v258"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -6546,7 +6546,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     toggle.addEventListener("change", syncMarinePlaceOverlays);
   });
 
-  fetch("/assets/marine_places.json?build=v248", {headers:{"Accept":"application/json"}, cache:"no-store"})
+  fetch("/assets/marine_places.json?build=v258", {headers:{"Accept":"application/json"}, cache:"no-store"})
     .then(function(response) {
       if (!response.ok) throw new Error("HTTP " + response.status);
       return response.json();

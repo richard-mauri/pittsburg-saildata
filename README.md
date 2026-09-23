@@ -7,13 +7,23 @@ The default wind station is **PSBC1**.
 ## Current release
 
 **Public version: 1.9.3**  
-**Generated source lineage: v257**
+**Generated source lineage: v258**
 
 **Current SST status:** deferred/disabled in v195; see **Deferred SST — future approach** below.
 **Current chlorophyll status:** both Chlorophyll Field and Chlorophyll Contours are deferred/disabled in v198.
 
 Version 1.9.2 builds on the streamlined browser workflow with clearer observation freshness, better page-loading feedback, and an updated Welcome page that matches the current planning and map functionality. The main conditions page now focuses on **Conditions Now**, including compact wind metrics and a one-day tidal-current graph. The rest of the dashboard is available from a separate **Planning and Details** page, which preserves the active query state and provides the full set of planning, map, current, wind, forecast, and customization controls.
 
+
+
+## v258 Marine Places override deduplication
+
+- Advances the runtime build identity to **Version 1.9.3 · Build v258** so the deployed update is immediately distinguishable from v257.
+- Pairs the app build with Marine Places generator **v21**, where persistent `Add` overrides now act as ensure-present fallbacks instead of unconditional duplicate records when a matching upstream place already exists.
+- Removes the duplicate local-override marina marker case exemplified by **Emeryville Marina** while retaining its legitimate separate marina, fuel-dock, and launch-ramp classifications from California State Parks/DBW.
+- Updates the browser Marine Places asset request cache-buster to `build=v258` so the regenerated `marine_places.json` is fetched with the new deployment.
+- Keeps the v257 fixed-position **Map Overlays** popup rewrite and the v251 wind-barb z-order fix unchanged.
+- Public version remains **1.9.3**.
 
 ## v257 Map Overlays popup-shell rewrite
 

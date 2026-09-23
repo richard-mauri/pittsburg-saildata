@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	generatorVersion        = "v20"
+	generatorVersion        = "v21"
 	defaultOverpassEndpoint = "https://overpass-api.de/api/interpreter"
 )
 
@@ -1163,6 +1163,16 @@ func applyOverrides(in []place, o overrideFile) []place {
 		}
 	}
 	for _, p := range o.Add {
+		alreadyPresent := false
+		for _, existing := range out {
+			if samePinnedPlace(existing, p) {
+				alreadyPresent = true
+				break
+			}
+		}
+		if alreadyPresent {
+			continue
+		}
 		if p.Source == "" {
 			p.Source = "local override"
 		}
@@ -1173,6 +1183,22 @@ func applyOverrides(in []place, o overrideFile) []place {
 		out = append(out, p)
 	}
 	return out
+}
+
+// samePinnedPlace treats an Add override as an ensure-present fallback. If an
+// upstream source already supplies the same logical place in the same category,
+// keep the upstream record instead of appending a duplicate local marker.
+func samePinnedPlace(a, b place) bool {
+	if a.Category != b.Category {
+		return false
+	}
+	if normalizeName(a.Name) != normalizeName(b.Name) {
+		return false
+	}
+	if a.City != "" && b.City != "" && !strings.EqualFold(strings.TrimSpace(a.City), strings.TrimSpace(b.City)) {
+		return false
+	}
+	return true
 }
 
 func matches(p place, m overrideMatch) bool {

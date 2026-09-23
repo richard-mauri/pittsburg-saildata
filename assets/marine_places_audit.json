@@ -1,7 +1,7 @@
 {
-  "generator_version": "v20",
-  "updated": "2026-09-22",
-  "total_places": 863,
+  "generator_version": "v21",
+  "updated": "2026-09-23",
+  "total_places": 861,
   "needs_verification": 7,
   "unknown_provenance": 0,
   "dbw_delta_discovery": {
@@ -5374,16 +5374,6 @@
       "source_id": "dbw:433:marinas"
     },
     {
-      "name": "Emeryville Marina",
-      "category": "marinas",
-      "city": "Emeryville, CA",
-      "lat": 37.8348,
-      "lon": -122.3139,
-      "coord_source": "local_override",
-      "status": "explicit_override",
-      "source": "local override"
-    },
-    {
       "name": "Pillar Point Boat Launching Facility",
       "category": "marinas",
       "city": "Half Moon Bay, CA",
@@ -5406,16 +5396,6 @@
       "status": "source_provided",
       "source": "California State Parks/DBW",
       "source_id": "dbw:524:marinas"
-    },
-    {
-      "name": "Pillar Point Harbor",
-      "category": "marinas",
-      "city": "Half Moon Bay, CA",
-      "lat": 37.503,
-      "lon": -122.486,
-      "coord_source": "local_override",
-      "status": "explicit_override",
-      "source": "local override"
     },
     {
       "name": "Whiskey Slough Marina",
@@ -7251,13 +7231,12 @@
     {
       "name": "West Marine",
       "category": "marine_supply",
-      "lat": 37.7565049,
-      "lon": -122.2516041,
-      "address": "2230 South Shore Center, 94501",
+      "lat": 36.6010093,
+      "lon": -121.8682582,
       "coord_source": "osm_geometry",
       "status": "source_provided",
       "source": "OpenStreetMap",
-      "source_id": "osm:node/1315928630"
+      "source_id": "osm:node/12573089641"
     },
     {
       "name": "West Marine",
@@ -7282,12 +7261,13 @@
     {
       "name": "West Marine",
       "category": "marine_supply",
-      "lat": 36.6010093,
-      "lon": -121.8682582,
+      "lat": 37.7565049,
+      "lon": -122.2516041,
+      "address": "2230 South Shore Center, 94501",
       "coord_source": "osm_geometry",
       "status": "source_provided",
       "source": "OpenStreetMap",
-      "source_id": "osm:node/12573089641"
+      "source_id": "osm:node/1315928630"
     },
     {
       "name": "Grand Marina",
