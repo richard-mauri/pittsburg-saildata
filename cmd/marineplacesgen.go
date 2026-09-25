@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	generatorVersion        = "v21"
+	generatorVersion        = "v32"
 	defaultOverpassEndpoint = "https://overpass-api.de/api/interpreter"
 )
 
@@ -58,15 +58,31 @@ type overpassResponse struct {
 }
 
 type overpassElement struct {
-	Type   string            `json:"type"`
-	ID     int64             `json:"id"`
-	Lat    float64           `json:"lat"`
-	Lon    float64           `json:"lon"`
-	Center *overpassCenter   `json:"center"`
-	Tags   map[string]string `json:"tags"`
+	Type     string            `json:"type"`
+	ID       int64             `json:"id"`
+	Lat      float64           `json:"lat"`
+	Lon      float64           `json:"lon"`
+	Center   *overpassCenter   `json:"center"`
+	Geometry []overpassPoint   `json:"geometry,omitempty"`
+	Members  []overpassMember  `json:"members,omitempty"`
+	Tags     map[string]string `json:"tags"`
+}
+
+type overpassMember struct {
+	Type     string          `json:"type"`
+	Ref      int64           `json:"ref"`
+	Role     string          `json:"role"`
+	Lat      float64         `json:"lat,omitempty"`
+	Lon      float64         `json:"lon,omitempty"`
+	Geometry []overpassPoint `json:"geometry,omitempty"`
 }
 
 type overpassCenter struct {
+	Lat float64 `json:"lat"`
+	Lon float64 `json:"lon"`
+}
+
+type overpassPoint struct {
 	Lat float64 `json:"lat"`
 	Lon float64 `json:"lon"`
 }
@@ -147,6 +163,31 @@ type coordinateAudit struct {
 	Records           []coordinateAuditRecord `json:"records"`
 }
 
+type ferryCandidateAuditRecord struct {
+	Name               string  `json:"name"`
+	Lat                float64 `json:"lat"`
+	Lon                float64 `json:"lon"`
+	City               string  `json:"city,omitempty"`
+	SourceID           string  `json:"source_id,omitempty"`
+	CandidateKind      string  `json:"candidate_kind"`
+	NearestCuratedName string  `json:"nearest_curated_name,omitempty"`
+	NearestDistanceM   float64 `json:"nearest_distance_m,omitempty"`
+	Status             string  `json:"status"`
+}
+
+type ferryCandidateAudit struct {
+	GeneratorVersion        string                      `json:"generator_version"`
+	Updated                 string                      `json:"updated"`
+	TotalCandidates         int                         `json:"total_candidates"`
+	TerminalCandidates      int                         `json:"terminal_candidates"`
+	RouteEndpointCandidates int                         `json:"route_endpoint_candidates"`
+	MatchedCandidates       int                         `json:"matched_candidates"`
+	UnmatchedCandidates     int                         `json:"unmatched_candidates"`
+	MatchRadiusM            float64                     `json:"match_radius_m"`
+	FailedRegions           []string                    `json:"failed_regions,omitempty"`
+	Candidates              []ferryCandidateAuditRecord `json:"candidates"`
+}
+
 type overrideFile struct {
 	Add     []place         `json:"add"`
 	Exclude []overrideMatch `json:"exclude"`
@@ -193,9 +234,10 @@ func printUsage(w *os.File) {
 	fmt.Fprintln(w, "  ./placesgen.sh [options]")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Default behavior:")
-	fmt.Fprintln(w, "  Reuse every successful cached infrastructure job and query only missing pieces.")
+	fmt.Fprintln(w, "  Reuse successful cached infrastructure; production ferries come from the curated dataset.")
 	fmt.Fprintln(w, "  Automatic restaurant discovery is disabled; curated restaurant import is used instead.")
 	fmt.Fprintln(w, "  Curated restaurants are read from assets/marine_restaurants.json when present.")
+	fmt.Fprintln(w, "  Curated ferry terminals are read from assets/marine_ferry_terminals.json; OSM terminal and route-endpoint discovery is audit-only.")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Options:")
 	fmt.Fprintln(w, "  -help, -h")
@@ -205,6 +247,8 @@ func printUsage(w *os.File) {
 	fmt.Fprintln(w, "  -refresh-region=REGION")
 	fmt.Fprintln(w, "        Refresh exactly one named region. The value is case-insensitive, but")
 	fmt.Fprintln(w, "        must otherwise match one of the region names listed below.")
+	fmt.Fprintln(w, "  -refresh-ferries")
+	fmt.Fprintln(w, "        Refresh the lightweight OSM ferry-terminal and ferry-route endpoint audit jobs.")
 	fmt.Fprintln(w, "  -skip-restaurants")
 	fmt.Fprintln(w, "        Compatibility option; automatic restaurant discovery is already disabled.")
 	fmt.Fprintln(w, "  -skip-dbw")
@@ -220,9 +264,15 @@ func printUsage(w *os.File) {
 	fmt.Fprintln(w, "        Output JSON asset. Default: assets/marine_places.json")
 	fmt.Fprintln(w, "  -audit=PATH")
 	fmt.Fprintln(w, "        Coordinate provenance audit JSON. Default: assets/marine_places_audit.json")
+	fmt.Fprintln(w, "  -ferry-audit=PATH")
+	fmt.Fprintln(w, "        Supplemental OSM ferry candidate audit JSON.")
+	fmt.Fprintln(w, "        Default: assets/marine_ferry_candidates.json")
 	fmt.Fprintln(w, "  -restaurants=PATH")
 	fmt.Fprintln(w, "        Optional curated waterfront restaurant JSON. Missing file is allowed.")
 	fmt.Fprintln(w, "        Default: assets/marine_restaurants.json")
+	fmt.Fprintln(w, "  -ferries=PATH")
+	fmt.Fprintln(w, "        Optional curated ferry terminal JSON. Missing file is allowed.")
+	fmt.Fprintln(w, "        Default: assets/marine_ferry_terminals.json")
 	fmt.Fprintln(w, "  -overrides=PATH")
 	fmt.Fprintln(w, "        Persistent local override file. Default: assets/marine_places_overrides.json")
 	fmt.Fprintln(w, "  -endpoint=URL")
@@ -244,18 +294,21 @@ func printUsage(w *os.File) {
 }
 
 func main() {
-	var outPath, auditPath, overridesPath, restaurantsPath, endpoint, cacheDir, refreshRegion string
+	var outPath, auditPath, ferryAuditPath, overridesPath, restaurantsPath, ferriesPath, endpoint, cacheDir, refreshRegion string
 	var timeout, cacheTTL time.Duration
-	var refreshAll, refreshRestaurants, skipRestaurants, skipDBW bool
+	var refreshAll, refreshFerries, refreshRestaurants, skipRestaurants, skipDBW bool
 	var showHelp, showHelpShort bool
 	flag.StringVar(&outPath, "out", "assets/marine_places.json", "output JSON asset")
 	flag.StringVar(&auditPath, "audit", "assets/marine_places_audit.json", "coordinate provenance audit JSON")
+	flag.StringVar(&ferryAuditPath, "ferry-audit", "assets/marine_ferry_candidates.json", "supplemental OSM ferry candidate audit JSON")
 	flag.StringVar(&overridesPath, "overrides", "assets/marine_places_overrides.json", "persistent local overrides")
 	flag.StringVar(&restaurantsPath, "restaurants", "assets/marine_restaurants.json", "optional curated waterfront restaurant JSON")
+	flag.StringVar(&ferriesPath, "ferries", "assets/marine_ferry_terminals.json", "optional curated ferry terminal JSON")
 	flag.StringVar(&endpoint, "endpoint", defaultOverpassEndpoint, "primary Overpass interpreter endpoint")
 	flag.StringVar(&cacheDir, "cache-dir", "cache/marineplaces", "per-job cache directory")
 	flag.DurationVar(&cacheTTL, "cache-ttl", 0, "reuse successful cached jobs newer than this age; 0 means no expiry")
 	flag.BoolVar(&refreshAll, "refresh", false, "ignore cache and refresh every selected job")
+	flag.BoolVar(&refreshFerries, "refresh-ferries", false, "refresh only Ferry Terminals jobs")
 	flag.StringVar(&refreshRegion, "refresh-region", "", "ignore cache only for jobs whose region name contains this text")
 	flag.BoolVar(&skipRestaurants, "skip-restaurants", false, "skip restaurant jobs")
 	flag.BoolVar(&refreshRestaurants, "refresh-restaurants", false, "refresh only anchor-based restaurant jobs")
@@ -292,10 +345,12 @@ func main() {
 	}
 
 	fmt.Printf("marineplacesgen %s\n", generatorVersion)
-	fmt.Println("Restaurant discovery: curated/import-only; DBW Delta body-of-water discovery + service classification + skipped-facility audit enabled")
+	fmt.Println("Restaurant discovery: curated/import-only; ferry terminals: curated production baseline with optional OSM audit; DBW Delta body-of-water discovery + service classification + skipped-facility audit enabled")
 	mode := "fill-missing"
 	if refreshAll {
 		mode = "refresh-all"
+	} else if refreshFerries {
+		mode = "refresh-ferries"
 	} else if strings.TrimSpace(refreshRegion) != "" {
 		mode = "refresh-region=" + refreshRegion
 	}
@@ -309,8 +364,10 @@ func main() {
 	client := &http.Client{Timeout: timeout}
 	endpoints := overpassEndpoints(endpoint)
 
-	// Phase 1: fetch relatively sparse marine infrastructure only. Restaurant
-	// discovery is deliberately deferred until we have real marine anchors.
+	// Phase 1: fetch general marine infrastructure. Ferry terminals use their own
+	// lightweight query/cache path below so adding or refreshing ferries never
+	// requires the much heavier infrastructure query. Filter ferry candidates
+	// from legacy v26/v27 infrastructure caches to keep the data paths separate.
 	jobs := buildFetchJobs(true)
 	var infrastructureRaw []rawCandidate
 	failedByRegion := map[string]bool{}
@@ -322,8 +379,39 @@ func main() {
 			failedByRegion[result.Job.ParentRegion] = true
 			continue
 		}
-		infrastructureRaw = append(infrastructureRaw, result.Candidates...)
+		infrastructureRaw = append(infrastructureRaw, filterOutCategory(result.Candidates, "ferry_terminals")...)
 	}
+
+	// Phase 1b: optional OSM ferry audit. Production Ferry Terminals come from
+	// the curated file only. A normal run never contacts Overpass for ferries.
+	// Use -refresh-ferries (or -refresh) when you explicitly want to refresh the
+	// supplemental OSM candidate audit.
+	var ferryRaw []rawCandidate
+	var ferryRouteEndpoints []rawCandidate
+	var ferryAuditFailedRegions []string
+	if refreshFerries || refreshAll {
+		ferryAuditFailed := map[string]bool{}
+		for _, job := range append(buildFerryJobs(), buildFerryRouteJobs()...) {
+			forceRefresh := true
+			result := runFetchJob(ctx, client, endpoints, cacheDir, cacheTTL, forceRefresh, job)
+			if result.Err != nil {
+				fmt.Fprintf(os.Stderr, "WARNING: %s / %s audit refresh failed after retries: %v\n", result.Job.ParentRegion, result.Job.Kind, result.Err)
+				ferryAuditFailed[result.Job.ParentRegion] = true
+				continue
+			}
+			if job.Kind == "ferry_routes" {
+				ferryRouteEndpoints = append(ferryRouteEndpoints, result.Candidates...)
+			} else {
+				ferryRaw = append(ferryRaw, result.Candidates...)
+			}
+		}
+		for _, region := range regions {
+			if ferryAuditFailed[region.Name] {
+				ferryAuditFailedRegions = append(ferryAuditFailedRegions, region.Name)
+			}
+		}
+	}
+
 	if len(infrastructureRaw) == 0 && skipDBW {
 		fatalf("all Overpass infrastructure jobs failed and DBW aggregation is disabled; refusing to overwrite %s with an empty dataset", outPath)
 	}
@@ -356,7 +444,25 @@ func main() {
 		fmt.Printf("Curated waterfront restaurants: %d records from %s\n", len(curatedRestaurants), restaurantsPath)
 	}
 
+	curatedFerries, err := readCuratedFerryTerminals(ctx, client, cacheDir, ferriesPath)
+	if err != nil {
+		fatalf("read curated ferry terminals: %v", err)
+	}
+	if len(curatedFerries) > 0 {
+		fmt.Printf("Curated ferry terminals: %d records from %s\n", len(curatedFerries), ferriesPath)
+	}
+
+	if refreshFerries || refreshAll {
+		ferryAudit := buildFerryCandidateAudit(classifyAndFilter(ferryRaw), classifyAndFilter(ferryRouteEndpoints), curatedFerries, ferryAuditFailedRegions)
+		if err := writeJSON(ferryAuditPath, ferryAudit); err != nil {
+			fatalf("write %s: %v", ferryAuditPath, err)
+		}
+		fmt.Printf("Wrote %s: %d OSM ferry candidates (%d terminals, %d route endpoints), %d unmatched to curated terminals\n",
+			ferryAuditPath, ferryAudit.TotalCandidates, ferryAudit.TerminalCandidates, ferryAudit.RouteEndpointCandidates, ferryAudit.UnmatchedCandidates)
+	}
+
 	basePlaces := classifyAndFilter(infrastructureRaw)
+	basePlaces = append(basePlaces, curatedFerries...)
 	basePlaces = append(basePlaces, dbwPlaces...)
 	basePlaces = applyOverrides(basePlaces, overrides)
 	basePlaces = dedupePlaces(basePlaces)
@@ -395,17 +501,18 @@ func main() {
 	sortPlaces(places)
 
 	out := asset{
-		Version:          "13",
+		Version:          "14",
 		GeneratorVersion: generatorVersion,
 		Updated:          time.Now().UTC().Format("2006-01-02"),
 		Region:           "Bodega Bay and Sonoma Coast through San Francisco Bay and Delta, Half Moon Bay, Santa Cruz, Moss Landing/Elkhorn Slough, and Monterey/Pacific Grove",
-		SourceNote:       fmt.Sprintf("Generated by Marine Places generator %s from OpenStreetMap data via Overpass plus California State Parks/Division of Boating and Waterways facility listings. Delta DBW discovery crawls the official Body-of-Water index for Sacramento-San Joaquin Delta pages and merges those facility IDs with the legacy city-based DBW pass; DBW facility type and service lines contribute marina/tie-up, launch/valet, fuel, repair/dry-storage, marine-supply, and waterfront-restaurant classifications, while skipped Delta facilities are recorded individually in the audit file. U.S. Census address geocoding is used where needed; restaurant discovery is curated/import-only; waterfront restaurants come from the optional curated restaurant file and local overrides; website metadata is preserved for map popups; coordinate provenance and Delta DBW coverage counters are retained in the audit file; sources are cached, normalized, geographically filtered, deduplicated, and amended by assets/marine_places_overrides.json. Verify critical details before relying on them; local businesses and services can change.", generatorVersion),
+		SourceNote:       fmt.Sprintf("Generated by Marine Places generator %s from OpenStreetMap data via Overpass plus California State Parks/Division of Boating and Waterways facility listings. Ferry terminals in the production asset come from the optional curated marine_ferry_terminals.json file. OpenStreetMap ferry-terminal and route-endpoint discovery is opt-in via -refresh-ferries and is written to a separate candidate audit rather than merged automatically into production. Delta DBW discovery crawls the official Body-of-Water index for Sacramento-San Joaquin Delta pages and merges those facility IDs with the legacy city-based DBW pass; DBW facility type and service lines contribute marina/tie-up, launch/valet, fuel, repair/dry-storage, and marine-supply classifications, while skipped Delta facilities are recorded individually in the audit file. U.S. Census address geocoding is used where needed; restaurant discovery is curated/import-only; waterfront restaurants come from the optional curated restaurant file and local overrides; curated ferry terminals come from the optional ferry terminal file; OSM ferry-terminal and route-endpoint candidates are retained only in a review audit; website metadata is preserved for map popups; coordinate provenance and Delta DBW coverage counters are retained in the audit file; sources are cached, normalized, geographically filtered, deduplicated, and amended by assets/marine_places_overrides.json. Verify critical details before relying on them; local businesses and services can change.", generatorVersion),
 		FailedRegions:    failedRegions,
 		Categories: []category{
 			{ID: "marinas", Label: "Marinas"},
 			{ID: "boatyards", Label: "Boatyards & Repair"},
 			{ID: "fuel_docks", Label: "Fuel Docks"},
 			{ID: "launch_ramps", Label: "Launch Ramps"},
+			{ID: "ferry_terminals", Label: "Ferry Terminals"},
 			{ID: "marine_supply", Label: "Marine Supply"},
 			{ID: "yacht_clubs", Label: "Yacht Clubs"},
 			{ID: "waterfront_restaurants", Label: "Waterfront Restaurants"},
@@ -448,6 +555,22 @@ func buildFetchJobs(skipRestaurants bool) []fetchJob {
 	var jobs []fetchJob
 	for _, region := range regions {
 		jobs = append(jobs, fetchJob{Index: len(jobs), ParentRegion: region.Name, Region: region, Kind: "infrastructure"})
+	}
+	return jobs
+}
+
+func buildFerryJobs() []fetchJob {
+	var jobs []fetchJob
+	for _, region := range regions {
+		jobs = append(jobs, fetchJob{Index: len(jobs), ParentRegion: region.Name, Region: region, Kind: "ferries"})
+	}
+	return jobs
+}
+
+func buildFerryRouteJobs() []fetchJob {
+	var jobs []fetchJob
+	for _, region := range regions {
+		jobs = append(jobs, fetchJob{Index: len(jobs), ParentRegion: region.Name, Region: region, Kind: "ferry_routes"})
 	}
 	return jobs
 }
@@ -503,7 +626,7 @@ func buildRestaurantAnchorJobs(places []place) []fetchJob {
 
 func isRestaurantAnchorCategory(category string) bool {
 	switch category {
-	case "marinas", "boatyards", "fuel_docks", "launch_ramps", "yacht_clubs":
+	case "marinas", "boatyards", "fuel_docks", "launch_ramps", "ferry_terminals", "yacht_clubs":
 		return true
 	}
 	return false
@@ -560,6 +683,17 @@ type fetchResult struct {
 func runFetchJob(ctx context.Context, client *http.Client, endpoints []string, cacheDir string, cacheTTL time.Duration, forceRefresh bool, job fetchJob) fetchResult {
 	label := job.Region.Name + " / " + job.Kind
 	cachePath := filepath.Join(cacheDir, cacheFileName(job))
+
+	// During a forced refresh, preserve any existing successful cache as a
+	// fallback. A transient Overpass timeout must not make a previously complete
+	// region disappear from the generated asset. Use TTL=0 here intentionally:
+	// even an old cache is safer than silently dropping the region.
+	var staleCache []rawCandidate
+	var haveStaleCache bool
+	if forceRefresh {
+		staleCache, haveStaleCache = readJobCache(cachePath, 0)
+	}
+
 	if !forceRefresh {
 		if cached, ok := readJobCache(cachePath, cacheTTL); ok {
 			fmt.Printf("%s: cache hit (%d candidates)\n", label, len(cached))
@@ -568,11 +702,17 @@ func runFetchJob(ctx context.Context, client *http.Client, endpoints []string, c
 	} else {
 		fmt.Printf("%s: forced refresh\n", label)
 	}
+
 	fmt.Printf("Fetching %s...\n", label)
 	candidates, err := fetchJobResilient(ctx, client, endpoints, job)
 	if err != nil {
+		if forceRefresh && haveStaleCache {
+			fmt.Fprintf(os.Stderr, "WARNING: %s refresh failed; using stale cache (%d candidates): %v\n", label, len(staleCache), err)
+			return fetchResult{Job: job, Candidates: staleCache}
+		}
 		return fetchResult{Job: job, Err: err}
 	}
+
 	fmt.Printf("%s: received %d candidate features\n", label, len(candidates))
 	if err := writeJobCache(cachePath, candidates); err != nil {
 		fmt.Fprintf(os.Stderr, "WARNING: cache write %s: %v\n", cachePath, err)
@@ -733,6 +873,36 @@ func fetchJobOnce(ctx context.Context, client *http.Client, endpoint string, job
 	}
 	out := make([]rawCandidate, 0, len(decoded.Elements))
 	for _, el := range decoded.Elements {
+		if job.Kind == "ferry_routes" {
+			if el.Type != "relation" {
+				continue
+			}
+			name := firstNonEmpty(el.Tags["name"], el.Tags["ref"], el.Tags["operator"], "Unnamed ferry route")
+			ends := ferryRelationEndpointPoints(el)
+			for i, point := range ends {
+				if !validCoord(point.Lat, point.Lon) {
+					continue
+				}
+				suffix := fmt.Sprintf("%d", i+1)
+				p := place{
+					Name:        name + " — route endpoint " + suffix,
+					Category:    "ferry_terminals",
+					Lat:         point.Lat,
+					Lon:         point.Lon,
+					Source:      "OpenStreetMap ferry route",
+					SourceID:    fmt.Sprintf("osm:relation/%d:endpoint:%s", el.ID, suffix),
+					CoordSource: "osm_route_member_geometry",
+					CoordStatus: "source_provided",
+				}
+				tags := map[string]string{
+					"amenity": "ferry_terminal",
+					"name":    p.Name,
+				}
+				out = append(out, rawCandidate{Place: p, Tags: tags})
+			}
+			continue
+		}
+
 		lat, lon, ok := elementPoint(el)
 		if !ok || el.Tags == nil {
 			continue
@@ -766,6 +936,17 @@ func buildJobQuery(b bbox, kind string) string {
 			`nwr["amenity"="restaurant"]["name"]` + box + `;` +
 			`);out center tags;`
 	}
+	if kind == "ferries" {
+		return `[out:json][timeout:20];(` +
+			`nwr["amenity"="ferry_terminal"]["name"]` + box + `;` +
+			`nwr["public_transport"~"^(platform|stop_position|station)$"]["ferry"="yes"]["name"]` + box + `;` +
+			`);out center tags;`
+	}
+	if kind == "ferry_routes" {
+		return `[out:json][timeout:20];(` +
+			`relation["route"="ferry"]` + box + `;` +
+			`);out geom tags;`
+	}
 	return `[out:json][timeout:28];(` +
 		`nwr["leisure"="marina"]["name"]` + box + `;` +
 		`nwr["leisure"="slipway"]["name"]` + box + `;` +
@@ -779,6 +960,17 @@ func buildJobQuery(b bbox, kind string) string {
 		`nwr["amenity"="fuel"]["boat"="yes"]["name"]` + box + `;` +
 		`nwr["amenity"="fuel"]["fuel:marine_diesel"="yes"]["name"]` + box + `;` +
 		`);out center tags;`
+}
+
+func filterOutCategory(raw []rawCandidate, category string) []rawCandidate {
+	out := make([]rawCandidate, 0, len(raw))
+	for _, r := range raw {
+		if categoryFor(r.Tags, r.Place.Name) == category {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 func classifyAndFilter(raw []rawCandidate) []place {
@@ -814,6 +1006,9 @@ func classifyAndFilter(raw []rawCandidate) []place {
 
 func categoryFor(tags map[string]string, name string) string {
 	lowerName := strings.ToLower(strings.TrimSpace(name))
+	if tags["amenity"] == "ferry_terminal" || (tags["ferry"] == "yes" && (tags["public_transport"] == "platform" || tags["public_transport"] == "stop_position" || tags["public_transport"] == "station")) {
+		return "ferry_terminals"
+	}
 	if tags["leisure"] == "marina" {
 		if clearlyNonMarinaName(lowerName) {
 			return ""
@@ -953,19 +1148,26 @@ func dedupePlaces(in []place) []place {
 		}
 		if p.SourceID != "" {
 			if idx, ok := byID[p.SourceID]; ok {
-				out[idx] = preferPlace(out[idx], p)
+				out[idx] = mergeDuplicatePlace(out[idx], p)
 				continue
 			}
 		}
 		dup := -1
 		for i := range out {
-			if out[i].Category == p.Category && normalizeName(out[i].Name) == normalizeName(p.Name) && haversineMeters(out[i].Lat, out[i].Lon, p.Lat, p.Lon) < 250 {
+			if placesLookDuplicate(out[i], p) {
 				dup = i
 				break
 			}
 		}
 		if dup >= 0 {
-			out[dup] = preferPlace(out[dup], p)
+			oldID := out[dup].SourceID
+			out[dup] = mergeDuplicatePlace(out[dup], p)
+			if oldID != "" {
+				delete(byID, oldID)
+			}
+			if out[dup].SourceID != "" {
+				byID[out[dup].SourceID] = dup
+			}
 			continue
 		}
 		out = append(out, p)
@@ -974,6 +1176,198 @@ func dedupePlaces(in []place) []place {
 		}
 	}
 	return out
+}
+
+// placesLookDuplicate keeps the long-standing exact-name/250 m rule and adds a
+// deliberately conservative cross-source pass for common OSM/DBW naming
+// variants.  It is intentionally restricted to the same category and nearby
+// points so neighboring marinas or sub-facilities are not collapsed merely
+// because they share generic marine words.
+func placesLookDuplicate(a, b place) bool {
+	if a.Category != b.Category {
+		return false
+	}
+	d := haversineMeters(a.Lat, a.Lon, b.Lat, b.Lon)
+
+	// Preserve the long-standing exact-name rule at its original 250 m radius.
+	if normalizeName(a.Name) == normalizeName(b.Name) && d < 250 {
+		return true
+	}
+
+	// The broader pass is deliberately limited to OSM-vs-DBW records. Local
+	// overrides and same-source records can intentionally represent a pinned
+	// anchor, a sub-facility, a basin, or another distinct map object.
+	if !isOSMDBWPair(a, b) || d >= 400 {
+		return false
+	}
+
+	// Exact cross-source names can be allowed a modestly wider tolerance because
+	// OSM geometry and DBW facility coordinates often reference different parts
+	// of the same marina property.
+	if normalizeName(a.Name) == normalizeName(b.Name) {
+		return true
+	}
+
+	ca, cb := canonicalFacilityName(a.Name), canonicalFacilityName(b.Name)
+	if ca == "" || cb == "" {
+		return false
+	}
+	if ca == cb {
+		// Two or more meaningful words are specific enough for the full 400 m
+		// window. A one-word canonical name must also be very close.
+		return len(strings.Fields(ca)) >= 2 || d < 150
+	}
+
+	// Matching official hosts are a strong corroborating signal, but still
+	// require compatible names to avoid merging unrelated tenants at one marina.
+	ha, hb := websiteHost(a.Website), websiteHost(b.Website)
+	if ha != "" && ha == hb && namesStronglyRelated(ca, cb) {
+		return true
+	}
+
+	// Catch a one-character source typo (for example Portobello/Portobella)
+	// only at very close range and only for reasonably specific names.
+	return d < 150 && len(ca) >= 8 && len(cb) >= 8 && levenshteinDistance(ca, cb) <= 1
+}
+
+func isOSMDBWPair(a, b place) bool {
+	sa := strings.ToLower(strings.TrimSpace(a.Source))
+	sb := strings.ToLower(strings.TrimSpace(b.Source))
+	isOSM := func(s string) bool { return s == "openstreetmap" }
+	isDBW := func(s string) bool {
+		return strings.Contains(s, "dbw") || strings.Contains(s, "boating and waterways")
+	}
+	return (isOSM(sa) && isDBW(sb)) || (isOSM(sb) && isDBW(sa))
+}
+
+func canonicalFacilityName(s string) string {
+	s = strings.ToLower(s)
+	// Possessives differ frequently between OSM and DBW (Korths vs Korth's).
+	s = strings.ReplaceAll(s, "'", "")
+	// Parenthetical operator/history qualifiers are useful display metadata but
+	// commonly differ between DBW and OSM names for the same physical facility.
+	s = regexp.MustCompile(`\([^)]*\)`).ReplaceAllString(s, " ")
+	s = regexp.MustCompile(`\b5th\b`).ReplaceAllString(s, " fifth ")
+	s = regexp.MustCompile(`[^a-z0-9]+`).ReplaceAllString(s, " ")
+	generic := map[string]bool{
+		"a": true, "an": true, "and": true, "the": true,
+		"marina": true, "marinas": true, "harbor": true, "harbour": true,
+		"yacht": true, "resort": true,
+	}
+	var keep []string
+	for _, word := range strings.Fields(s) {
+		if !generic[word] {
+			keep = append(keep, word)
+		}
+	}
+	return strings.Join(keep, " ")
+}
+
+func namesStronglyRelated(a, b string) bool {
+	if a == b {
+		return true
+	}
+	if len(a) >= 6 && strings.Contains(b, a) {
+		return true
+	}
+	if len(b) >= 6 && strings.Contains(a, b) {
+		return true
+	}
+	return false
+}
+
+func websiteHost(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || strings.EqualFold(raw, "N/A") || strings.EqualFold(raw, "http://N/A") {
+		return ""
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	h := strings.ToLower(strings.TrimPrefix(u.Hostname(), "www."))
+	return strings.TrimSpace(h)
+}
+
+func levenshteinDistance(a, b string) int {
+	ar, br := []rune(a), []rune(b)
+	prev := make([]int, len(br)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i, ra := range ar {
+		cur := make([]int, len(br)+1)
+		cur[0] = i + 1
+		for j, rb := range br {
+			cost := 0
+			if ra != rb {
+				cost = 1
+			}
+			del := prev[j+1] + 1
+			ins := cur[j] + 1
+			sub := prev[j] + cost
+			cur[j+1] = minInt(del, ins, sub)
+		}
+		prev = cur
+	}
+	return prev[len(br)]
+}
+
+func minInt(v ...int) int {
+	m := v[0]
+	for _, x := range v[1:] {
+		if x < m {
+			m = x
+		}
+	}
+	return m
+}
+
+func mergeDuplicatePlace(a, b place) place {
+	// Prefer the richer record as the identity/coordinate carrier, then fill any
+	// remaining metadata gaps from the other source. DBW wins an exact metadata
+	// tie because its facility records generally include address/contact detail.
+	if placeRichness(b) > placeRichness(a) ||
+		(placeRichness(b) == placeRichness(a) && strings.Contains(strings.ToLower(b.Source), "dbw")) {
+		a, b = b, a
+	}
+	if normalizeName(a.Name) != normalizeName(b.Name) {
+		a.Aliases = appendUniqueString(a.Aliases, b.Name)
+	}
+	for _, alias := range b.Aliases {
+		a.Aliases = appendUniqueString(a.Aliases, alias)
+	}
+	return preferPlace(a, b)
+}
+
+func placeRichness(p place) int {
+	score := 0
+	for _, s := range []string{p.City, p.Address, p.Website, p.Phone, p.Note} {
+		if strings.TrimSpace(s) != "" {
+			score++
+		}
+	}
+	if len(p.Aliases) > 0 {
+		score++
+	}
+	return score
+}
+
+func appendUniqueString(in []string, value string) []string {
+	v := strings.TrimSpace(value)
+	if v == "" {
+		return in
+	}
+	n := normalizeName(v)
+	for _, existing := range in {
+		if normalizeName(existing) == n {
+			return in
+		}
+	}
+	return append(in, v)
 }
 
 func preferPlace(a, b place) place {
@@ -1071,6 +1465,152 @@ func readCuratedRestaurants(ctx context.Context, client *http.Client, cacheDir, 
 	return out, nil
 }
 
+func buildFerryCandidateAudit(osmTerminals, routeEndpoints, curated []place, failedRegions []string) ferryCandidateAudit {
+	const matchRadiusM = 500.0
+	osmTerminals = dedupePlaces(osmTerminals)
+	routeEndpoints = dedupePlaces(routeEndpoints)
+	type candidateWithKind struct {
+		Place place
+		Kind  string
+	}
+	all := make([]candidateWithKind, 0, len(osmTerminals)+len(routeEndpoints))
+	for _, p := range osmTerminals {
+		all = append(all, candidateWithKind{Place: p, Kind: "osm_terminal"})
+	}
+	for _, p := range routeEndpoints {
+		all = append(all, candidateWithKind{Place: p, Kind: "route_endpoint"})
+	}
+	records := make([]ferryCandidateAuditRecord, 0, len(all))
+	matched := 0
+	unmatched := 0
+	for _, candidate := range all {
+		p := candidate.Place
+		rec := ferryCandidateAuditRecord{
+			Name:          p.Name,
+			Lat:           p.Lat,
+			Lon:           p.Lon,
+			City:          p.City,
+			SourceID:      p.SourceID,
+			CandidateKind: candidate.Kind,
+			Status:        "unmatched",
+		}
+		best := math.MaxFloat64
+		bestName := ""
+		for _, c := range curated {
+			if !validCoord(p.Lat, p.Lon) || !validCoord(c.Lat, c.Lon) {
+				continue
+			}
+			d := haversineMeters(p.Lat, p.Lon, c.Lat, c.Lon)
+			if d < best {
+				best = d
+				bestName = c.Name
+			}
+		}
+		if best < math.MaxFloat64 {
+			rec.NearestCuratedName = bestName
+			rec.NearestDistanceM = math.Round(best*10) / 10
+		}
+		if best <= matchRadiusM {
+			rec.Status = "matched_curated"
+			matched++
+		} else {
+			unmatched++
+		}
+		records = append(records, rec)
+	}
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].Status != records[j].Status {
+			return records[i].Status < records[j].Status
+		}
+		if records[i].NearestDistanceM != records[j].NearestDistanceM {
+			return records[i].NearestDistanceM < records[j].NearestDistanceM
+		}
+		return strings.ToLower(records[i].Name) < strings.ToLower(records[j].Name)
+	})
+	return ferryCandidateAudit{
+		GeneratorVersion:        generatorVersion,
+		Updated:                 time.Now().Format("2006-01-02"),
+		TotalCandidates:         len(records),
+		TerminalCandidates:      len(osmTerminals),
+		RouteEndpointCandidates: len(routeEndpoints),
+		MatchedCandidates:       matched,
+		UnmatchedCandidates:     unmatched,
+		MatchRadiusM:            matchRadiusM,
+		FailedRegions:           failedRegions,
+		Candidates:              records,
+	}
+}
+
+func readCuratedFerryTerminals(ctx context.Context, client *http.Client, cacheDir, path string) ([]place, error) {
+	data, err := ioutil.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var places []place
+	var a asset
+	if err := json.Unmarshal(data, &a); err == nil && len(a.Places) > 0 {
+		places = a.Places
+	} else if err := json.Unmarshal(data, &places); err != nil {
+		return nil, fmt.Errorf("%s: expected a JSON array of places or an asset with a places array: %v", path, err)
+	}
+	out := make([]place, 0, len(places))
+	geocoded := 0
+	skipped := 0
+	for _, p := range places {
+		if strings.TrimSpace(p.Name) == "" {
+			skipped++
+			continue
+		}
+		p.Website = strings.TrimSpace(p.Website)
+		if strings.HasPrefix(strings.ToLower(p.Website), "www.") {
+			p.Website = "https://" + p.Website
+		}
+		if validCoord(p.Lat, p.Lon) {
+			p.CoordSource = "curated_explicit"
+			p.CoordStatus = "explicit"
+		}
+		if !validCoord(p.Lat, p.Lon) {
+			addr := strings.TrimSpace(p.Address)
+			if addr == "" {
+				skipped++
+				fmt.Fprintf(os.Stderr, "WARNING: curated ferry terminal %q has no coordinates or address; skipped\n", p.Name)
+				continue
+			}
+			lat, lon, gerr := censusGeocode(ctx, client, cacheDir, addr)
+			coordSource := "census_geocode"
+			if gerr != nil {
+				lat, lon, gerr = nominatimGeocode(ctx, client, cacheDir, addr)
+				coordSource = "nominatim_geocode"
+			}
+			if gerr != nil {
+				skipped++
+				fmt.Fprintf(os.Stderr, "WARNING: curated ferry terminal %q geocode failed: %v\n", p.Name, gerr)
+				continue
+			}
+			p.Lat, p.Lon = lat, lon
+			p.CoordSource = coordSource
+			p.CoordStatus = "needs_verification"
+			geocoded++
+		}
+		p.Category = "ferry_terminals"
+		if strings.TrimSpace(p.Source) == "" {
+			p.Source = "curated ferry terminal import"
+		}
+		out = append(out, p)
+	}
+	if geocoded > 0 || skipped > 0 {
+		fmt.Printf("Curated ferry terminal geocoding: %d geocoded, %d skipped\n", geocoded, skipped)
+	}
+	return out, nil
+}
+
+// Curated ferry terminals represent the operator/agency view of the terminal.
+// OSM remains useful supplemental coverage, but nearby OSM stop-position,
+// platform, or gate objects should not create extra markers around a curated
+// terminal. The 300 m radius is intentionally limited to ferry terminals.
 var nominatimLastRequest time.Time
 
 func nominatimGeocode(ctx context.Context, client *http.Client, cacheDir, address string) (float64, float64, error) {
@@ -1188,17 +1728,32 @@ func applyOverrides(in []place, o overrideFile) []place {
 // samePinnedPlace treats an Add override as an ensure-present fallback. If an
 // upstream source already supplies the same logical place in the same category,
 // keep the upstream record instead of appending a duplicate local marker.
+//
+// v26 retains the v25 very-near, strongly-related upstream-name fallback. This handles
+// pinned fallback names such as "Antioch City Marina" vs "Antioch Marina" and
+// "Santa Cruz Harbor" vs "Santa Cruz Harbor (South Harbor Launch Ramp)" without
+// making the general OSM/DBW fuzzy deduper more aggressive.
 func samePinnedPlace(a, b place) bool {
 	if a.Category != b.Category {
-		return false
-	}
-	if normalizeName(a.Name) != normalizeName(b.Name) {
 		return false
 	}
 	if a.City != "" && b.City != "" && !strings.EqualFold(strings.TrimSpace(a.City), strings.TrimSpace(b.City)) {
 		return false
 	}
-	return true
+	if normalizeName(a.Name) == normalizeName(b.Name) {
+		return true
+	}
+	if !validCoord(a.Lat, a.Lon) || !validCoord(b.Lat, b.Lon) {
+		return false
+	}
+	if haversineMeters(a.Lat, a.Lon, b.Lat, b.Lon) >= 150 {
+		return false
+	}
+	ca, cb := canonicalFacilityName(a.Name), canonicalFacilityName(b.Name)
+	if ca == "" || cb == "" {
+		return false
+	}
+	return ca == cb || namesStronglyRelated(ca, cb)
 }
 
 func matches(p place, m overrideMatch) bool {
@@ -1333,6 +1888,82 @@ func writeJSON(path string, v interface{}) error {
 	}
 	b = append(b, '\n')
 	return ioutil.WriteFile(path, b, 0o644)
+}
+
+func ferryRelationEndpointPoints(el overpassElement) []overpassPoint {
+	// Prefer explicit stop/platform/terminal members when the relation carries
+	// them. Overpass returns relation geometry inside members, not on the
+	// relation itself.
+	var explicit []overpassPoint
+	for _, m := range el.Members {
+		role := strings.ToLower(strings.TrimSpace(m.Role))
+		if !(strings.Contains(role, "stop") || strings.Contains(role, "platform") || strings.Contains(role, "terminal")) {
+			continue
+		}
+		if validCoord(m.Lat, m.Lon) {
+			explicit = appendUniquePoint(explicit, overpassPoint{Lat: m.Lat, Lon: m.Lon}, 25)
+			continue
+		}
+		if len(m.Geometry) > 0 {
+			explicit = appendUniquePoint(explicit, m.Geometry[0], 25)
+			if len(m.Geometry) > 1 {
+				explicit = appendUniquePoint(explicit, m.Geometry[len(m.Geometry)-1], 25)
+			}
+		}
+	}
+	if len(explicit) >= 2 {
+		return farthestPointPair(explicit)
+	}
+	if len(explicit) == 1 {
+		return explicit
+	}
+
+	// Fall back to the endpoints of member geometries. Relation member order is
+	// not reliable enough to assume first/last member are route ends, so choose
+	// the two farthest candidate endpoints.
+	var candidates []overpassPoint
+	for _, m := range el.Members {
+		if validCoord(m.Lat, m.Lon) {
+			candidates = appendUniquePoint(candidates, overpassPoint{Lat: m.Lat, Lon: m.Lon}, 25)
+		}
+		if len(m.Geometry) > 0 {
+			candidates = appendUniquePoint(candidates, m.Geometry[0], 25)
+			if len(m.Geometry) > 1 {
+				candidates = appendUniquePoint(candidates, m.Geometry[len(m.Geometry)-1], 25)
+			}
+		}
+	}
+	return farthestPointPair(candidates)
+}
+
+func appendUniquePoint(points []overpassPoint, p overpassPoint, toleranceM float64) []overpassPoint {
+	if !validCoord(p.Lat, p.Lon) {
+		return points
+	}
+	for _, existing := range points {
+		if haversineMeters(existing.Lat, existing.Lon, p.Lat, p.Lon) <= toleranceM {
+			return points
+		}
+	}
+	return append(points, p)
+}
+
+func farthestPointPair(points []overpassPoint) []overpassPoint {
+	if len(points) <= 2 {
+		return points
+	}
+	bestI, bestJ := 0, 1
+	bestD := -1.0
+	for i := 0; i < len(points); i++ {
+		for j := i + 1; j < len(points); j++ {
+			d := haversineMeters(points[i].Lat, points[i].Lon, points[j].Lat, points[j].Lon)
+			if d > bestD {
+				bestD = d
+				bestI, bestJ = i, j
+			}
+		}
+	}
+	return []overpassPoint{points[bestI], points[bestJ]}
 }
 
 func elementPoint(el overpassElement) (float64, float64, bool) {
@@ -1888,14 +2519,11 @@ func dbwFacilityPlaces(f dbwFacility) []place {
 		if strings.Contains(x, "fishing tackle") || strings.Contains(x, "bait sales") || strings.Contains(x, "marine suppl") || strings.Contains(x, "chandlery") {
 			cats["marine_supply"] = true
 		}
-		if strings.Contains(x, "transient berth") || strings.Contains(x, "tie up") || strings.Contains(x, "tie-up") || strings.Contains(x, "guest dock") {
+		if lt != "no facility" && (strings.Contains(x, "transient berth") || strings.Contains(x, "tie up") || strings.Contains(x, "tie-up") || strings.Contains(x, "guest dock")) {
 			cats["marinas"] = true
 		}
 		if strings.Contains(x, "launching valet") || strings.Contains(x, "launch valet") {
 			cats["launch_ramps"] = true
-		}
-		if x == "restaurant" || strings.Contains(x, "restaurant") {
-			cats["waterfront_restaurants"] = true
 		}
 	}
 	var out []place

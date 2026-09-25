@@ -6,8 +6,8 @@ The default wind station is **PSBC1**.
 
 ## Current release
 
-**Public version: 1.9.3**  
-**Generated source lineage: v258**
+**Public version: 1.10.0**  
+**Generated source lineage: v263**
 
 **Current SST status:** deferred/disabled in v195; see **Deferred SST — future approach** below.
 **Current chlorophyll status:** both Chlorophyll Field and Chlorophyll Contours are deferred/disabled in v198.
@@ -15,6 +15,125 @@ The default wind station is **PSBC1**.
 Version 1.9.2 builds on the streamlined browser workflow with clearer observation freshness, better page-loading feedback, and an updated Welcome page that matches the current planning and map functionality. The main conditions page now focuses on **Conditions Now**, including compact wind metrics and a one-day tidal-current graph. The rest of the dashboard is available from a separate **Planning and Details** page, which preserves the active query state and provides the full set of planning, map, current, wind, forecast, and customization controls.
 
 
+
+
+
+## Marine Places generator v32 route-member endpoint parser + ferry dataset v3
+
+- Keeps the application at **Version 1.10.0 · Build v263** and advances the standalone Marine Places generator to **v32**.
+- Keeps production Ferry Terminals curated-only.
+- Fixes the v31 `route=ferry` audit parser: Overpass relation geometry is carried in relation **members**, not a top-level relation `geometry` array.
+- v32 parses relation members, prefers members whose roles contain `stop`, `platform`, or `terminal`, and otherwise chooses the two farthest member-geometry endpoints as route-endpoint audit candidates.
+- Expands the curated ferry baseline from **17 to 19 terminals** by adding **Alcatraz Ferry Terminal** on Alcatraz Island and **Treasure Island Ferry Terminal**.
+- Replaces address-geocoded positions with reviewed explicit terminal coordinates for **Oracle Park**, **Pier 48.5 / Chase Center**, **Pier 33 / Alcatraz departure**, and **Alameda Seaplane Lagoon**.
+- Because those four records are now explicit-coordinate records, a normal v32 generation should reduce the ferry-related `needs_verification` count by four relative to v31, while the two newly added terminals require no geocoding.
+- `-refresh-ferries` remains audit-only and does not change production Ferry Terminal markers.
+
+## Marine Places generator v31 ferry-route endpoint audit + ferry dataset v2
+
+- Keeps the application at **Version 1.10.0 · Build v263** and advances the standalone Marine Places generator to **v31**.
+- Keeps production Ferry Terminals curated-only. A normal `./placesgen.sh` still does not contact Overpass for ferries.
+- Expands the curated ferry baseline from **13 to 17 terminals** with the San Francisco omissions found during map review: **Oracle Park Ferry Terminal**, **Pier 48 / Chase Center Ferry Terminal**, **Pier 41 Ferry Terminal**, and **Pier 33 Alcatraz Ferry Terminal**.
+- `-refresh-ferries` now audits two OSM sources: explicit ferry-terminal objects and `route=ferry` relations.
+- Ferry-route relations are fetched with geometry. The first and last geometry points are written as **route endpoint** candidates; they are never promoted directly into the production asset.
+- `assets/marine_ferry_candidates.json` now labels each record as either `osm_terminal` or `route_endpoint`, records the nearest curated terminal, and marks candidates within **500 meters** as `matched_curated`.
+- Unmatched route endpoints are intended to expose gaps in the curated terminal list, such as seasonal, event, excursion, or operator-specific landings that do not carry standard terminal tagging.
+- OSM/Overpass audit failures remain isolated from the production Marine Places asset.
+
+## Marine Places generator v30 curated-only production ferries
+
+- Keeps the application at **Version 1.10.0 · Build v263** and advances only the standalone Marine Places generator to **v30**.
+- A plain `./placesgen.sh` run no longer contacts Overpass for ferry terminals. Production Ferry Terminal markers come only from `assets/marine_ferry_terminals.json`, making normal generation fast and deterministic.
+- Existing OSM ferry cache files are not merged into `marine_places.json`, so previously observed 30+ ferry-marker inflation cannot leak into the production map.
+- `-refresh-ferries` is now an explicit audit operation. It refreshes the lightweight OSM ferry-terminal queries and writes `assets/marine_ferry_candidates.json` instead of adding those records to the production asset.
+- The ferry candidate audit compares each OSM ferry-terminal candidate with the nearest curated terminal. Candidates within **500 meters** are marked `matched_curated`; farther candidates are marked `unmatched` for human review.
+- Ferry-audit fetch failures do not mark the production Marine Places asset partial, because the curated ferry baseline remains complete and independent of the supplemental audit.
+- The existing `-refresh` option still refreshes the supplemental ferry audit as part of a full refresh, but the audited OSM ferry records remain non-production.
+- Ferry-route endpoint analysis remains a separate future audit enhancement; v30 deliberately does not infer production terminals from route geometry.
+
+## Marine Places generator v29 curated ferry baseline
+
+- Keeps the application at **Version 1.10.0 · Build v263**; this remains a generator/data-source improvement.
+- Advances the standalone Marine Places generator from **v28** to **v29**.
+- Adds `assets/marine_ferry_terminals.json` as the authoritative curated baseline for Ferry Terminals. OpenStreetMap/Overpass becomes supplemental coverage rather than the primary source for this category.
+- Adds the `-ferries=PATH` option; the default is `assets/marine_ferry_terminals.json`.
+- The supplied `marine_ferry_terminals-v1.json` seeds current Bay Area terminals for San Francisco Bay Ferry/WETA and Golden Gate Ferry, including Downtown San Francisco, Oakland, Alameda Main Street, Alameda Seaplane Lagoon, Harbor Bay, Richmond, South San Francisco, Vallejo, Mare Island, Larkspur, Sausalito, Tiburon, and Ayala Cove/Angel Island.
+- Curated records with explicit coordinates are used directly. Address-only curated terminals are geocoded once through the existing Census/Nominatim cache path and retained in cache for later runs.
+- OSM ferry records within 300 meters of a curated terminal are suppressed so platform/stop-position/gate objects do not create duplicate Ferry Terminal markers. OSM ferry records outside curated terminal areas remain available as supplemental discoveries.
+- The v27 stale-cache fallback and v28 ferry-only cache path remain intact; `-refresh-ferries` now only affects the supplemental OSM ferry layer, not the curated baseline.
+
+## Marine Places generator v28 ferry-only fetch/cache path
+
+- Keeps the application at **Version 1.10.0 · Build v263**; this is a generator-only data acquisition improvement.
+- Advances the standalone Marine Places generator from **v27** to **v28**.
+- Moves OpenStreetMap ferry-terminal discovery out of the large general `infrastructure` Overpass query and into independent per-region `ferries` jobs and cache files.
+- Adds `-refresh-ferries`, which refreshes only the lightweight ferry-terminal queries and leaves marina, boatyard, fuel-dock, launch-ramp, marine-supply, and yacht-club infrastructure caches untouched.
+- Legacy v26/v27 infrastructure caches may contain ferry candidates. v28 deliberately filters those out before classification so Ferry Terminals come only from the dedicated ferry cache path; normal dedupe behavior remains unchanged.
+- Ferry queries include `amenity=ferry_terminal` plus named public-transport `platform`, `stop_position`, or `station` objects tagged `ferry=yes`.
+- v27 stale-cache fallback behavior is retained for both infrastructure and ferry jobs. A failed ferry refresh can therefore use an existing ferry cache instead of deleting previously discovered terminals.
+- On the first v28 normal run, missing ferry cache files are fetched while the existing infrastructure caches are reused. To specifically rebuild ferry coverage later, run `./placesgen.sh -refresh-ferries`.
+
+## Marine Places generator v27 refresh resilience
+
+- Keeps the app at **Version 1.10.0 · Build v263**; no application UI/source change is required for this generator-only fix.
+- Advances the standalone Marine Places generator from **v26** to **v27**.
+- On `-refresh` or a region-specific forced refresh, the generator now retains the existing successful cache for each region before querying Overpass.
+- If all fresh Overpass attempts for a region fail, v27 logs `refresh failed; using stale cache` and uses that region's previous cached candidates instead of omitting the region from `marine_places.json`.
+- A successful fresh response still replaces the cache normally. This lets ferry-terminal coverage improve incrementally across refresh runs without allowing transient Overpass 504/timeouts to shrink an otherwise complete dataset.
+- If no prior cache exists for a failed region, behavior is unchanged: that job is reported as failed.
+
+## v263 / 1.10.0 Ferry Terminals Marine Places category
+
+- Advances the public application version to **1.10.0** and generated app build to **v263**.
+- Advances the standalone Marine Places generator to **v26** and the generated Marine Places asset schema/version marker to **14**.
+- Adds a new **Ferry Terminals** category to the **Map Overlays → Marine Places** menu, live category counts, marker rendering, and the map legend.
+- Marine Places generator v26 discovers ferry terminals from the approved OpenStreetMap `amenity=ferry_terminal` tag and also accepts public-transport ferry stops tagged `ferry=yes` with `public_transport=platform`, `stop_position`, or `station`.
+- Updates the Marine Places asset cache-buster to `build=v263`.
+- Rolls the latest local data-quality corrections into `marine_places_overrides-v26.json`: the Pittsburg Boat Launch naming patch, Antioch Marina Launch Ramp addition, Pillar Point subfacility cleanup, Garcia Bend Park marina exclusion, and the bad DBW Central Basin exclusion.
+- Preserves the v25 conservative dedupe behavior and the v257 fixed-position Map Overlays popup implementation.
+
+## v262 Marine Places residual anomaly cleanup
+
+- Advances the runtime identity to **Version 1.9.3 · Build v262** and the Marine Places generator to **v25**.
+- Keeps the v24 conservative OSM↔DBW deduper unchanged rather than broadening its fuzzy radius or similarity rules.
+- Extends local `add` overrides so they remain true ensure-present fallbacks when a very-near upstream record in the same category has a strongly related facility name. This removes residual pinned-vs-DBW duplicates such as **Antioch City Marina / Antioch Marina** and **Santa Cruz Harbor / Santa Cruz Harbor (South Harbor Launch Ramp)** without collapsing unrelated basins or sub-facilities.
+- Adds targeted source-ID exclusions for the remaining high-confidence sparse OSM duplicates identified by the v24 asset audit, including **Mariner Square Marina**, **Stockton Marina**, **Pelican Harbour**, **Oakland Yacht Club**, **Big Break Marina Holdings LLC**, **Treasure Island Yacht Harbor**, **Safe Harbor Emeryville**, **Westpoint Harbor**, **Russo's Launch Ramp**, **Boat Ramp Street Slipway**, **Breakwater Marina**, and **GP San Francisco Marine**. Their richer DBW counterparts remain.
+- Leaves review-only or semantically ambiguous nearby facilities untouched; the cleanup does not increase the general 400 m cross-source dedupe envelope.
+- Updates the Marine Places asset cache-buster to `build=v262` so the deployed browser requests the regenerated dataset.
+- Keeps the v260 curated-only waterfront-restaurant rule, v259 `No Facility` marina-classification correction, v258 override fallback behavior, v257 fixed-position Map Overlays popup rewrite, and v251 wind-barb z-order fix unchanged.
+- Public version remains **1.9.3**.
+
+## v261 Marine Places cross-source duplicate consolidation
+
+- Advances the runtime identity to **Version 1.9.3 · Build v261** and the Marine Places generator to **v24**.
+- Adds a conservative second-stage duplicate pass for **OpenStreetMap vs California State Parks/DBW** records in the same category. The broader pass is capped at 400 meters and does not apply to local overrides or same-source records, reducing the risk of collapsing legitimate basins, sub-facilities, or neighboring marinas.
+- Normalizes common cross-source naming differences such as marina/harbor/yacht/resort suffixes, parenthetical operator/history qualifiers, possessives, and `5th`/`Fifth`, and permits a very-close one-character spelling correction such as **Portobello / Portobella**.
+- Uses matching website hosts as an additional corroborating signal when names are strongly related.
+- When a duplicate is consolidated, keeps the richer record as the primary identity/coordinate record, fills missing metadata from the other source, and preserves the alternate name as an alias. DBW wins a metadata tie because its facility records commonly carry address/contact detail.
+- This addresses the cross-source duplicate pattern found in records such as **Berkeley Yacht Club**, **Sugar Barge**, **Korth's Pirate's Lair**, **Portobella Marina**, **McAvoy**, **Embarcadero Cove**, **Monterey Harbor**, **Galilee Harbor**, **Richardson Bay Marina**, **Village West Marina**, **Spud Point Marina**, **Walnut Grove Marina**, **RiverPoint Landing**, and **Fifth Avenue Marina**, while leaving review-only cases such as local pinned/sub-facility records outside the fuzzy pass.
+- Updates the Marine Places asset cache-buster to `build=v261` so the deployed browser requests the regenerated dataset.
+- Keeps the v260 curated-only waterfront-restaurant rule, v259 `No Facility` marina-classification correction, v258 override fallback deduplication, v257 fixed-position Map Overlays popup rewrite, and v251 wind-barb z-order fix unchanged.
+- Public version remains **1.9.3**.
+
+## v260 Curated-only waterfront restaurant classification
+
+- Advances the runtime identity to **Version 1.9.3 · Build v260** and updates the Marine Places asset cache-buster to `build=v260`.
+- Advances the standalone Marine Places generator to **v23**.
+- Stops promoting California State Parks/DBW facilities into `waterfront_restaurants` solely because a DBW service line contains **Restaurant**.
+- Waterfront Restaurant markers now continue to come from the curated restaurant dataset and explicit local overrides, preventing marina facilities such as **Ballena Isle Marina** from appearing as restaurant markers merely because an on-site restaurant is listed among marina services.
+- Retains v22's `No Facility` transient-berth marina-classification fix, v21's persistent-override deduplication behavior, the v257 fixed-position Map Overlays popup rewrite, and the v251 wind-barb z-order fix.
+- Public version remains **1.9.3**.
+
+## v259 DBW No Facility marina-classification fix
+
+- Advances the runtime build identity to **Version 1.9.3 · Build v259** so the Render deployment is immediately distinguishable from v258.
+- Pairs the app build with Marine Places generator **v22**.
+- Prevents a DBW record whose facility type is explicitly **No Facility** from being promoted to the `marinas` category solely because its services include transient berths, tie-ups, tie-ups, or a guest dock.
+- Corrects the case exemplified by **The Ramp Restaurant** (`dbw:881`), which DBW identifies as `No Facility` with `Transient Berths or Tie Ups`; it should not be emitted as a marina on that basis.
+- Preserves marina classification from explicit marina facility types and other existing marina rules.
+- Updates the browser Marine Places asset cache-buster to `build=v259` so the regenerated `marine_places.json` is fetched with the new deployment.
+- Retains the v258 local-override deduplication, v257 fixed-position **Map Overlays** popup rewrite, and v251 wind-barb z-order fix.
+- Public version remains **1.9.3**.
 
 ## v258 Marine Places override deduplication
 
@@ -648,7 +767,7 @@ The project uses three-part versions:
 - **minor** — new feature or significant behavior change
 - **micro** — small UI polish or minor refinement
 
-The current release candidate is **1.9.3**. Generated source builds also carry a separate `buildVersion` identifier so test clients can distinguish successive 1.9.3 candidates.
+The current release candidate is **1.10.0**. Generated source builds also carry a separate `buildVersion` identifier so test clients can distinguish successive candidates.
 
 ### 1.9.1 / v131
 

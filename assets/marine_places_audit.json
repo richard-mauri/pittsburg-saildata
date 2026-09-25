@@ -1,16 +1,16 @@
 {
-  "generator_version": "v21",
-  "updated": "2026-09-23",
-  "total_places": 861,
-  "needs_verification": 7,
+  "generator_version": "v32",
+  "updated": "2026-09-25",
+  "total_places": 774,
+  "needs_verification": 16,
   "unknown_provenance": 0,
   "dbw_delta_discovery": {
     "body_pages": 22,
     "facility_ids": 149,
     "facilities_fetched": 149,
-    "facilities_represented": 141,
+    "facilities_represented": 139,
     "skipped_no_coordinates": 0,
-    "skipped_no_recognized_category": 8,
+    "skipped_no_recognized_category": 10,
     "skipped_facilities": [
       {
         "id": "1160",
@@ -69,6 +69,34 @@
         "reason": "no_recognized_category"
       },
       {
+        "id": "926",
+        "name": "Lost Isle",
+        "city": "Stockton, CA",
+        "address": "Light 24, Stockton Deepwater Channel, Stockton, CA 95207",
+        "type": "No Facility",
+        "services": [
+          "Restaurant",
+          "Restrooms",
+          "Snack Bar",
+          "Transient Berths or Tie Ups"
+        ],
+        "reason": "no_recognized_category"
+      },
+      {
+        "id": "945",
+        "name": "The Virgin Sturgeon",
+        "city": "Sacramento, CA",
+        "address": "1577 Garden Hwy, Sacramento, CA 95833",
+        "type": "No Facility",
+        "services": [
+          "Restaurant",
+          "Restrooms",
+          "Snack Bar",
+          "Transient Berths or Tie Ups"
+        ],
+        "reason": "no_recognized_category"
+      },
+      {
         "id": "946",
         "name": "Tunnel Trailer Park",
         "city": "Walnut Grove, CA",
@@ -79,6 +107,114 @@
     ]
   },
   "records": [
+    {
+      "name": "Harbor Bay Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "Alameda, CA",
+      "lat": 37.738625761572,
+      "lon": -122.257785682954,
+      "address": "215 Adelphian Way, Alameda, CA 94502",
+      "coord_source": "census_geocode",
+      "status": "needs_verification",
+      "source": "San Francisco Bay Ferry / WETA",
+      "source_id": "curated:ferry:harbor-bay"
+    },
+    {
+      "name": "Main Street Alameda Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "Alameda, CA",
+      "lat": 37.789657691616,
+      "lon": -122.294609730584,
+      "address": "2990 Main Street, Alameda, CA 94501",
+      "coord_source": "census_geocode",
+      "status": "needs_verification",
+      "source": "San Francisco Bay Ferry / WETA",
+      "source_id": "curated:ferry:alameda-main"
+    },
+    {
+      "name": "Oakland Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "Oakland, CA",
+      "lat": 37.795744077349,
+      "lon": -122.279486968115,
+      "address": "10 Clay Street, Oakland, CA 94607",
+      "coord_source": "census_geocode",
+      "status": "needs_verification",
+      "source": "San Francisco Bay Ferry / WETA",
+      "source_id": "curated:ferry:oakland"
+    },
+    {
+      "name": "Richmond Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "Richmond, CA",
+      "lat": 37.912535720722,
+      "lon": -122.359647679832,
+      "address": "1453 Harbour Way South, Richmond, CA 94804",
+      "coord_source": "census_geocode",
+      "status": "needs_verification",
+      "source": "San Francisco Bay Ferry / WETA",
+      "source_id": "curated:ferry:richmond"
+    },
+    {
+      "name": "Downtown San Francisco Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "San Francisco, CA",
+      "lat": 37.7955487,
+      "lon": -122.3934746,
+      "address": "1 Ferry Building, San Francisco, CA 94105",
+      "coord_source": "nominatim_geocode",
+      "status": "needs_verification",
+      "source": "San Francisco Bay Ferry / WETA",
+      "source_id": "curated:ferry:sf-downtown"
+    },
+    {
+      "name": "Pier 41 Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "San Francisco, CA",
+      "lat": 37.8099539,
+      "lon": -122.4122032,
+      "address": "Pier 41, San Francisco, CA 94133",
+      "coord_source": "nominatim_geocode",
+      "status": "needs_verification",
+      "source": "Bay ferry/operator service / map-verified terminal",
+      "source_id": "curated:ferry:pier-41"
+    },
+    {
+      "name": "South San Francisco Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "South San Francisco, CA",
+      "lat": 37.662508282272,
+      "lon": -122.378314813851,
+      "address": "911 Marina Boulevard, South San Francisco, CA 94080",
+      "coord_source": "census_geocode",
+      "status": "needs_verification",
+      "source": "San Francisco Bay Ferry / WETA",
+      "source_id": "curated:ferry:south-san-francisco"
+    },
+    {
+      "name": "Mare Island Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "Vallejo, CA",
+      "lat": 38.099730675215,
+      "lon": -122.270314780156,
+      "address": "1050 Nimitz Avenue, Vallejo, CA 94592",
+      "coord_source": "census_geocode",
+      "status": "needs_verification",
+      "source": "San Francisco Bay Ferry / WETA",
+      "source_id": "curated:ferry:mare-island"
+    },
+    {
+      "name": "Vallejo Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "Vallejo, CA",
+      "lat": 38.101288700924,
+      "lon": -122.263222292427,
+      "address": "289 Mare Island Way, Vallejo, CA 94590",
+      "coord_source": "census_geocode",
+      "status": "needs_verification",
+      "source": "San Francisco Bay Ferry / WETA",
+      "source_id": "curated:ferry:vallejo"
+    },
     {
       "name": "Pier 29 Waterfront Restaurant \u0026 Bar",
       "category": "waterfront_restaurants",
@@ -567,18 +703,6 @@
       "status": "source_provided",
       "source": "California State Parks/DBW",
       "source_id": "dbw:498:boatyards"
-    },
-    {
-      "name": "Pillar Point Boat Launching Facility",
-      "category": "boatyards",
-      "city": "Half Moon Bay, CA",
-      "lat": 37.50228404,
-      "lon": -122.47750848,
-      "address": "214 Princeton Ave, Half Moon Bay, CA 94018",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:1139:boatyards"
     },
     {
       "name": "Pillar Point Harbor",
@@ -1370,6 +1494,126 @@
       "source_id": "dbw:859:boatyards"
     },
     {
+      "name": "Alameda Seaplane Lagoon Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "Alameda, CA",
+      "lat": 37.7771558,
+      "lon": -122.299227,
+      "address": "1701 Ferry Point Road, Alameda, CA 94501",
+      "coord_source": "curated_explicit",
+      "status": "explicit",
+      "source": "San Francisco Bay Ferry / WETA",
+      "source_id": "curated:ferry:alameda-seaplane"
+    },
+    {
+      "name": "Larkspur Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "Larkspur, CA",
+      "lat": 37.944535646072,
+      "lon": -122.50864473864,
+      "address": "101 E. Sir Francis Drake Blvd, Larkspur, CA 94939",
+      "coord_source": "curated_explicit",
+      "status": "explicit",
+      "source": "Golden Gate Ferry / 511",
+      "source_id": "curated:ferry:larkspur"
+    },
+    {
+      "name": "Alcatraz Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "San Francisco, CA",
+      "lat": 37.8266612,
+      "lon": -122.420808,
+      "address": "Alcatraz Island, San Francisco, CA 94133",
+      "coord_source": "curated_explicit",
+      "status": "explicit",
+      "source": "Alcatraz City Cruises / reviewed OSM terminal",
+      "source_id": "curated:ferry:alcatraz-island"
+    },
+    {
+      "name": "Oracle Park Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "San Francisco, CA",
+      "lat": 37.778192,
+      "lon": -122.387046,
+      "address": "McCovey Cove Promenade, San Francisco, CA 94107",
+      "coord_source": "curated_explicit",
+      "status": "explicit",
+      "source": "San Francisco Bay Ferry / map-verified event terminal",
+      "source_id": "curated:ferry:oracle-park"
+    },
+    {
+      "name": "Pier 33 Alcatraz Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "San Francisco, CA",
+      "lat": 37.8069704,
+      "lon": -122.404159,
+      "address": "Pier 33, The Embarcadero, San Francisco, CA 94111",
+      "coord_source": "curated_explicit",
+      "status": "explicit",
+      "source": "Alcatraz City Cruises / map-verified terminal",
+      "source_id": "curated:ferry:pier-33-alcatraz"
+    },
+    {
+      "name": "Pier 48 / Chase Center Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "San Francisco, CA",
+      "lat": 37.7750372,
+      "lon": -122.3863939,
+      "address": "Pier 48, San Francisco, CA 94158",
+      "coord_source": "curated_explicit",
+      "status": "explicit",
+      "source": "San Francisco Bay Ferry / map-verified event terminal",
+      "source_id": "curated:ferry:pier-48-chase"
+    },
+    {
+      "name": "Treasure Island Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "San Francisco, CA",
+      "lat": 37.8161599,
+      "lon": -122.3732006,
+      "address": "Treasure Island, San Francisco, CA 94130",
+      "coord_source": "curated_explicit",
+      "status": "explicit",
+      "source": "Treasure Island ferry service / reviewed OSM terminal",
+      "source_id": "curated:ferry:treasure-island"
+    },
+    {
+      "name": "Sausalito Ferry Landing",
+      "category": "ferry_terminals",
+      "city": "Sausalito, CA",
+      "lat": 37.856958,
+      "lon": -122.479339,
+      "address": "Humboldt St \u0026 Anchor St, Sausalito, CA 94965",
+      "coord_source": "curated_explicit",
+      "status": "explicit",
+      "source": "Golden Gate Ferry / 511",
+      "source_id": "curated:ferry:sausalito"
+    },
+    {
+      "name": "Ayala Cove Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "Tiburon, CA",
+      "lat": 37.8686,
+      "lon": -122.4348,
+      "address": "Ayala Cove, Angel Island State Park, Tiburon, CA 94920",
+      "coord_source": "curated_explicit",
+      "status": "explicit",
+      "source": "Golden Gate Ferry / Angel Island service",
+      "source_id": "curated:ferry:angel-island"
+    },
+    {
+      "name": "Tiburon Ferry Landing",
+      "category": "ferry_terminals",
+      "city": "Tiburon, CA",
+      "lat": 37.872749222206,
+      "lon": -122.45540705521,
+      "address": "21 Main Street, Tiburon, CA 94920",
+      "coord_source": "curated_explicit",
+      "status": "explicit",
+      "source": "Golden Gate Ferry / 511",
+      "source_id": "curated:ferry:tiburon"
+    },
+    {
       "name": "GP San Francisco Marine",
       "category": "fuel_docks",
       "lat": 37.8090962,
@@ -1640,18 +1884,6 @@
       "status": "source_provided",
       "source": "California State Parks/DBW",
       "source_id": "dbw:433:fuel_docks"
-    },
-    {
-      "name": "Pillar Point Boat Launching Facility",
-      "category": "fuel_docks",
-      "city": "Half Moon Bay, CA",
-      "lat": 37.50228404,
-      "lon": -122.47750848,
-      "address": "214 Princeton Ave, Half Moon Bay, CA 94018",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:1139:fuel_docks"
     },
     {
       "name": "Pillar Point Harbor",
@@ -2388,16 +2620,6 @@
       "source_id": "osm:way/678950944"
     },
     {
-      "name": "Marina Boat Launch",
-      "category": "launch_ramps",
-      "lat": 38.0379359,
-      "lon": -121.8845934,
-      "coord_source": "osm_geometry",
-      "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:node/3510519199"
-    },
-    {
       "name": "Miller Boat Launch",
       "category": "launch_ramps",
       "lat": 38.1998831,
@@ -2538,6 +2760,16 @@
       "status": "source_provided",
       "source": "California State Parks/DBW",
       "source_id": "dbw:476:launch_ramps"
+    },
+    {
+      "name": "Antioch Marina Launch Ramp",
+      "category": "launch_ramps",
+      "city": "Antioch, CA",
+      "lat": 38.01889,
+      "lon": -121.81796,
+      "coord_source": "local_override",
+      "status": "explicit_override",
+      "source": "local override"
     },
     {
       "name": "Antioch Public Launch Ramp",
@@ -2960,18 +3192,6 @@
       "source_id": "dbw:1139:launch_ramps"
     },
     {
-      "name": "Pillar Point Harbor",
-      "category": "launch_ramps",
-      "city": "Half Moon Bay, CA",
-      "lat": 37.50296056,
-      "lon": -122.48202629,
-      "address": "1 Johnson Pier, Half Moon Bay, CA 94019",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:524:launch_ramps"
-    },
-    {
       "name": "Whiskey Slough Marina",
       "category": "launch_ramps",
       "city": "Holt, CA",
@@ -3378,6 +3598,17 @@
       "status": "source_provided",
       "source": "California State Parks/DBW",
       "source_id": "dbw:919:launch_ramps"
+    },
+    {
+      "name": "Pittsburg Boat Launch",
+      "category": "launch_ramps",
+      "city": "Pittsburg, CA",
+      "lat": 38.0379359,
+      "lon": -121.8845934,
+      "coord_source": "osm_geometry",
+      "status": "source_provided",
+      "source": "OpenStreetMap",
+      "source_id": "osm:node/3510519199"
     },
     {
       "name": "Pittsburg Marina",
@@ -4124,26 +4355,6 @@
       "source_id": "dbw:629:launch_ramps"
     },
     {
-      "name": "5th Avenue Marina",
-      "category": "marinas",
-      "lat": 37.7883164,
-      "lon": -122.2638685,
-      "coord_source": "osm_geometry",
-      "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/372247284"
-    },
-    {
-      "name": "Ballena Isle Marina",
-      "category": "marinas",
-      "lat": 37.7666189,
-      "lon": -122.285825,
-      "coord_source": "osm_geometry",
-      "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:node/3462777776"
-    },
-    {
       "name": "Basin 2",
       "category": "marinas",
       "lat": 37.8698171,
@@ -4225,36 +4436,6 @@
       "source_id": "osm:way/453933178"
     },
     {
-      "name": "Embarcadero Cove",
-      "category": "marinas",
-      "lat": 37.783149,
-      "lon": -122.2439253,
-      "coord_source": "osm_geometry",
-      "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:node/4684903172"
-    },
-    {
-      "name": "Fortmann Marina",
-      "category": "marinas",
-      "lat": 37.7794787,
-      "lon": -122.2564015,
-      "coord_source": "osm_geometry",
-      "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/372261211"
-    },
-    {
-      "name": "Galilee Harbor",
-      "category": "marinas",
-      "lat": 37.8628383,
-      "lon": -122.4886924,
-      "coord_source": "osm_geometry",
-      "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:node/12116738714"
-    },
-    {
       "name": "Glen Cove Marina",
       "category": "marinas",
       "lat": 38.0668688,
@@ -4273,16 +4454,6 @@
       "status": "source_provided",
       "source": "OpenStreetMap",
       "source_id": "osm:way/23783895"
-    },
-    {
-      "name": "Korths Pirates Lair",
-      "category": "marinas",
-      "lat": 38.0974222,
-      "lon": -121.5678599,
-      "coord_source": "osm_geometry",
-      "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:node/3076228994"
     },
     {
       "name": "Los Vaqueros Marina",
@@ -4313,26 +4484,6 @@
       "status": "source_provided",
       "source": "OpenStreetMap",
       "source_id": "osm:way/372293270"
-    },
-    {
-      "name": "McAvoy Harbor",
-      "category": "marinas",
-      "lat": 38.0414252,
-      "lon": -121.9613745,
-      "coord_source": "osm_geometry",
-      "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/475350757"
-    },
-    {
-      "name": "Monterey Marina",
-      "category": "marinas",
-      "lat": 36.6032907,
-      "lon": -121.8910401,
-      "coord_source": "osm_geometry",
-      "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/35878154"
     },
     {
       "name": "Nelson’s Marine Boat Yard and Nelson Yachts",
@@ -4375,16 +4526,6 @@
       "source_id": "osm:way/256941204"
     },
     {
-      "name": "Oakland Marinas - Union Point Basin",
-      "category": "marinas",
-      "lat": 37.7772376,
-      "lon": -122.2428418,
-      "coord_source": "osm_geometry",
-      "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/256942008"
-    },
-    {
       "name": "Owl Harbor Marina",
       "category": "marinas",
       "lat": 38.1158467,
@@ -4425,16 +4566,6 @@
       "source_id": "osm:node/1450187188"
     },
     {
-      "name": "Portobello Marina",
-      "category": "marinas",
-      "lat": 37.789814,
-      "lon": -122.268901,
-      "coord_source": "osm_geometry",
-      "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:node/5587001259"
-    },
-    {
       "name": "Redwood City Yacht Harbor",
       "category": "marinas",
       "lat": 37.502159,
@@ -4443,16 +4574,6 @@
       "status": "source_provided",
       "source": "OpenStreetMap",
       "source_id": "osm:node/648762059"
-    },
-    {
-      "name": "Richardson Bay Marina",
-      "category": "marinas",
-      "lat": 37.8762062,
-      "lon": -122.5045636,
-      "coord_source": "osm_geometry",
-      "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/1309570148"
     },
     {
       "name": "Safe Harbor Emeryville",
@@ -4515,36 +4636,6 @@
       "source_id": "osm:node/1643148212"
     },
     {
-      "name": "Spud Point Marina",
-      "category": "marinas",
-      "lat": 38.328727,
-      "lon": -123.0571716,
-      "coord_source": "osm_geometry",
-      "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/1190045625"
-    },
-    {
-      "name": "Sugar Barge Resort",
-      "category": "marinas",
-      "lat": 38.0266624,
-      "lon": -121.6123724,
-      "coord_source": "osm_geometry",
-      "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:node/3455094956"
-    },
-    {
-      "name": "Tower Park Marina",
-      "category": "marinas",
-      "lat": 38.1104792,
-      "lon": -121.4997855,
-      "coord_source": "osm_geometry",
-      "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/585590258"
-    },
-    {
       "name": "Treasure Island Sailing Center",
       "category": "marinas",
       "lat": 37.8187775,
@@ -4575,16 +4666,6 @@
       "source_id": "osm:node/358833332"
     },
     {
-      "name": "Walnut Grove Marina",
-      "category": "marinas",
-      "lat": 38.2294854,
-      "lon": -121.511126,
-      "coord_source": "osm_geometry",
-      "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:node/3472845471"
-    },
-    {
       "name": "Yacht Harbor",
       "category": "marinas",
       "lat": 37.8067717,
@@ -4610,13 +4691,13 @@
       "name": "Alameda Marina",
       "category": "marinas",
       "city": "Alameda, CA",
-      "lat": 37.7757172,
-      "lon": -122.2482377,
+      "lat": 37.77667719,
+      "lon": -122.24890222,
       "address": "1815 Clement Avenue, Alameda, CA 94501",
-      "coord_source": "osm_geometry",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/1200908020"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:470:marinas"
     },
     {
       "name": "Ballena Isle Marina (An Almar Marina)",
@@ -4634,25 +4715,25 @@
       "name": "Barnhill Marina",
       "category": "marinas",
       "city": "Alameda, CA",
-      "lat": 37.7900911,
-      "lon": -122.2746829,
+      "lat": 37.78817029,
+      "lon": -122.27428072,
       "address": "2394 Mariner Square Drive, Alameda, CA 94501",
-      "coord_source": "osm_geometry",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/372293269"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:471:marinas"
     },
     {
       "name": "Encinal Yacht Club",
       "category": "marinas",
       "city": "Alameda, CA",
-      "lat": 37.78299,
-      "lon": -122.2623811,
-      "address": "1251 Pacific Marina, Alameda, CA, 94501",
-      "coord_source": "osm_geometry",
+      "lat": 37.78237849,
+      "lon": -122.26290005,
+      "address": "1251 Pacific Marina, Alameda, CA 94501",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/372247280"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:480:marinas"
     },
     {
       "name": "Fortman Marina",
@@ -4670,25 +4751,25 @@
       "name": "Grand Marina",
       "category": "marinas",
       "city": "Alameda, CA",
-      "lat": 37.7790511,
-      "lon": -122.2537159,
+      "lat": 37.777846,
+      "lon": -122.25538,
       "address": "2099 Grand Street, Alameda, CA 94501",
-      "coord_source": "osm_geometry",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/372261212"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:473:marinas"
     },
     {
       "name": "Marina Village Yacht Harbor",
       "category": "marinas",
       "city": "Alameda, CA",
-      "lat": 37.7848213,
-      "lon": -122.269101,
+      "lat": 37.78549323,
+      "lon": -122.26868615,
       "address": "1030 Marina Village Parkway, Alameda, CA 94501",
-      "coord_source": "osm_geometry",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:node/1603884612"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:474:marinas"
     },
     {
       "name": "Marina Village Yacht Harbor - East Basin",
@@ -4775,27 +4856,16 @@
       "source_id": "dbw:467:marinas"
     },
     {
-      "name": "Antioch City Marina",
-      "category": "marinas",
-      "city": "Antioch, CA",
-      "lat": 38.02002,
-      "lon": -121.82022,
-      "address": "5 Marina Plaza, Antioch, CA 94509",
-      "coord_source": "local_override",
-      "status": "explicit_override",
-      "source": "local override"
-    },
-    {
       "name": "Antioch Marina",
       "category": "marinas",
       "city": "Antioch, CA",
-      "lat": 38.0198415,
-      "lon": -121.8218531,
+      "lat": 38.02008094,
+      "lon": -121.82028565,
       "address": "5 Marina Plaza, Antioch, CA 94509",
-      "coord_source": "osm_geometry",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/473656178"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:392:marinas"
     },
     {
       "name": "Lloyd's Holiday Harbor",
@@ -4873,25 +4943,25 @@
       "name": "Benicia Marina",
       "category": "marinas",
       "city": "Benicia, CA",
-      "lat": 38.0455427,
-      "lon": -122.1557059,
+      "lat": 38.0446916,
+      "lon": -122.15769308,
       "address": "266 East B Street, Benicia, CA 94510",
-      "coord_source": "osm_geometry",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/684673273"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:451:marinas"
     },
     {
       "name": "Berkeley Marina",
       "category": "marinas",
       "city": "Berkeley, CA",
-      "lat": 37.8665429,
-      "lon": -122.3149981,
-      "address": "201 University Avenue, Berkeley, CA",
-      "coord_source": "osm_geometry",
+      "lat": 37.86443363,
+      "lon": -122.31404453,
+      "address": "201 University Avenue, Berkeley, CA 94710",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/117767451"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:438:marinas"
     },
     {
       "name": "Berkeley Marina Yacht Club",
@@ -5125,13 +5195,13 @@
       "name": "Russo's Marina",
       "category": "marinas",
       "city": "Bethel Island, CA",
-      "lat": 38.0336175,
-      "lon": -121.6216117,
+      "lat": 38.03382879,
+      "lon": -121.62168296,
       "address": "3995 Willow Road, Bethel Island, CA 94511",
-      "coord_source": "osm_geometry",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:node/6319955776"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:405:marinas"
     },
     {
       "name": "Rusty Porthole",
@@ -5197,13 +5267,13 @@
       "name": "Porto Bodega Marina",
       "category": "marinas",
       "city": "Bodega Bay, CA",
-      "lat": 38.3341318,
-      "lon": -123.051573,
+      "lat": 38.3340441,
+      "lon": -123.05187309,
       "address": "1500 Bay Flat Road, Bodega Bay, CA 94923",
-      "coord_source": "osm_geometry",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:node/1438459171"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:32:marinas"
     },
     {
       "name": "Spud Point Marina",
@@ -5353,13 +5423,13 @@
       "name": "Emery Cove Yacht Harbor",
       "category": "marinas",
       "city": "Emeryville, CA",
-      "lat": 37.8384054,
-      "lon": -122.3106863,
+      "lat": 37.83817416,
+      "lon": -122.31045781,
       "address": "3300 Powell Street, Emeryville, CA 94608",
-      "coord_source": "osm_geometry",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/452530274"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:432:marinas"
     },
     {
       "name": "Emeryville Marina",
@@ -5372,18 +5442,6 @@
       "status": "source_provided",
       "source": "California State Parks/DBW",
       "source_id": "dbw:433:marinas"
-    },
-    {
-      "name": "Pillar Point Boat Launching Facility",
-      "category": "marinas",
-      "city": "Half Moon Bay, CA",
-      "lat": 37.50228404,
-      "lon": -122.47750848,
-      "address": "214 Princeton Ave, Half Moon Bay, CA 94018",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:1139:marinas"
     },
     {
       "name": "Pillar Point Harbor",
@@ -5569,13 +5627,13 @@
       "name": "Oxbow Marina",
       "category": "marinas",
       "city": "Isleton, CA",
-      "lat": 38.1493624,
-      "lon": -121.5900349,
+      "lat": 38.14952789,
+      "lon": -121.58985289,
       "address": "100 Oxbow Marina Drive, Isleton, CA 95641",
-      "coord_source": "osm_geometry",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/147935922"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:750:marinas"
     },
     {
       "name": "Perry's Boat Harbor \u0026 Drydock",
@@ -5701,13 +5759,13 @@
       "name": "Martinez Marina",
       "category": "marinas",
       "city": "Martinez, CA",
-      "lat": 38.0253234,
-      "lon": -122.1368452,
+      "lat": 38.02577801,
+      "lon": -122.13715097,
       "address": "7 North Court Street, Martinez, CA 94553",
-      "coord_source": "osm_geometry",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/473057142"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:517:marinas"
     },
     {
       "name": "Breakwater Cove Marina",
@@ -5792,18 +5850,6 @@
       "status": "source_provided",
       "source": "California State Parks/DBW",
       "source_id": "dbw:1337:marinas"
-    },
-    {
-      "name": "Central Basin",
-      "category": "marinas",
-      "city": "Oakland, CA",
-      "lat": 37.776093,
-      "lon": -122.240506,
-      "address": "Oakland, Oakland, CA 94606-",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:1279:marinas"
     },
     {
       "name": "D'Anna's Yacht Center, Inc",
@@ -5977,13 +6023,13 @@
       "name": "Driftwood Marina",
       "category": "marinas",
       "city": "Oakley, CA",
-      "lat": 38.0179918,
-      "lon": -121.7498301,
+      "lat": 38.01685148,
+      "lon": -121.75009347,
       "address": "6338 Bridgehead Road, Oakley, CA 94561",
-      "coord_source": "osm_geometry",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/666329687"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:393:marinas"
     },
     {
       "name": "Seahorse Marina",
@@ -6037,13 +6083,13 @@
       "name": "Pittsburg Marina",
       "category": "marinas",
       "city": "Pittsburg, CA",
-      "lat": 38.0355335,
-      "lon": -121.8834441,
+      "lat": 38.03600252,
+      "lon": -121.88315024,
       "address": "51 - E Marina Boulevard, Pittsburg, CA 94565",
-      "coord_source": "osm_geometry",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:node/3448795950"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:454:marinas"
     },
     {
       "name": "Westpoint Harbor",
@@ -6073,13 +6119,13 @@
       "name": "Docktown Marina",
       "category": "marinas",
       "city": "Redwood City, CA",
-      "lat": 37.4957044,
-      "lon": -122.220425,
+      "lat": 37.49502395,
+      "lon": -122.22158661,
       "address": "1548 Maple Street, Redwood City, CA 94063",
-      "coord_source": "osm_geometry",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:node/648758409"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:488:marinas"
     },
     {
       "name": "Peninsula Marina",
@@ -6169,25 +6215,25 @@
       "name": "Point San Pablo Yacht Harbor",
       "category": "marinas",
       "city": "Richmond, CA",
-      "lat": 37.9635493,
-      "lon": -122.4180667,
-      "address": "1900 Stenmark Drive, CA",
-      "coord_source": "osm_geometry",
+      "lat": 37.96201141,
+      "lon": -122.41857017,
+      "address": "1900 Western Drive, Richmond, CA 94807",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:node/369163340"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:462:marinas"
     },
     {
       "name": "Richmond Yacht Club",
       "category": "marinas",
       "city": "Richmond, CA",
-      "lat": 37.9099463,
-      "lon": -122.3834406,
+      "lat": 37.91017756,
+      "lon": -122.3834102,
       "address": "351 Brickyard Cove Road, Richmond, CA 94807",
-      "coord_source": "osm_geometry",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:node/2692000959"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:463:marinas"
     },
     {
       "name": "Richmond Yacht Harbor Ltd.",
@@ -6214,16 +6260,16 @@
       "source_id": "dbw:743:marinas"
     },
     {
-      "name": "Delta Marina Yacht-Harbor",
+      "name": "Delta Marina Yacht Harbor",
       "category": "marinas",
       "city": "Rio Vista, CA",
-      "lat": 38.1495513,
-      "lon": -121.6935611,
+      "lat": 38.14872553,
+      "lon": -121.69185238,
       "address": "100 Marina Drive, Rio Vista, CA 94571",
-      "coord_source": "osm_geometry",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/44581216"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:388:marinas"
     },
     {
       "name": "Eddo's Harbor \u0026 RV Park",
@@ -6286,18 +6332,6 @@
       "source_id": "dbw:648:marinas"
     },
     {
-      "name": "Garcia Bend Park Launch Ramp",
-      "category": "marinas",
-      "city": "Sacramento, CA",
-      "lat": 38.47810313,
-      "lon": -121.54335891,
-      "address": "7654 Pocket Road, Sacramento, CA 95814",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:630:marinas"
-    },
-    {
       "name": "River View Marina",
       "category": "marinas",
       "city": "Sacramento, CA",
@@ -6346,18 +6380,6 @@
       "source_id": "dbw:632:marinas"
     },
     {
-      "name": "The Virgin Sturgeon",
-      "category": "marinas",
-      "city": "Sacramento, CA",
-      "lat": 38.60468835,
-      "lon": -121.52266778,
-      "address": "1577 Garden Hwy, Sacramento, CA 95833",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:945:marinas"
-    },
-    {
       "name": "Fisherman's Wharf",
       "category": "marinas",
       "city": "San Francisco, CA",
@@ -6397,13 +6419,13 @@
       "name": "Hyde Street Harbor",
       "category": "marinas",
       "city": "San Francisco, CA",
-      "lat": 37.809451,
-      "lon": -122.4191355,
+      "lat": 37.80884707,
+      "lon": -122.4210143,
       "address": "Jefferson and Hyde St., San Francisco, CA 94111",
-      "coord_source": "osm_geometry",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:relation/14551822"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:1059:marinas"
     },
     {
       "name": "Pier 38 Maritime Recreation Center, Inc.",
@@ -6421,13 +6443,13 @@
       "name": "Pier 39 Marina",
       "category": "marinas",
       "city": "San Francisco, CA",
-      "lat": 37.8098148,
-      "lon": -122.4096689,
+      "lat": 37.80852796,
+      "lon": -122.40916755,
       "address": "Beach \u0026 Embarcadero, San Francisco, CA 94133",
-      "coord_source": "osm_geometry",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:relation/14551816"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:431:marinas"
     },
     {
       "name": "San Francisco Marina - West Harbor",
@@ -6445,25 +6467,13 @@
       "name": "South Beach Harbor",
       "category": "marinas",
       "city": "San Francisco, CA",
-      "lat": 37.780153,
-      "lon": -122.3860813,
+      "lat": 37.78171387,
+      "lon": -122.38760949,
       "address": "The Embarcadero at Pier 40, San Francisco, CA 94107",
-      "coord_source": "osm_geometry",
-      "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/23749874"
-    },
-    {
-      "name": "The Ramp Restaurant",
-      "category": "marinas",
-      "city": "San Francisco, CA",
-      "lat": 37.76384,
-      "lon": -122.386573,
-      "address": "855 Terry Francois St. Pier 66, San Francisco, CA 94107-",
       "coord_source": "dbw_listing",
       "status": "source_provided",
       "source": "California State Parks/DBW",
-      "source_id": "dbw:881:marinas"
+      "source_id": "dbw:430:marinas"
     },
     {
       "name": "Treasure Isle Marina (An Almar Marina)",
@@ -6481,13 +6491,13 @@
       "name": "Coyote Point Marina",
       "category": "marinas",
       "city": "San Mateo, CA",
-      "lat": 37.5889789,
-      "lon": -122.3167408,
+      "lat": 37.5897105,
+      "lon": -122.31853558,
       "address": "1900 Coyote Point Drive, San Mateo, CA 94401",
-      "coord_source": "osm_geometry",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/450179264"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:494:marinas"
     },
     {
       "name": "Parkside Aquatic Park",
@@ -6512,16 +6522,6 @@
       "status": "source_provided",
       "source": "California State Parks/DBW",
       "source_id": "dbw:1339:marinas"
-    },
-    {
-      "name": "Santa Cruz Harbor",
-      "category": "marinas",
-      "city": "Santa Cruz, CA",
-      "lat": 36.9642,
-      "lon": -122.0008,
-      "coord_source": "local_override",
-      "status": "explicit_override",
-      "source": "local override"
     },
     {
       "name": "Santa Cruz Harbor (South Harbor Launch Ramp)",
@@ -6563,13 +6563,13 @@
       "name": "Clipper Yacht Harbor",
       "category": "marinas",
       "city": "Sausalito, CA",
-      "lat": 37.8704666,
-      "lon": -122.4981427,
+      "lat": 37.87031779,
+      "lon": -122.49861956,
       "address": "310 Harbor Drive, Sausalito, CA 94965",
-      "coord_source": "osm_geometry",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/1310839271"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:406:marinas"
     },
     {
       "name": "Galilee Harbor",
@@ -6623,37 +6623,37 @@
       "name": "Sausalito Marine",
       "category": "marinas",
       "city": "Sausalito, CA",
-      "lat": 37.8611965,
-      "lon": -122.4852713,
+      "lat": 37.86070182,
+      "lon": -122.48592746,
       "address": "225 Locust Street, Sausalito, CA 94965",
-      "coord_source": "osm_geometry",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:node/12116738740"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:1088:marinas"
     },
     {
       "name": "Schoonmaker Point Marina",
       "category": "marinas",
       "city": "Sausalito, CA",
-      "lat": 37.8635084,
-      "lon": -122.4895386,
-      "address": "85 Liberty Ship Way, Sausalito, CA, 94965",
-      "coord_source": "osm_geometry",
+      "lat": 37.86381696,
+      "lon": -122.49119413,
+      "address": "85 Liberty Ship Way #205, Sausalito, CA 94965",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/1308419676"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:425:marinas"
     },
     {
       "name": "Travis Marina",
       "category": "marinas",
       "city": "Sausalito, CA",
-      "lat": 37.8331256,
-      "lon": -122.4743883,
+      "lat": 37.83386787,
+      "lon": -122.47548351,
       "address": "679 Sommerville rd, Sausalito, CA 94965",
-      "coord_source": "osm_geometry",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/973083829"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:422:marinas"
     },
     {
       "name": "Oyster Point Marina",
@@ -6752,18 +6752,6 @@
       "source_id": "dbw:855:marinas"
     },
     {
-      "name": "Lost Isle",
-      "category": "marinas",
-      "city": "Stockton, CA",
-      "lat": 37.99846864,
-      "lon": -121.45020924,
-      "address": "Light 24, Stockton Deepwater Channel, Stockton, CA 95207",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:926:marinas"
-    },
-    {
       "name": "Paradise Point on the Delta",
       "category": "marinas",
       "city": "Stockton, CA",
@@ -6774,18 +6762,6 @@
       "status": "source_provided",
       "source": "California State Parks/DBW",
       "source_id": "dbw:851:marinas"
-    },
-    {
-      "name": "RiverPoint Landing Marina",
-      "category": "marinas",
-      "city": "Stockton, CA",
-      "lat": 37.9771492,
-      "lon": -121.3775097,
-      "address": "4950 Buckley Cove Way, Stockton, CA, 95219",
-      "coord_source": "osm_geometry",
-      "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/680456105"
     },
     {
       "name": "RiverPoint Landing Marina Resort",
@@ -6803,13 +6779,13 @@
       "name": "Stockton Downtown Marina",
       "category": "marinas",
       "city": "Stockton, CA",
-      "lat": 37.9531718,
-      "lon": -121.3007944,
-      "address": "445 West Weber Avenue, Stockton, CA",
-      "coord_source": "osm_geometry",
+      "lat": 37.95307274,
+      "lon": -121.29805708,
+      "address": "333 Tuleburg Levee, Stockton, CA 95203",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/679906775"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:947:marinas"
     },
     {
       "name": "Stockton Marina",
@@ -6827,13 +6803,13 @@
       "name": "Stockton Sailing Club",
       "category": "marinas",
       "city": "Stockton, CA",
-      "lat": 37.9736386,
-      "lon": -121.3733077,
-      "address": "4980 Buckley Cove Way, Stockton, CA, 95219",
-      "coord_source": "osm_geometry",
+      "lat": 37.975195,
+      "lon": -121.374251,
+      "address": "4980 Buckley Cove Way, Stockton, CA 95219",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/680452142"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:856:marinas"
     },
     {
       "name": "Stockton Yacht Club",
@@ -6882,18 +6858,6 @@
       "status": "source_provided",
       "source": "California State Parks/DBW",
       "source_id": "dbw:1342:marinas"
-    },
-    {
-      "name": "Village West Marina",
-      "category": "marinas",
-      "city": "Stockton, CA",
-      "lat": 37.9996319,
-      "lon": -121.3697897,
-      "address": "6649 Embarcadero Drive, Stockton, CA, 95219",
-      "coord_source": "osm_geometry",
-      "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/679906780"
     },
     {
       "name": "Village West Marina",
@@ -6971,13 +6935,13 @@
       "name": "Vallejo Municipal Marina",
       "category": "marinas",
       "city": "Vallejo, CA",
-      "lat": 38.1086063,
-      "lon": -122.2691739,
-      "address": "42 Harbor Way, Vallejo, CA, 94590",
-      "coord_source": "osm_geometry",
+      "lat": 38.10900685,
+      "lon": -122.26799595,
+      "address": "42 Harbor Way, Vallejo, CA 94590",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/699987062"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:447:marinas"
     },
     {
       "name": "Vallejo Yacht Club",
@@ -7138,16 +7102,6 @@
     {
       "name": "California Canoe and Kayak",
       "category": "marine_supply",
-      "lat": 37.7870598,
-      "lon": -122.2554256,
-      "coord_source": "osm_geometry",
-      "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:node/8258501446"
-    },
-    {
-      "name": "California Canoe and Kayak",
-      "category": "marine_supply",
       "lat": 37.7941838,
       "lon": -122.2763702,
       "address": "409 Water Street",
@@ -7155,6 +7109,16 @@
       "status": "source_provided",
       "source": "OpenStreetMap",
       "source_id": "osm:node/4983230720"
+    },
+    {
+      "name": "California Canoe and Kayak",
+      "category": "marine_supply",
+      "lat": 37.7870598,
+      "lon": -122.2554256,
+      "coord_source": "osm_geometry",
+      "status": "source_provided",
+      "source": "OpenStreetMap",
+      "source_id": "osm:node/8258501446"
     },
     {
       "name": "Creative Sports Flyshop",
@@ -7231,22 +7195,22 @@
     {
       "name": "West Marine",
       "category": "marine_supply",
-      "lat": 36.6010093,
-      "lon": -121.8682582,
-      "coord_source": "osm_geometry",
-      "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:node/12573089641"
-    },
-    {
-      "name": "West Marine",
-      "category": "marine_supply",
       "lat": 37.9808041,
       "lon": -122.066082,
       "coord_source": "osm_geometry",
       "status": "source_provided",
       "source": "OpenStreetMap",
       "source_id": "osm:node/4824241814"
+    },
+    {
+      "name": "West Marine",
+      "category": "marine_supply",
+      "lat": 36.6010093,
+      "lon": -121.8682582,
+      "coord_source": "osm_geometry",
+      "status": "source_provided",
+      "source": "OpenStreetMap",
+      "source_id": "osm:node/12573089641"
     },
     {
       "name": "West Marine",
@@ -7472,18 +7436,6 @@
       "status": "source_provided",
       "source": "California State Parks/DBW",
       "source_id": "dbw:498:marine_supply"
-    },
-    {
-      "name": "Pillar Point Boat Launching Facility",
-      "category": "marine_supply",
-      "city": "Half Moon Bay, CA",
-      "lat": 37.50228404,
-      "lon": -122.47750848,
-      "address": "214 Princeton Ave, Half Moon Bay, CA 94018",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:1139:marine_supply"
     },
     {
       "name": "Pillar Point Harbor",
@@ -8085,54 +8037,6 @@
       "source_id": "dbw:556:marine_supply"
     },
     {
-      "name": "Ballena Isle Marina (An Almar Marina)",
-      "category": "waterfront_restaurants",
-      "city": "Alameda, CA",
-      "lat": 37.76683531,
-      "lon": -122.28663529,
-      "address": "1150 Ballena Boulevard, Suite 111, Alameda, CA 94501",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:477:waterfront_restaurants"
-    },
-    {
-      "name": "Encinal Yacht Club",
-      "category": "waterfront_restaurants",
-      "city": "Alameda, CA",
-      "lat": 37.78237849,
-      "lon": -122.26290005,
-      "address": "1251 Pacific Marina, Alameda, CA 94501",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:480:waterfront_restaurants"
-    },
-    {
-      "name": "Marina Village Yacht Harbor",
-      "category": "waterfront_restaurants",
-      "city": "Alameda, CA",
-      "lat": 37.78549323,
-      "lon": -122.26868615,
-      "address": "1030 Marina Village Parkway, Alameda, CA 94501",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:474:waterfront_restaurants"
-    },
-    {
-      "name": "Mariner Square Marina \u0026 Dry Stack",
-      "category": "waterfront_restaurants",
-      "city": "Alameda, CA",
-      "lat": 37.791497,
-      "lon": -122.278224,
-      "address": "2415 Mariner Square Drive, Alameda, CA 94501",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:476:waterfront_restaurants"
-    },
-    {
       "name": "Mosley's Cafe",
       "category": "waterfront_restaurants",
       "city": "Alameda, CA",
@@ -8142,18 +8046,6 @@
       "coord_source": "curated_explicit",
       "status": "explicit",
       "source": "Current business listing"
-    },
-    {
-      "name": "Oakland Yacht Club/Pacific Marina",
-      "category": "waterfront_restaurants",
-      "city": "Alameda, CA",
-      "lat": 37.78362872,
-      "lon": -122.26560285,
-      "address": "1101 Pacific Marina, Alameda, CA 94501",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:481:waterfront_restaurants"
     },
     {
       "name": "Pacific Lighthouse",
@@ -8178,18 +8070,6 @@
       "source": "Current business listing"
     },
     {
-      "name": "Antioch Marina",
-      "category": "waterfront_restaurants",
-      "city": "Antioch, CA",
-      "lat": 38.02008094,
-      "lon": -121.82028565,
-      "address": "5 Marina Plaza, Antioch, CA 94509",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:392:waterfront_restaurants"
-    },
-    {
       "name": "Smith's Landing Seafood Grill",
       "category": "waterfront_restaurants",
       "city": "Antioch, CA",
@@ -8199,30 +8079,6 @@
       "coord_source": "curated_explicit",
       "status": "explicit",
       "source": "Current business listing"
-    },
-    {
-      "name": "Harris Yacht Harbor/Bay Point Marina",
-      "category": "waterfront_restaurants",
-      "city": "Bay Point, CA",
-      "lat": 38.03909643,
-      "lon": -121.95736156,
-      "address": "100 Trojan Road, Bay Point, CA 94565",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:455:waterfront_restaurants"
-    },
-    {
-      "name": "McAvoy Yacht Harbor",
-      "category": "waterfront_restaurants",
-      "city": "Bay Point, CA",
-      "lat": 38.04079032,
-      "lon": -121.96049563,
-      "address": "1001 McAvoy Road, Bay Point, CA 94565",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:456:waterfront_restaurants"
     },
     {
       "name": "Bella Siena",
@@ -8236,18 +8092,6 @@
       "source": "Current business listing"
     },
     {
-      "name": "Benicia Yacht Club",
-      "category": "waterfront_restaurants",
-      "city": "Benicia, CA",
-      "lat": 38.04631319,
-      "lon": -122.15770075,
-      "address": "400 East Second Street, Benicia, CA 94510",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:452:waterfront_restaurants"
-    },
-    {
       "name": "Sailor Jack's",
       "category": "waterfront_restaurants",
       "city": "Benicia, CA",
@@ -8257,30 +8101,6 @@
       "coord_source": "curated_explicit",
       "status": "explicit",
       "source": "Current business listing"
-    },
-    {
-      "name": "Berkeley Marina",
-      "category": "waterfront_restaurants",
-      "city": "Berkeley, CA",
-      "lat": 37.86443363,
-      "lon": -122.31404453,
-      "address": "201 University Avenue, Berkeley, CA 94710",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:438:waterfront_restaurants"
-    },
-    {
-      "name": "Berkeley Marina Yacht Club",
-      "category": "waterfront_restaurants",
-      "city": "Berkeley, CA",
-      "lat": 37.86609122,
-      "lon": -122.31756281,
-      "address": "1 Seawall Drive, Berkeley, CA 94710",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:437:waterfront_restaurants"
     },
     {
       "name": "Hana Japan Steak and Seafood",
@@ -8314,54 +8134,6 @@
       "coord_source": "curated_explicit",
       "status": "explicit",
       "source": "City of Berkeley waterfront directory / official restaurant site"
-    },
-    {
-      "name": "Hennis Marina",
-      "category": "waterfront_restaurants",
-      "city": "Bethel Island, CA",
-      "lat": 38.01112959,
-      "lon": -121.63551327,
-      "address": "3255 Wells Road, Bethel Island, CA 94511",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:502:waterfront_restaurants"
-    },
-    {
-      "name": "Lundborgh Landing (closed - 2010)",
-      "category": "waterfront_restaurants",
-      "city": "Bethel Island, CA",
-      "lat": 38.02577795,
-      "lon": -121.61193136,
-      "address": "6777 Riverview Road, Bethel Island, CA 94511",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:404:waterfront_restaurants"
-    },
-    {
-      "name": "Rusty Porthole",
-      "category": "waterfront_restaurants",
-      "city": "Bethel Island, CA",
-      "lat": 38.03475486,
-      "lon": -121.6231612,
-      "address": "3893 Willow Road, Bethel Island, CA 94511",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:396:waterfront_restaurants"
-    },
-    {
-      "name": "Sugar Barge Marina (Sugar Barge Marina \u0026 RV Park)",
-      "category": "waterfront_restaurants",
-      "city": "Bethel Island, CA",
-      "lat": 38.02628643,
-      "lon": -121.61218823,
-      "address": "1440 Sugar Barge Road, Bethel Island, CA 94511",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:398:waterfront_restaurants"
     },
     {
       "name": "Sugar Barge Waterfront Bar \u0026 Grill",
@@ -8419,18 +8191,6 @@
       "source": "BodegaBay.com dining directory"
     },
     {
-      "name": "Porto Bodega Marina",
-      "category": "waterfront_restaurants",
-      "city": "Bodega Bay, CA",
-      "lat": 38.3340441,
-      "lon": -123.05187309,
-      "address": "1500 Bay Flat Road, Bodega Bay, CA 94923",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:32:waterfront_restaurants"
-    },
-    {
       "name": "The Tides Wharf \u0026 Restaurant",
       "category": "waterfront_restaurants",
       "city": "Bodega Bay, CA",
@@ -8442,18 +8202,6 @@
       "source": "Current business listing"
     },
     {
-      "name": "Orwood Resort",
-      "category": "waterfront_restaurants",
-      "city": "Brentwood, CA",
-      "lat": 37.93883316,
-      "lon": -121.61177074,
-      "address": "4451 Orwood Road, Brentwood, CA 94513",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:499:waterfront_restaurants"
-    },
-    {
       "name": "Orwood Resort Bar \u0026 Grill",
       "category": "waterfront_restaurants",
       "city": "Brentwood, CA",
@@ -8463,42 +8211,6 @@
       "coord_source": "curated_explicit",
       "status": "explicit",
       "source": "Current business listing"
-    },
-    {
-      "name": "Clarksburg Marina",
-      "category": "waterfront_restaurants",
-      "city": "Clarksburg, CA",
-      "lat": 38.41863256,
-      "lon": -121.52560761,
-      "address": "36339 Riverview Drive, Clarksburg , CA 95612",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:940:waterfront_restaurants"
-    },
-    {
-      "name": "Rosie's Courtland Docks",
-      "category": "waterfront_restaurants",
-      "city": "Courtland, CA",
-      "lat": 38.33198512,
-      "lon": -121.56989084,
-      "address": "11740 State Highway 160, Courtland, CA 95615",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:645:waterfront_restaurants"
-    },
-    {
-      "name": "Discovery Bay Marina",
-      "category": "waterfront_restaurants",
-      "city": "Discovery Bay, CA",
-      "lat": 37.9025761,
-      "lon": -121.58979046,
-      "address": "5901 Marina Rd. Ste. 1, Discovery Bay, CA 94505",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:498:waterfront_restaurants"
     },
     {
       "name": "Marina Bar and Grill",
@@ -8578,30 +8290,6 @@
       "source": "Current business listing"
     },
     {
-      "name": "Pillar Point Boat Launching Facility",
-      "category": "waterfront_restaurants",
-      "city": "Half Moon Bay, CA",
-      "lat": 37.50228404,
-      "lon": -122.47750848,
-      "address": "214 Princeton Ave, Half Moon Bay, CA 94018",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:1139:waterfront_restaurants"
-    },
-    {
-      "name": "Pillar Point Harbor",
-      "category": "waterfront_restaurants",
-      "city": "Half Moon Bay, CA",
-      "lat": 37.50296056,
-      "lon": -122.48202629,
-      "address": "1 Johnson Pier, Half Moon Bay, CA 94019",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:524:waterfront_restaurants"
-    },
-    {
       "name": "Sam's Chowder House",
       "category": "waterfront_restaurants",
       "city": "Half Moon Bay, CA",
@@ -8611,150 +8299,6 @@
       "coord_source": "curated_explicit",
       "status": "explicit",
       "source": "Current business listing"
-    },
-    {
-      "name": "Whiskey Slough Marina",
-      "category": "waterfront_restaurants",
-      "city": "Holt, CA",
-      "lat": 37.93491483,
-      "lon": -121.43105004,
-      "address": "3401 S. Whiskey Slough Road/Hwy 4, Holt, CA 95234",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:853:waterfront_restaurants"
-    },
-    {
-      "name": "Delta Isle R. V. Park",
-      "category": "waterfront_restaurants",
-      "city": "Isleton, CA",
-      "lat": 38.11378812,
-      "lon": -121.58639824,
-      "address": "601 Brannan Island Road, Isleton, CA 95641",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:774:waterfront_restaurants"
-    },
-    {
-      "name": "Happy Harbor",
-      "category": "waterfront_restaurants",
-      "city": "Isleton, CA",
-      "lat": 38.10460586,
-      "lon": -121.59321495,
-      "address": "731 West Brannan Island Road, Isleton, CA 95641",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:895:waterfront_restaurants"
-    },
-    {
-      "name": "Ko-Ket Resort",
-      "category": "waterfront_restaurants",
-      "city": "Isleton, CA",
-      "lat": 38.24051662,
-      "lon": -121.55442923,
-      "address": "14174 Isleton Rd., Isleton, CA 95641",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:924:waterfront_restaurants"
-    },
-    {
-      "name": "Korth's Pirate's Lair Marina",
-      "category": "waterfront_restaurants",
-      "city": "Isleton, CA",
-      "lat": 38.097931,
-      "lon": -121.56815,
-      "address": "169 West Brannan Island Road, Isleton, CA 95641",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:745:waterfront_restaurants"
-    },
-    {
-      "name": "Lighthouse Resort and Marina",
-      "category": "waterfront_restaurants",
-      "city": "Isleton, CA",
-      "lat": 38.10620236,
-      "lon": -121.57134167,
-      "address": "151 Brannan Island Road, Isleton, CA 95641",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:775:waterfront_restaurants"
-    },
-    {
-      "name": "Oxbow Marina",
-      "category": "waterfront_restaurants",
-      "city": "Isleton, CA",
-      "lat": 38.14952789,
-      "lon": -121.58985289,
-      "address": "100 Oxbow Marina Drive, Isleton, CA 95641",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:750:waterfront_restaurants"
-    },
-    {
-      "name": "Riverboat Marina",
-      "category": "waterfront_restaurants",
-      "city": "Isleton, CA",
-      "lat": 38.10086585,
-      "lon": -121.56606549,
-      "address": "106 Brannan Island Road, Isleton, CA 95641",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:747:waterfront_restaurants"
-    },
-    {
-      "name": "Spindrift Marina",
-      "category": "waterfront_restaurants",
-      "city": "Isleton, CA",
-      "lat": 38.11282821,
-      "lon": -121.68388468,
-      "address": "841 West Brannan Island Road, Isleton, CA 95641",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:928:waterfront_restaurants"
-    },
-    {
-      "name": "Vieira's Resort",
-      "category": "waterfront_restaurants",
-      "city": "Isleton, CA",
-      "lat": 38.17221561,
-      "lon": -121.64199614,
-      "address": "15476 Highway 160, Isleton, CA 95641",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:748:waterfront_restaurants"
-    },
-    {
-      "name": "Haven Acres Resort",
-      "category": "waterfront_restaurants",
-      "city": "Lathrop, CA",
-      "lat": 37.84986516,
-      "lon": -121.32190303,
-      "address": "1691 W Frewert Rd, Lathrop, CA 95330",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:1029:waterfront_restaurants"
-    },
-    {
-      "name": "Tower Park Resort and Marina",
-      "category": "waterfront_restaurants",
-      "city": "Lodi, CA",
-      "lat": 38.11199553,
-      "lon": -121.49863105,
-      "address": "14900 West Highway 12, Lodi, CA 95242",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:885:waterfront_restaurants"
     },
     {
       "name": "Abalonetti Bar \u0026 Grill",
@@ -8768,18 +8312,6 @@
       "source": "Monterey Fisherman's Wharf dining directory"
     },
     {
-      "name": "Breakwater Cove Marina",
-      "category": "waterfront_restaurants",
-      "city": "Monterey, CA",
-      "lat": 36.60892932,
-      "lon": -121.8939688,
-      "address": "32 Cannery Row, Monterey, CA 93940",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:74:waterfront_restaurants"
-    },
-    {
       "name": "Domenico's on the Wharf",
       "category": "waterfront_restaurants",
       "city": "Monterey, CA",
@@ -8789,30 +8321,6 @@
       "coord_source": "curated_explicit",
       "status": "explicit",
       "source": "Monterey Fisherman's Wharf dining directory / current business listing"
-    },
-    {
-      "name": "Monterey Bay Boat Works Company",
-      "category": "waterfront_restaurants",
-      "city": "Monterey, CA",
-      "lat": 36.60891936,
-      "lon": -121.89466067,
-      "address": "32 Cannery Row, Monterey, CA 93940-1447",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:75:waterfront_restaurants"
-    },
-    {
-      "name": "Monterey Harbor and Marina",
-      "category": "waterfront_restaurants",
-      "city": "Monterey, CA",
-      "lat": 36.60221212,
-      "lon": -121.89115033,
-      "address": "250 Figueroa Street, Monterey, CA 93940",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:55:waterfront_restaurants"
     },
     {
       "name": "Old Fisherman's Grotto",
@@ -8859,18 +8367,6 @@
       "source": "Moss Landing Harbor District"
     },
     {
-      "name": "Moss Landing Harbor District",
-      "category": "waterfront_restaurants",
-      "city": "Moss Landing, CA",
-      "lat": 36.80157536,
-      "lon": -121.78808696,
-      "address": "7881 Sandholdt Road, Moss Landing, CA 95039",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:53:waterfront_restaurants"
-    },
-    {
       "name": "Woodward Marine Market",
       "category": "waterfront_restaurants",
       "city": "Moss Landing, CA",
@@ -8891,30 +8387,6 @@
       "coord_source": "curated_explicit",
       "status": "explicit",
       "source": "Current business listing"
-    },
-    {
-      "name": "Embarcadero Cove Marina",
-      "category": "waterfront_restaurants",
-      "city": "Oakland, CA",
-      "lat": 37.78207064,
-      "lon": -122.24392451,
-      "address": "31 Embarcadero Cove, Oakland, CA 94606",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:443:waterfront_restaurants"
-    },
-    {
-      "name": "Portobella Marina",
-      "category": "waterfront_restaurants",
-      "city": "Oakland, CA",
-      "lat": 37.79056,
-      "lon": -122.26933,
-      "address": "13 Embarcadero West, Oakland, CA 94607",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:442:waterfront_restaurants"
     },
     {
       "name": "Quinn's Lighthouse",
@@ -8939,42 +8411,6 @@
       "source": "Official restaurant site / current business listing"
     },
     {
-      "name": "Anthem Yacht Club \u0026 Marina",
-      "category": "waterfront_restaurants",
-      "city": "Oakley, CA",
-      "lat": 38.01920262,
-      "lon": -121.7472489,
-      "address": "115 Lauritzen Lane, Oakley, CA 94561",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:399:waterfront_restaurants"
-    },
-    {
-      "name": "Big Break Marina",
-      "category": "waterfront_restaurants",
-      "city": "Oakley, CA",
-      "lat": 38.01229663,
-      "lon": -121.73269139,
-      "address": "100 Big Break Road, Oakley, CA 94561",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:402:waterfront_restaurants"
-    },
-    {
-      "name": "Pittsburg Marina",
-      "category": "waterfront_restaurants",
-      "city": "Pittsburg, CA",
-      "lat": 38.03600252,
-      "lon": -121.88315024,
-      "address": "51 - E Marina Boulevard, Pittsburg, CA 94565",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:454:waterfront_restaurants"
-    },
-    {
       "name": "The Waterfront Grill \u0026 Cafe",
       "category": "waterfront_restaurants",
       "city": "Pittsburg, CA",
@@ -8984,42 +8420,6 @@
       "coord_source": "curated_explicit",
       "status": "explicit",
       "source": "Pittsburg Marina / current business listing"
-    },
-    {
-      "name": "Pete's Harbor",
-      "category": "waterfront_restaurants",
-      "city": "Redwood City, CA",
-      "lat": 37.50040587,
-      "lon": -122.22220227,
-      "address": "1 Uccelli Boulevard, Redwood City, CA 94063",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:491:waterfront_restaurants"
-    },
-    {
-      "name": "Port of Redwood City Marina",
-      "category": "waterfront_restaurants",
-      "city": "Redwood City, CA",
-      "lat": 37.50292078,
-      "lon": -122.21125454,
-      "address": "451 Seaport Court, Redwood City, CA 94063",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:490:waterfront_restaurants"
-    },
-    {
-      "name": "Redwood City Municipal Marina",
-      "category": "waterfront_restaurants",
-      "city": "Redwood City, CA",
-      "lat": 37.50268358,
-      "lon": -122.21489474,
-      "address": "451 Seaport Court, Redwood City, CA 94063",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:489:waterfront_restaurants"
     },
     {
       "name": "Lara's Fine Dining",
@@ -9033,42 +8433,6 @@
       "source": "Official restaurant site / current business listing"
     },
     {
-      "name": "Marina Bay Yacht Harbor - Richmond Marina",
-      "category": "waterfront_restaurants",
-      "city": "Richmond, CA",
-      "lat": 37.91373895,
-      "lon": -122.35473778,
-      "address": "1340 Marina Way South, Richmond, CA 94804",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:460:waterfront_restaurants"
-    },
-    {
-      "name": "Point San Pablo Yacht Harbor",
-      "category": "waterfront_restaurants",
-      "city": "Richmond, CA",
-      "lat": 37.96201141,
-      "lon": -122.41857017,
-      "address": "1900 Western Drive, Richmond, CA 94807",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:462:waterfront_restaurants"
-    },
-    {
-      "name": "Richmond Yacht Club",
-      "category": "waterfront_restaurants",
-      "city": "Richmond, CA",
-      "lat": 37.91017756,
-      "lon": -122.3834102,
-      "address": "351 Brickyard Cove Road, Richmond, CA 94807",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:463:waterfront_restaurants"
-    },
-    {
       "name": "Sailing Goat",
       "category": "waterfront_restaurants",
       "city": "Richmond, CA",
@@ -9078,66 +8442,6 @@
       "coord_source": "curated_explicit",
       "status": "explicit",
       "source": "Official restaurant site / Point San Pablo Harbor"
-    },
-    {
-      "name": "Delta Marina Yacht Harbor",
-      "category": "waterfront_restaurants",
-      "city": "Rio Vista, CA",
-      "lat": 38.14872553,
-      "lon": -121.69185238,
-      "address": "100 Marina Drive, Rio Vista, CA 94571",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:388:waterfront_restaurants"
-    },
-    {
-      "name": "Freeport Marina",
-      "category": "waterfront_restaurants",
-      "city": "Sacramento, CA",
-      "lat": 38.4567981,
-      "lon": -121.50148577,
-      "address": "8250 Freeport Boulevard, Sacramento, CA 95832",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:648:waterfront_restaurants"
-    },
-    {
-      "name": "River View Marina",
-      "category": "waterfront_restaurants",
-      "city": "Sacramento, CA",
-      "lat": 38.60503064,
-      "lon": -121.53213566,
-      "address": "1801 Garden Highway, Sacramento, CA 95833",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:627:waterfront_restaurants"
-    },
-    {
-      "name": "Riverbank Marina",
-      "category": "waterfront_restaurants",
-      "city": "Sacramento, CA",
-      "lat": 38.60396462,
-      "lon": -121.51701007,
-      "address": "1371 Garden Highway, Sacramento, CA 95833",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:631:waterfront_restaurants"
-    },
-    {
-      "name": "The Virgin Sturgeon",
-      "category": "waterfront_restaurants",
-      "city": "Sacramento, CA",
-      "lat": 38.60468835,
-      "lon": -121.52266778,
-      "address": "1577 Garden Hwy, Sacramento, CA 95833",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:945:waterfront_restaurants"
     },
     {
       "name": "Angler",
@@ -9184,30 +8488,6 @@
       "source": "Current business listing"
     },
     {
-      "name": "Pier 39 Marina",
-      "category": "waterfront_restaurants",
-      "city": "San Francisco, CA",
-      "lat": 37.80852796,
-      "lon": -122.40916755,
-      "address": "Beach \u0026 Embarcadero, San Francisco, CA 94133",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:431:waterfront_restaurants"
-    },
-    {
-      "name": "San Francisco Boat Works",
-      "category": "waterfront_restaurants",
-      "city": "San Francisco, CA",
-      "lat": 37.76383973,
-      "lon": -122.38657259,
-      "address": "835 Terry A. Francois Street, San Francisco, CA 94158",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:1040:waterfront_restaurants"
-    },
-    {
       "name": "Scoma's Restaurant",
       "category": "waterfront_restaurants",
       "city": "San Francisco, CA",
@@ -9217,18 +8497,6 @@
       "coord_source": "curated_explicit",
       "status": "explicit",
       "source": "Fisherman's Wharf / current business listing"
-    },
-    {
-      "name": "Treasure Isle Marina (An Almar Marina)",
-      "category": "waterfront_restaurants",
-      "city": "San Francisco, CA",
-      "lat": 37.816506,
-      "lon": -122.370183,
-      "address": "1 Clipper Cove Way, San Francisco, CA 94130",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:426:waterfront_restaurants"
     },
     {
       "name": "Waterbar",
@@ -9297,18 +8565,6 @@
       "source": "City of Santa Cruz Wharf dining directory"
     },
     {
-      "name": "Santa Cruz Harbor (South Harbor Launch Ramp)",
-      "category": "waterfront_restaurants",
-      "city": "Santa Cruz, CA",
-      "lat": 36.963929,
-      "lon": -122.00086,
-      "address": "135 5th Avenue, Santa Cruz, CA 95062",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:51:waterfront_restaurants"
-    },
-    {
       "name": "Stagnaro Bros. Seafood",
       "category": "waterfront_restaurants",
       "city": "Santa Cruz, CA",
@@ -9340,18 +8596,6 @@
       "coord_source": "curated_explicit",
       "status": "explicit",
       "source": "Visit Sausalito / current business listing"
-    },
-    {
-      "name": "Clipper Yacht Harbor",
-      "category": "waterfront_restaurants",
-      "city": "Sausalito, CA",
-      "lat": 37.87031779,
-      "lon": -122.49861956,
-      "address": "310 Harbor Drive, Sausalito, CA 94965",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:406:waterfront_restaurants"
     },
     {
       "name": "Fish.",
@@ -9420,42 +8664,6 @@
       "source": "Visit Sausalito / current business listing"
     },
     {
-      "name": "Travis Marina",
-      "category": "waterfront_restaurants",
-      "city": "Sausalito, CA",
-      "lat": 37.83386787,
-      "lon": -122.47548351,
-      "address": "679 Sommerville rd, Sausalito, CA 94965",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:422:waterfront_restaurants"
-    },
-    {
-      "name": "Oyster Point Marina",
-      "category": "waterfront_restaurants",
-      "city": "South San Francisco, CA",
-      "lat": 37.66256575,
-      "lon": -122.37839595,
-      "address": "95 Harbor Master Road, #1, South San Francisco, CA 94080",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:496:waterfront_restaurants"
-    },
-    {
-      "name": "Bullfrog Landing Marina",
-      "category": "waterfront_restaurants",
-      "city": "Stockton, CA",
-      "lat": 37.94375204,
-      "lon": -121.53132999,
-      "address": "17251 Bacon Island Road, Stockton, CA 95219",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:921:waterfront_restaurants"
-    },
-    {
       "name": "Delta Bistro \u0026 Lounge",
       "category": "waterfront_restaurants",
       "city": "Stockton, CA",
@@ -9478,18 +8686,6 @@
       "source": "Official restaurant site / Visit Stockton"
     },
     {
-      "name": "Herman \u0026 Helen's Marina",
-      "category": "waterfront_restaurants",
-      "city": "Stockton, CA",
-      "lat": 38.06002902,
-      "lon": -121.49958046,
-      "address": "15135 West Eight Mile Road, Stockton, CA 95219",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:883:waterfront_restaurants"
-    },
-    {
       "name": "King Island Bar \u0026 Grill",
       "category": "waterfront_restaurants",
       "city": "Stockton, CA",
@@ -9499,18 +8695,6 @@
       "coord_source": "curated_explicit",
       "status": "explicit",
       "source": "Official resort site / California State Parks / current marina listing"
-    },
-    {
-      "name": "Lost Isle",
-      "category": "waterfront_restaurants",
-      "city": "Stockton, CA",
-      "lat": 37.99846864,
-      "lon": -121.45020924,
-      "address": "Light 24, Stockton Deepwater Channel, Stockton, CA 95207",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:926:waterfront_restaurants"
     },
     {
       "name": "Nena's Mexican Cuisine",
@@ -9524,30 +8708,6 @@
       "source": "Official restaurant site / Visit Stockton"
     },
     {
-      "name": "Paradise Point on the Delta",
-      "category": "waterfront_restaurants",
-      "city": "Stockton, CA",
-      "lat": 38.04421605,
-      "lon": -121.41884366,
-      "address": "8095 Rio Blanco Road, Stockton, CA 95219",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:851:waterfront_restaurants"
-    },
-    {
-      "name": "Stockton Downtown Marina",
-      "category": "waterfront_restaurants",
-      "city": "Stockton, CA",
-      "lat": 37.95307274,
-      "lon": -121.29805708,
-      "address": "333 Tuleburg Levee, Stockton, CA 95203",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:947:waterfront_restaurants"
-    },
-    {
       "name": "The House of Pita - Stockton",
       "category": "waterfront_restaurants",
       "city": "Stockton, CA",
@@ -9559,42 +8719,6 @@
       "source": "Official restaurant site / Visit Stockton"
     },
     {
-      "name": "Turner Cut Resort",
-      "category": "waterfront_restaurants",
-      "city": "Stockton, CA",
-      "lat": 37.98209376,
-      "lon": -121.47281393,
-      "address": "12888 Neugebauer Road, Stockton, CA 95206",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:887:waterfront_restaurants"
-    },
-    {
-      "name": "Union Point Marina",
-      "category": "waterfront_restaurants",
-      "city": "Stockton, CA",
-      "lat": 37.8918398,
-      "lon": -121.48758858,
-      "address": "14201 Marengo Rd (Hwy 4), Stockton, CA 95206",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:1342:waterfront_restaurants"
-    },
-    {
-      "name": "Village West Marina",
-      "category": "waterfront_restaurants",
-      "city": "Stockton, CA",
-      "lat": 38.0022123,
-      "lon": -121.36864915,
-      "address": "6649 Embarcadero Drive, Stockton, CA 95219",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:849:waterfront_restaurants"
-    },
-    {
       "name": "Windmill Cove Bar \u0026 Grill",
       "category": "waterfront_restaurants",
       "city": "Stockton, CA",
@@ -9604,18 +8728,6 @@
       "coord_source": "curated_explicit",
       "status": "explicit",
       "source": "Official resort site / Visit Stockton / California State Parks"
-    },
-    {
-      "name": "Windmill Cove Marina \u0026 RV Park",
-      "category": "waterfront_restaurants",
-      "city": "Stockton, CA",
-      "lat": 37.98939289,
-      "lon": -121.40574039,
-      "address": "7600 Windmill Cove Road, Stockton, CA 95206",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:854:waterfront_restaurants"
     },
     {
       "name": "Luna Blu",
@@ -9662,30 +8774,6 @@
       "source": "Current business listing"
     },
     {
-      "name": "Tracy Oasis Marina",
-      "category": "waterfront_restaurants",
-      "city": "Tracy, CA",
-      "lat": 37.81902264,
-      "lon": -121.46043766,
-      "address": "12450 West Grimes Road, Tracy, CA 95304",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:858:waterfront_restaurants"
-    },
-    {
-      "name": "Glen Cove Marina",
-      "category": "waterfront_restaurants",
-      "city": "Vallejo, CA",
-      "lat": 38.06816969,
-      "lon": -122.20625271,
-      "address": "2000 Glen Cove Rd, Vallejo, CA 94591",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:450:waterfront_restaurants"
-    },
-    {
       "name": "Manny's Steakhouse Vallejo",
       "category": "waterfront_restaurants",
       "city": "Vallejo, CA",
@@ -9706,66 +8794,6 @@
       "coord_source": "curated_explicit",
       "status": "explicit",
       "source": "Current business listing"
-    },
-    {
-      "name": "Vallejo Municipal Marina",
-      "category": "waterfront_restaurants",
-      "city": "Vallejo, CA",
-      "lat": 38.10900685,
-      "lon": -122.26799595,
-      "address": "42 Harbor Way, Vallejo, CA 94590",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:447:waterfront_restaurants"
-    },
-    {
-      "name": "Vallejo Yacht Club",
-      "category": "waterfront_restaurants",
-      "city": "Vallejo, CA",
-      "lat": 38.10515243,
-      "lon": -122.2666093,
-      "address": "485 Mare Island Way, Vallejo, CA 94590",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:448:waterfront_restaurants"
-    },
-    {
-      "name": "Walnut Grove Marina",
-      "category": "waterfront_restaurants",
-      "city": "Walnut Grove, CA",
-      "lat": 38.23179303,
-      "lon": -121.50827581,
-      "address": "1400 Old Levee Road, Walnut Grove, CA 95690",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:752:waterfront_restaurants"
-    },
-    {
-      "name": "Wimpy's Marina",
-      "category": "waterfront_restaurants",
-      "city": "Walnut Grove, CA",
-      "lat": 38.22682034,
-      "lon": -121.49122035,
-      "address": "14001 West Walnut Grove Road, Walnut Grove, CA 95690",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:859:waterfront_restaurants"
-    },
-    {
-      "name": "Sacramento Yacht Club",
-      "category": "waterfront_restaurants",
-      "city": "West Sacramento, CA",
-      "lat": 38.53673965,
-      "lon": -121.5190756,
-      "address": "3365 South River Road, West Sacramento, CA 95691",
-      "coord_source": "dbw_listing",
-      "status": "source_provided",
-      "source": "California State Parks/DBW",
-      "source_id": "dbw:629:waterfront_restaurants"
     },
     {
       "name": "Alameda community sailing center",
@@ -9834,6 +8862,18 @@
       "source_id": "dbw:481:yacht_clubs"
     },
     {
+      "name": "South Bay Yacht Club",
+      "category": "yacht_clubs",
+      "city": "Alviso, CA",
+      "lat": 37.42690738,
+      "lon": -121.97910241,
+      "address": "1491 Hope St, Alviso, CA 95002",
+      "coord_source": "dbw_listing",
+      "status": "source_provided",
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:467:yacht_clubs"
+    },
+    {
       "name": "Bridge Marina Yacht Club",
       "category": "yacht_clubs",
       "city": "Antioch, CA",
@@ -9861,13 +8901,13 @@
       "name": "Benicia Yacht Club",
       "category": "yacht_clubs",
       "city": "Benicia, CA",
-      "lat": 38.0464656,
-      "lon": -122.1577657,
-      "address": "400 East 2nd Street, Benicia, CA, 94510",
-      "coord_source": "osm_geometry",
+      "lat": 38.04631319,
+      "lon": -122.15770075,
+      "address": "400 East Second Street, Benicia, CA 94510",
+      "coord_source": "dbw_listing",
       "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/362299099"
+      "source": "California State Parks/DBW",
+      "source_id": "dbw:452:yacht_clubs"
     },
     {
       "name": "Olympic Circle Sailing Club",
@@ -9892,18 +8932,6 @@
       "status": "source_provided",
       "source": "California State Parks/DBW",
       "source_id": "dbw:437:yacht_clubs"
-    },
-    {
-      "name": "Berkeley Yacht Club",
-      "category": "yacht_clubs",
-      "city": "Berkeley, CA",
-      "lat": 37.8662052,
-      "lon": -122.3174887,
-      "address": "1 Seawall Drive, Berkeley, CA, 94710",
-      "coord_source": "osm_geometry",
-      "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/117767449"
     },
     {
       "name": "Inspire Sailing",
@@ -10048,18 +9076,6 @@
       "status": "source_provided",
       "source": "OpenStreetMap",
       "source_id": "osm:node/11193713659"
-    },
-    {
-      "name": "South Bay Yacht Club",
-      "category": "yacht_clubs",
-      "city": "San Jose, CA",
-      "lat": 37.4269149,
-      "lon": -121.9790404,
-      "address": "1491 Hope Street, San Jose, CA, 95002",
-      "coord_source": "osm_geometry",
-      "status": "source_provided",
-      "source": "OpenStreetMap",
-      "source_id": "osm:way/290780421"
     },
     {
       "name": "Sausalito Yacht Club",

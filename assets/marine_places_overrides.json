@@ -1,6 +1,14 @@
 {
   "add": [
     {
+      "name": "Antioch Marina Launch Ramp",
+      "category": "launch_ramps",
+      "city": "Antioch, CA",
+      "lat": 38.01889,
+      "lon": -121.81796,
+      "note": "Pinned local override for the launch ramp near Antioch Marina."
+    },
+    {
       "name": "Pittsburg Marina",
       "category": "marinas",
       "city": "Pittsburg, CA",
@@ -106,9 +114,65 @@
   ],
   "exclude": [
     {
+      "name": "Garcia Bend Park Launch Ramp",
+      "source_id": "dbw:630:marinas",
+      "category": "marinas"
+    },
+    {
+      "name": "Central Basin",
+      "source_id": "dbw:1279:marinas",
+      "category": "marinas"
+    },
+    {
+      "name": "Pillar Point Boat Launching Facility",
+      "source_id": "dbw:1139:boatyards",
+      "category": "boatyards"
+    },
+    {
+      "name": "Pillar Point Boat Launching Facility",
+      "source_id": "dbw:1139:fuel_docks",
+      "category": "fuel_docks"
+    },
+    {
+      "name": "Pillar Point Boat Launching Facility",
+      "source_id": "dbw:1139:marinas",
+      "category": "marinas"
+    },
+    {
+      "name": "Pillar Point Boat Launching Facility",
+      "source_id": "dbw:1139:marine_supply",
+      "category": "marine_supply"
+    },
+    {
+      "name": "Pillar Point Harbor",
+      "source_id": "dbw:524:launch_ramps",
+      "category": "launch_ramps"
+    },
+    {
       "name": "Pittsburg Marina",
       "category": "boatyards"
+    },
+    {
+      "name": "Fortmann Marina",
+      "source_id": "osm:way/372261211",
+      "category": "marinas"
+    },
+    {
+      "name": "Ballena Isle Marina",
+      "source_id": "osm:node/3462777776",
+      "category": "marinas"
     }
   ],
-  "patch": []
+  "patch": [
+    {
+      "match": {
+        "source_id": "osm:node/3510519199",
+        "category": "launch_ramps"
+      },
+      "set": {
+        "name": "Pittsburg Boat Launch",
+        "city": "Pittsburg, CA"
+      }
+    }
+  ]
 }

@@ -28,4 +28,17 @@ else
     echo "No new corrected restaurant file found; using existing ./assets/marine_restaurants.json"
 fi
 
+# Install newest curated marine ferry terminal dataset, if present.
+ferry_files=(
+    "$HOME"/Downloads/marine_ferry_terminals-v*.json
+)
+
+if [ ${#ferry_files[@]} -gt 0 ]; then
+    latest_ferries=$(ls -t "${ferry_files[@]}" | head -1)
+    echo "Installing $(basename "$latest_ferries")"
+    mv -f "$latest_ferries" ./assets/marine_ferry_terminals.json
+else
+    echo "No new ferry terminal file found; using existing ./assets/marine_ferry_terminals.json"
+fi
+
 go run ./cmd/marineplacesgen.go "$@"

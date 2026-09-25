@@ -1,0 +1,205 @@
+{
+  "version": "3",
+  "updated": "2026-09-25",
+  "source_note": "Curated baseline of active San Francisco Bay ferry terminals, seeded from San Francisco Bay Ferry/WETA, Golden Gate Ferry, 511, and local agency terminal listings. Coordinates are explicit where a reliable terminal coordinate was available; otherwise the generator geocodes the official terminal address once and caches the result. OpenStreetMap is supplemental coverage. Version 2 adds San Francisco special-event/excursion terminals identified during map review: Oracle Park, Pier 48/Chase Center, Pier 41, and Pier 33/Alcatraz. Version 3 pins audited OSM terminal coordinates for Oracle Park, Pier 48.5/Chase Center, Pier 33/Alcatraz departure, and Alameda Seaplane Lagoon, and adds Alcatraz Island and Treasure Island ferry terminals.",
+  "places": [
+    {
+      "name": "Downtown San Francisco Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "San Francisco, CA",
+      "address": "1 Ferry Building, San Francisco, CA 94105",
+      "website": "https://sanfranciscobayferry.com/",
+      "source": "San Francisco Bay Ferry / WETA",
+      "source_id": "curated:ferry:sf-downtown"
+    },
+    {
+      "name": "Oakland Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "Oakland, CA",
+      "address": "10 Clay Street, Oakland, CA 94607",
+      "website": "https://sanfranciscobayferry.com/",
+      "source": "San Francisco Bay Ferry / WETA",
+      "source_id": "curated:ferry:oakland"
+    },
+    {
+      "name": "Main Street Alameda Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "Alameda, CA",
+      "address": "2990 Main Street, Alameda, CA 94501",
+      "website": "https://sanfranciscobayferry.com/",
+      "source": "San Francisco Bay Ferry / WETA",
+      "source_id": "curated:ferry:alameda-main"
+    },
+    {
+      "name": "Alameda Seaplane Lagoon Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "Alameda, CA",
+      "address": "1701 Ferry Point Road, Alameda, CA 94501",
+      "website": "https://sanfranciscobayferry.com/",
+      "source": "San Francisco Bay Ferry / WETA",
+      "source_id": "curated:ferry:alameda-seaplane",
+      "lat": 37.7771558,
+      "lon": -122.299227,
+      "note": "Explicit terminal coordinate pinned from reviewed OSM ferry-terminal audit."
+    },
+    {
+      "name": "Harbor Bay Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "Alameda, CA",
+      "address": "215 Adelphian Way, Alameda, CA 94502",
+      "website": "https://sanfranciscobayferry.com/",
+      "source": "San Francisco Bay Ferry / WETA",
+      "source_id": "curated:ferry:harbor-bay"
+    },
+    {
+      "name": "Richmond Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "Richmond, CA",
+      "address": "1453 Harbour Way South, Richmond, CA 94804",
+      "website": "https://sanfranciscobayferry.com/project/richmond-ferry-terminal/",
+      "source": "San Francisco Bay Ferry / WETA",
+      "source_id": "curated:ferry:richmond"
+    },
+    {
+      "name": "South San Francisco Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "South San Francisco, CA",
+      "address": "911 Marina Boulevard, South San Francisco, CA 94080",
+      "website": "https://sanfranciscobayferry.com/",
+      "source": "San Francisco Bay Ferry / WETA",
+      "source_id": "curated:ferry:south-san-francisco"
+    },
+    {
+      "name": "Vallejo Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "Vallejo, CA",
+      "address": "289 Mare Island Way, Vallejo, CA 94590",
+      "website": "https://sanfranciscobayferry.com/",
+      "source": "San Francisco Bay Ferry / WETA",
+      "source_id": "curated:ferry:vallejo"
+    },
+    {
+      "name": "Mare Island Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "Vallejo, CA",
+      "address": "1050 Nimitz Avenue, Vallejo, CA 94592",
+      "website": "https://sanfranciscobayferry.com/",
+      "source": "San Francisco Bay Ferry / WETA",
+      "source_id": "curated:ferry:mare-island"
+    },
+    {
+      "name": "Larkspur Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "Larkspur, CA",
+      "lat": 37.944535646072,
+      "lon": -122.50864473864,
+      "address": "101 E. Sir Francis Drake Blvd, Larkspur, CA 94939",
+      "website": "https://www.goldengate.org/ferry/riding-the-ferry/terminal-locations-parking/",
+      "source": "Golden Gate Ferry / 511",
+      "source_id": "curated:ferry:larkspur"
+    },
+    {
+      "name": "Sausalito Ferry Landing",
+      "category": "ferry_terminals",
+      "city": "Sausalito, CA",
+      "lat": 37.856958,
+      "lon": -122.479339,
+      "address": "Humboldt St & Anchor St, Sausalito, CA 94965",
+      "website": "https://www.goldengate.org/ferry/riding-the-ferry/terminal-locations-parking/",
+      "source": "Golden Gate Ferry / 511",
+      "source_id": "curated:ferry:sausalito"
+    },
+    {
+      "name": "Tiburon Ferry Landing",
+      "category": "ferry_terminals",
+      "city": "Tiburon, CA",
+      "lat": 37.872749222206,
+      "lon": -122.45540705521,
+      "address": "21 Main Street, Tiburon, CA 94920",
+      "website": "https://www.goldengate.org/ferry/riding-the-ferry/terminal-locations-parking/",
+      "source": "Golden Gate Ferry / 511",
+      "source_id": "curated:ferry:tiburon"
+    },
+    {
+      "name": "Ayala Cove Ferry Terminal",
+      "aliases": [
+        "Angel Island Ferry Landing"
+      ],
+      "category": "ferry_terminals",
+      "city": "Tiburon, CA",
+      "lat": 37.8686,
+      "lon": -122.4348,
+      "address": "Ayala Cove, Angel Island State Park, Tiburon, CA 94920",
+      "website": "https://www.goldengate.org/ferry/schedules-maps/",
+      "source": "Golden Gate Ferry / Angel Island service",
+      "source_id": "curated:ferry:angel-island"
+    },
+    {
+      "name": "Oracle Park Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "San Francisco, CA",
+      "address": "McCovey Cove Promenade, San Francisco, CA 94107",
+      "website": "https://sanfranciscobayferry.com/",
+      "source": "San Francisco Bay Ferry / map-verified event terminal",
+      "source_id": "curated:ferry:oracle-park",
+      "lat": 37.778192,
+      "lon": -122.387046,
+      "note": "Explicit terminal coordinate pinned from reviewed OSM ferry-terminal audit."
+    },
+    {
+      "name": "Pier 48 / Chase Center Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "San Francisco, CA",
+      "address": "Pier 48, San Francisco, CA 94158",
+      "website": "https://sanfranciscobayferry.com/",
+      "source": "San Francisco Bay Ferry / map-verified event terminal",
+      "source_id": "curated:ferry:pier-48-chase",
+      "lat": 37.7750372,
+      "lon": -122.3863939,
+      "note": "Explicit terminal coordinate pinned from reviewed OSM ferry-terminal audit."
+    },
+    {
+      "name": "Pier 41 Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "San Francisco, CA",
+      "address": "Pier 41, San Francisco, CA 94133",
+      "source": "Bay ferry/operator service / map-verified terminal",
+      "source_id": "curated:ferry:pier-41"
+    },
+    {
+      "name": "Pier 33 Alcatraz Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "San Francisco, CA",
+      "address": "Pier 33, The Embarcadero, San Francisco, CA 94111",
+      "website": "https://www.cityexperiences.com/san-francisco/city-cruises/alcatraz/",
+      "source": "Alcatraz City Cruises / map-verified terminal",
+      "source_id": "curated:ferry:pier-33-alcatraz",
+      "lat": 37.8069704,
+      "lon": -122.404159,
+      "note": "Explicit terminal coordinate pinned from reviewed OSM ferry-terminal audit."
+    },
+    {
+      "name": "Alcatraz Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "San Francisco, CA",
+      "lat": 37.8266612,
+      "lon": -122.420808,
+      "address": "Alcatraz Island, San Francisco, CA 94133",
+      "website": "https://www.cityexperiences.com/san-francisco/city-cruises/alcatraz/",
+      "source": "Alcatraz City Cruises / reviewed OSM terminal",
+      "source_id": "curated:ferry:alcatraz-island",
+      "note": "Arrival/departure landing on Alcatraz Island; explicit coordinate from reviewed OSM ferry-terminal audit."
+    },
+    {
+      "name": "Treasure Island Ferry Terminal",
+      "category": "ferry_terminals",
+      "city": "San Francisco, CA",
+      "lat": 37.8161599,
+      "lon": -122.3732006,
+      "address": "Treasure Island, San Francisco, CA 94130",
+      "source": "Treasure Island ferry service / reviewed OSM terminal",
+      "source_id": "curated:ferry:treasure-island",
+      "note": "Explicit coordinate from reviewed OSM ferry-terminal audit."
+    }
+  ]
+}
