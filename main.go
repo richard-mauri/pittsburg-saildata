@@ -29,8 +29,8 @@ import (
 )
 
 const (
-	appVersion                      = "1.10.0"
-	buildVersion                    = "v263"
+	appVersion                      = "1.11.0"
+	buildVersion                    = "v272"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -2261,6 +2261,152 @@ func runServer(
 		if err := json.NewEncoder(w).Encode(feed); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
+	})
+
+	// ALERTCalifornia / UC San Diego camera locations for the optional map
+	// overlay. Query only the current browser viewport, but page through the
+	// ArcGIS service so dense views are not silently truncated at its per-query
+	// record limit. The browser applies the display-density policy.
+	mux.HandleFunc("/alertcalifornia-cameras", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		q := r.URL.Query()
+		parseCoord := func(name string) (float64, error) {
+			value := strings.TrimSpace(q.Get(name))
+			if value == "" {
+				return 0, fmt.Errorf("%s is required", name)
+			}
+			parsed, err := strconv.ParseFloat(value, 64)
+			if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+				return 0, fmt.Errorf("%s must be a finite number", name)
+			}
+			return parsed, nil
+		}
+
+		west, err := parseCoord("west")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		south, err := parseCoord("south")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		east, err := parseCoord("east")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		north, err := parseCoord("north")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if west < -180 || west > 180 || east < -180 || east > 180 ||
+			south < -90 || south > 90 || north < -90 || north > 90 ||
+			west >= east || south >= north {
+			http.Error(w, "invalid map bounds", http.StatusBadRequest)
+			return
+		}
+
+		const pageSize = 50
+		const maxCameraRecords = 5000
+		allFeatures := make([]json.RawMessage, 0, pageSize)
+		client := &http.Client{Timeout: 12 * time.Second}
+
+		type arcGISCameraPage struct {
+			Type     string            `json:"type"`
+			Features []json.RawMessage `json:"features"`
+			Error    *struct {
+				Code    int      `json:"code"`
+				Message string   `json:"message"`
+				Details []string `json:"details"`
+			} `json:"error,omitempty"`
+		}
+
+		for offset := 0; offset < maxCameraRecords; offset += pageSize {
+			upstream, err := url.Parse("https://services8.arcgis.com/X84q166Srnyl4JMV/ArcGIS/rest/services/ALERTCalifornia_Camera_Feed/FeatureServer/0/query")
+			if err != nil {
+				http.Error(w, "camera service configuration error", http.StatusInternalServerError)
+				return
+			}
+			params := upstream.Query()
+			params.Set("where", "1=1")
+			params.Set("geometry", fmt.Sprintf("%.6f,%.6f,%.6f,%.6f", west, south, east, north))
+			params.Set("geometryType", "esriGeometryEnvelope")
+			params.Set("inSR", "4326")
+			params.Set("spatialRel", "esriSpatialRelIntersects")
+			params.Set("outFields", "OBJECTID,cameraName,siteId,organization,isActive,isOnline,county,cameraURL,networkURL,positionPan,positionTilt,viewZoomScale,viewTime,imageURL")
+			params.Set("orderByFields", "OBJECTID ASC")
+			params.Set("resultOffset", strconv.Itoa(offset))
+			params.Set("resultRecordCount", strconv.Itoa(pageSize))
+			params.Set("returnGeometry", "true")
+			params.Set("outSR", "4326")
+			params.Set("geometryPrecision", "6")
+			params.Set("f", "geojson")
+			upstream.RawQuery = params.Encode()
+
+			req, err := http.NewRequest(http.MethodGet, upstream.String(), nil)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			req.Header.Set("Accept", "application/geo+json, application/json")
+			req.Header.Set("User-Agent", "pittsburg-saildata/"+appVersion)
+
+			resp, err := client.Do(req)
+			if err != nil {
+				http.Error(w, "ALERTCalifornia camera service unavailable: "+err.Error(), http.StatusBadGateway)
+				return
+			}
+			body, readErr := ioutil.ReadAll(io.LimitReader(resp.Body, 6<<20))
+			resp.Body.Close()
+			if readErr != nil {
+				http.Error(w, "unable to read ALERTCalifornia camera response", http.StatusBadGateway)
+				return
+			}
+			if resp.StatusCode != http.StatusOK {
+				detail := strings.TrimSpace(string(body))
+				if len(detail) > 320 {
+					detail = detail[:320]
+				}
+				http.Error(w, fmt.Sprintf("ALERTCalifornia camera service HTTP %d: %s", resp.StatusCode, detail), http.StatusBadGateway)
+				return
+			}
+
+			var page arcGISCameraPage
+			if err := json.Unmarshal(body, &page); err != nil {
+				http.Error(w, "unable to decode ALERTCalifornia camera response", http.StatusBadGateway)
+				return
+			}
+			if page.Error != nil {
+				detail := strings.TrimSpace(page.Error.Message)
+				if len(page.Error.Details) > 0 {
+					detail += ": " + strings.Join(page.Error.Details, "; ")
+				}
+				http.Error(w, fmt.Sprintf("ALERTCalifornia camera service error %d: %s", page.Error.Code, detail), http.StatusBadGateway)
+				return
+			}
+
+			allFeatures = append(allFeatures, page.Features...)
+			if len(page.Features) < pageSize {
+				break
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/geo+json; charset=utf-8")
+		w.Header().Set("Cache-Control", "private, max-age=15")
+		_ = json.NewEncoder(w).Encode(struct {
+			Type     string            `json:"type"`
+			Features []json.RawMessage `json:"features"`
+		}{
+			Type:     "FeatureCollection",
+			Features: allFeatures,
+		})
 	})
 
 	mux.HandleFunc("/wind-stations", func(w http.ResponseWriter, r *http.Request) {
@@ -6053,7 +6199,7 @@ h3{margin:1.2rem 0 .35rem;color:var(--navy)}
 <p><strong>Wind:</strong> recent NOAA/NDBC observations, wind history, and nearby station alternatives.</p>
 <p><strong>Currents:</strong> NOAA CO-OPS ebb, flood, slack, maximum-current timing, and 1/3/7-day current graphs.</p>
 <p><strong>Weather:</strong> NWS local conditions/forecast context and forecast-zone information for a selected map point.</p>
-<p><strong>Map context:</strong> street, nautical, satellite, and hybrid basemaps plus forecast-zone, smoke, sea-surface-temperature, cloud-cover, and radar overlays.</p>
+<p><strong>Map context:</strong> street, nautical, satellite, and hybrid basemaps plus forecast-zone, smoke, sea-surface-temperature, cloud-cover, radar, and ALERTCalifornia camera overlays.</p>
 </section>
 
 <section class="card full qa">
@@ -6064,7 +6210,7 @@ h3{margin:1.2rem 0 .35rem;color:var(--navy)}
 <details><summary>What does Local Conditions show?</summary><p>For the selected map point, the app uses the NWS point forecast to show the nearby city/state label, current-hour forecast temperature, expected high/low, and a short forecast phrase.</p></details>
 <details><summary>Can I choose another wind station?</summary><p>Yes. Nearby wind-station candidates appear after you select a location. You can compare them on the map/table and choose the station you think best represents the water you care about.</p></details>
 <details><summary>Is this tide data or current data?</summary><p><strong>Current data.</strong> The graph is predicted speed and direction of moving water — flood above zero, ebb below zero, and crossings near slack. Tide height and current are related, but they are not the same thing.</p></details>
-<details><summary>What map choices are available?</summary><p>Planning and Details includes Street Map, Nautical Chart, Satellite, and Hybrid basemaps; independent forecast-zone, satellite-smoke, NOAA CoastWatch Sea Surface Temp, NOAA/NESDIS cloud-cover, and NEXRAD radar overlays; and Center Map actions for your location, entered coordinates, selected location, wind station, and currents station.</p></details>
+<details><summary>What map choices are available?</summary><p>Planning and Details includes Street Map, Nautical Chart, Satellite, and Hybrid basemaps; independent forecast-zone, satellite-smoke, NOAA CoastWatch Sea Surface Temp, NOAA/NESDIS cloud-cover, NEXRAD radar, and ALERTCalifornia camera overlays; and Center Map actions for your location, entered coordinates, selected location, wind station, and currents station.</p></details>
 <details><summary>Is this for navigation or safety decisions?</summary><p>No. It is a conditions-planning and exploration tool. Observations can be delayed or missing, station exposure differs, and current/forecast products have limitations. Use official marine forecasts, charts, notices, local knowledge, and prudent seamanship.</p></details>
 </section>
 
@@ -6342,8 +6488,8 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 .map-resize-handle[aria-grabbed="true"]{background:#edf4f6}
 body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 @media(max-width:600px){.map-resize-handle{height:22px}}
-.map-location-info-grid{display:grid;grid-template-columns:minmax(290px,.9fr) minmax(360px,1.1fr);gap:14px;align-items:stretch;margin-top:10px}.map-location-info-grid .map-coordinate-entry{margin-top:0;align-self:start}.selected-location-weather{margin-top:0;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:var(--paper);min-height:128px}.selected-location-weather-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:4px}.selected-location-weather-head strong{color:var(--navy);font-size:.95rem}.selected-location-weather-place{font-size:.84rem;font-weight:750;color:var(--ink);margin:0 0 7px}.selected-location-weather-updated{color:var(--muted);font-size:.75rem}.selected-location-weather-metrics{display:flex;gap:14px;flex-wrap:wrap;align-items:baseline}.selected-location-weather-metric{font-size:.88rem;color:var(--ink)}@media(max-width:700px){.map-location-info-grid{grid-template-columns:1fr}.selected-location-weather{min-height:0}}.selected-location-weather-metric b{color:var(--navy)}.selected-location-weather-forecast{margin:7px 0 0;color:var(--ink);font-size:.9rem}.selected-location-weather-note{margin:6px 0 0;color:var(--muted);font-size:.75rem}.selected-location-weather-error{margin:6px 0 0;color:#8b2c2c;font-size:.82rem}.map-coordinate-entry{display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-top:10px}.map-coordinate-field{display:flex;flex-direction:column;gap:3px}.map-coordinate-field label{font-size:.72rem;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}.map-coordinate-field input{width:132px;padding:7px 9px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--ink);font:inherit}.map-coordinate-use{padding:8px 12px;border:1px solid #126b91;border-radius:9px;background:#126b91;color:#fff;font-weight:850;cursor:pointer}.map-coordinate-use:hover{filter:brightness(.97)}.map-coordinate-error{font-size:.8rem;color:#9b3027;min-height:1.2em}
-.map-station-list{margin-top:12px}.map-station-list-title{font-weight:850;color:var(--navy);margin:0 0 8px}.map-station-table-wrap{max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:14px;background:#fff}.map-station-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.86rem}.map-station-table th,.map-station-table td{padding:8px 10px;border-top:1px solid var(--line);text-align:left;vertical-align:top;background:#fff}.map-station-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc}.map-station-table th{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}.map-station-table tbody tr:first-child td{border-top:0}.map-station-table a{color:var(--blue);font-weight:800;text-decoration:none}.map-station-table a:hover{text-decoration:underline}.map-scale-status{color:var(--muted);font-size:.78rem;font-weight:800;line-height:1.25;white-space:nowrap}.map-nautical-zoom-note{position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:850;background:rgba(7,31,49,.92);color:#fff;border-radius:999px;padding:7px 12px;font-size:.78rem;font-weight:850;box-shadow:0 2px 8px rgba(0,0,0,.2);pointer-events:none;white-space:nowrap;max-width:calc(100% - 32px);overflow:hidden;text-overflow:ellipsis}.map-overlay-toggle.is-unavailable{opacity:.5}.map-structure-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-structure-status[hidden]{display:none}.map-saildrone-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-saildrone-status[hidden]{display:none}.map-windbarb-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-windbarb-status[hidden]{display:none}.wind-barb-icon{background:transparent!important;border:0!important}.wind-barb-icon svg{overflow:visible;filter:drop-shadow(0 1px 1px rgba(255,255,255,.95))}.wind-barb-icon .barb-stroke{stroke:#102f44;stroke-width:2;fill:none;stroke-linecap:round;stroke-linejoin:round}.wind-barb-icon .barb-flag{fill:#102f44;stroke:#102f44;stroke-width:1}.wind-barb-icon.stale{opacity:.48}.map-undersea-feature-label{background:transparent!important;border:0!important;box-shadow:none!important;white-space:nowrap;pointer-events:none}.map-undersea-feature-label .undersea-dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;background:#ffd166;border:1px solid #20323c;vertical-align:1px;box-shadow:0 0 0 1px rgba(255,255,255,.75)}.map-undersea-feature-label .undersea-name{font-size:13px;font-weight:850;letter-spacing:.01em;color:#fff7d1;text-shadow:-2px -2px 0 #102a38,2px -2px 0 #102a38,-2px 2px 0 #102a38,2px 2px 0 #102a38,0 2px 3px rgba(0,0,0,.85)}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#2f855a}.map-dot.current{background:#7d55a6}.map-dot.saildrone{width:12px;height:12px;background:#8d3fb0;border:2px solid #fff;box-shadow:0 0 0 1px #8d3fb0}.map-dot.marine{width:12px;height:12px;border:2px solid #fff;box-shadow:0 0 0 1px rgba(16,47,68,.35)}.map-dot.marina{background:#126b91}.map-dot.boatyard{background:#7a4a21}.map-dot.fuel{background:#347a4b}.map-dot.ramp{background:#376f9c}.map-dot.ferry{background:#247f8f}.map-dot.supply{background:#805f2f}.map-dot.club{background:#6c4a91}.map-dot.restaurant{background:#a45135}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}
+.map-location-info-grid{display:grid;grid-template-columns:1fr;gap:12px;margin-top:10px}.map-location-info-grid .map-coordinate-entry{margin-top:0;align-self:start}.selected-location-weather{margin-top:0;padding:14px 16px;border:1px solid var(--line);border-radius:14px;background:var(--paper);min-height:128px}.selected-location-weather-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;margin:0 0 4px}.selected-location-weather-head strong{color:var(--navy);font-size:1rem}.selected-location-weather-place{font-size:.86rem;font-weight:750;color:var(--ink);margin:0 0 10px}.selected-location-weather-columns{display:grid;grid-template-columns:minmax(240px,.78fr) minmax(0,1.32fr);gap:18px;align-items:start}.selected-location-weather-point-column{min-width:0}.selected-location-weather-updated{color:var(--muted);font-size:.75rem}.selected-location-weather-metrics{display:flex;gap:14px;flex-wrap:wrap;align-items:baseline}.selected-location-weather-metric{font-size:.88rem;color:var(--ink)}.selected-location-weather-metric b{color:var(--navy)}.selected-location-weather-forecast{margin:7px 0 0;color:var(--ink);font-size:.9rem}.selected-location-weather-note{margin:6px 0 0;color:var(--muted);font-size:.75rem}.selected-location-weather-error{margin:6px 0 0;color:#8b2c2c;font-size:.82rem}.selected-location-weather-detail{margin:0;padding:0 0 0 18px;border-left:1px solid var(--line);min-width:0;align-self:start}.selected-location-weather-detail-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:8px}.selected-location-weather-detail-head strong{color:var(--navy);font-size:.92rem}.selected-location-point-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:7px}.selected-location-point-head strong{color:var(--navy);font-size:.88rem}.selected-location-weather-context{margin:7px 0 0;color:var(--muted);font-size:.82rem;line-height:1.4}@media(max-width:760px){.selected-location-weather{min-height:0}.selected-location-weather-columns{grid-template-columns:1fr;gap:12px}.selected-location-weather-detail{padding:12px 0 0;border-left:0;border-top:1px solid var(--line)}}.map-coordinate-entry{display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-top:10px}.map-coordinate-field{display:flex;flex-direction:column;gap:3px}.map-coordinate-field label{font-size:.72rem;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}.map-coordinate-field input{width:132px;padding:7px 9px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--ink);font:inherit}.map-coordinate-use{padding:8px 12px;border:1px solid #126b91;border-radius:9px;background:#126b91;color:#fff;font-weight:850;cursor:pointer}.map-coordinate-use:hover{filter:brightness(.97)}.map-coordinate-error{font-size:.8rem;color:#9b3027;min-height:1.2em}
+.map-station-list{margin-top:12px}.map-station-list-title{font-weight:850;color:var(--navy);margin:0 0 8px}.map-station-table-wrap{max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:14px;background:#fff}.map-station-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.86rem}.map-station-table th,.map-station-table td{padding:8px 10px;border-top:1px solid var(--line);text-align:left;vertical-align:top;background:#fff}.map-station-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc}.map-station-table th{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}.map-station-table tbody tr:first-child td{border-top:0}.map-station-table a{color:var(--blue);font-weight:800;text-decoration:none}.map-station-table a:hover{text-decoration:underline}.map-scale-status{color:var(--muted);font-size:.78rem;font-weight:800;line-height:1.25;white-space:nowrap}.map-nautical-zoom-note{position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:850;background:rgba(7,31,49,.92);color:#fff;border-radius:999px;padding:7px 12px;font-size:.78rem;font-weight:850;box-shadow:0 2px 8px rgba(0,0,0,.2);pointer-events:none;white-space:nowrap;max-width:calc(100% - 32px);overflow:hidden;text-overflow:ellipsis}.map-overlay-toggle.is-unavailable{opacity:.5}.map-structure-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-structure-status[hidden]{display:none}.map-saildrone-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-saildrone-status[hidden]{display:none}.map-alertcalifornia-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-alertcalifornia-status[hidden]{display:none}.alertcalifornia-panel{position:absolute;top:14px;right:14px;z-index:900;width:min(330px,calc(100% - 76px));max-height:calc(100% - 28px);display:flex;flex-direction:column;background:#fff;border:1px solid rgba(16,47,68,.22);border-radius:14px;box-shadow:0 12px 30px rgba(7,31,49,.28);overflow:hidden}.alertcalifornia-panel[hidden]{display:none}.alertcalifornia-panel-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 11px 8px;border-bottom:1px solid var(--line);background:#f8fbfc}.alertcalifornia-panel-title{min-width:0;color:var(--navy);font-weight:900;line-height:1.2;overflow-wrap:anywhere}.alertcalifornia-panel-close{flex:0 0 auto;width:30px;height:30px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--blue);font:inherit;font-size:1.25rem;line-height:1;cursor:pointer}.alertcalifornia-panel-close:hover{background:var(--paper)}.alertcalifornia-panel-body{padding:10px 11px 12px;overflow:auto;-webkit-overflow-scrolling:touch}.alertcalifornia-panel img{display:block;width:100%;height:auto;max-height:190px;object-fit:contain;margin:8px 0 7px;border-radius:8px;background:#eef3f5}.alertcalifornia-panel .camera-meta{margin-top:4px;color:#5f7380;font-size:.78rem}.alertcalifornia-panel .camera-link{display:inline-block;margin-top:7px;font-weight:850;color:#126b91;text-decoration:none}.alertcalifornia-panel .camera-link:hover{text-decoration:underline}@media(max-width:600px){.alertcalifornia-panel{top:10px;right:10px;width:min(290px,calc(100% - 64px));max-height:calc(100% - 20px)}.alertcalifornia-panel img{max-height:150px}}.map-windbarb-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-windbarb-status[hidden]{display:none}.wind-barb-icon{background:transparent!important;border:0!important}.wind-barb-icon svg{overflow:visible;filter:drop-shadow(0 1px 1px rgba(255,255,255,.95))}.wind-barb-icon .barb-stroke{stroke:#102f44;stroke-width:2;fill:none;stroke-linecap:round;stroke-linejoin:round}.wind-barb-icon .barb-flag{fill:#102f44;stroke:#102f44;stroke-width:1}.wind-barb-icon.stale{opacity:.48}.map-undersea-feature-label{background:transparent!important;border:0!important;box-shadow:none!important;white-space:nowrap;pointer-events:none}.map-undersea-feature-label .undersea-dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;background:#ffd166;border:1px solid #20323c;vertical-align:1px;box-shadow:0 0 0 1px rgba(255,255,255,.75)}.map-undersea-feature-label .undersea-name{font-size:13px;font-weight:850;letter-spacing:.01em;color:#fff7d1;text-shadow:-2px -2px 0 #102a38,2px -2px 0 #102a38,-2px 2px 0 #102a38,2px 2px 0 #102a38,0 2px 3px rgba(0,0,0,.85)}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#2f855a}.map-dot.current{background:#7d55a6}.map-dot.saildrone{width:12px;height:12px;background:#8d3fb0;border:2px solid #fff;box-shadow:0 0 0 1px #8d3fb0}.map-dot.alertcalifornia{width:12px;height:12px;background:#c74634;border:2px solid #fff;box-shadow:0 0 0 1px #a93628}.map-dot.marine{width:12px;height:12px;border:2px solid #fff;box-shadow:0 0 0 1px rgba(16,47,68,.35)}.map-dot.marina{background:#126b91}.map-dot.boatyard{background:#7a4a21}.map-dot.fuel{background:#347a4b}.map-dot.ramp{background:#376f9c}.map-dot.ferry{background:#247f8f}.map-dot.supply{background:#805f2f}.map-dot.club{background:#6c4a91}.map-dot.restaurant{background:#a45135}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}
 .offshore-trip-card{border-left:5px solid #126b91}.offshore-trip-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap}.offshore-trip-coords{color:var(--muted);font-size:.82rem;font-weight:750}.offshore-trip-summary{margin:10px 0 12px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:#f7fbfc}.offshore-trip-summary strong{color:var(--navy)}.offshore-trip-metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:10px 0}.offshore-trip-metric{padding:9px 10px;border:1px solid var(--line);border-radius:11px;background:#fff}.offshore-trip-metric .label{font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:850}.offshore-trip-metric .value{margin-top:3px;color:var(--navy);font-weight:900;font-size:1rem}.offshore-trip-buoy{margin:4px 0 8px;color:var(--ink);font-size:.86rem}.offshore-trip-watch{margin:8px 0 0;padding-left:20px;color:var(--ink)}.offshore-trip-watch li{margin:3px 0}.offshore-trip-forecast{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px}.offshore-trip-period{padding:10px 12px;border:1px solid var(--line);border-radius:11px;background:#fbfdfe}.offshore-trip-period strong{display:block;color:var(--navy);margin-bottom:3px}.offshore-trip-period p{margin:0;line-height:1.42;font-size:.88rem}.offshore-trip-note{margin:9px 0 0;color:var(--muted);font-size:.78rem;line-height:1.45}.offshore-trip-error{color:#8b2c2c;font-size:.88rem}.offshore-trip-loading{color:var(--muted);font-weight:750}.fishing-planning{margin-top:18px;padding-top:16px;border-top:2px solid #dce8ed}.fishing-planning-head{display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap}.fishing-planning-head h3{margin:0;color:var(--navy);font-size:1.05rem}.fishing-planning-status{color:var(--muted);font-size:.78rem}.fishing-planning-summary{margin:10px 0;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:#fffdf5;line-height:1.45}.fishing-planning-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.fishing-planning-item{padding:10px 11px;border:1px solid var(--line);border-radius:11px;background:#fff}.fishing-planning-item .label{font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:850}.fishing-planning-item .value{margin-top:3px;color:var(--navy);font-weight:900;line-height:1.25}.fishing-planning-item .detail{margin-top:4px;color:var(--muted);font-size:.77rem;line-height:1.35}.fishing-planning-error{margin:8px 0 0;color:#8b2c2c;font-size:.82rem}@media(max-width:850px){.fishing-planning-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:520px){.fishing-planning-grid{grid-template-columns:1fr}}@media(max-width:800px){.offshore-trip-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:640px){.offshore-trip-forecast{grid-template-columns:1fr}}.marine-forecast-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap}
 .marine-forecast-zone{color:var(--muted);font-size:.84rem;font-weight:750}
 .marine-alerts{margin:8px 0 14px;display:flex;gap:7px;flex-wrap:wrap}
@@ -6365,7 +6511,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 <section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Open the full planning dashboard for location, wind, currents, forecasts, map layers, and customization controls.</p></div><a id="planning-page-link" class="planning-page-link" href="{{.PlanningDetailsURL}}">Planning and Details →</a></section>
 {{else}}
 <section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Full planning dashboard and customization controls.</p></div><a id="conditions-page-link" class="planning-page-link" href="{{.ConditionsURL}}">← Back to Conditions Now</a></section>
-<section class="card full map-card"><div class="map-intro"><div><div class="map-intro-title"><h2>Location</h2><details class="location-help"><summary aria-label="About location selection" title="About location selection">ⓘ</summary><div class="location-help-panel"><div class="location-help-header"><strong>About location selection</strong><button type="button" class="location-help-close" aria-label="Close location information" title="Close">×</button></div><div class="location-help-body"><p><strong>Selected location</strong> is the point used for Local Conditions and nearby-station searches. Click the map to set or change it.</p><p>Panning, zooming, My location, and Center Map only change the map view. The latitude/longitude fields show the map center; editing them and choosing <strong>Center Map → Latitude &amp; Longitude</strong> does not change the selected location.</p><p><strong>Find nearby stations</strong> searches around the selected location. Open a candidate station on the map to review it and commit it as the wind source; the associated currents station is previewed with it.</p></div></div></details></div><div class="map-help">Click the map to select a location for local conditions and nearby stations.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-nautical-zoom-note" class="map-nautical-zoom-note" hidden aria-live="polite">Nautical chart available at Zoom 9+.</div><div id="map-resize-handle" class="map-resize-handle" role="separator" aria-label="Resize map vertically" aria-orientation="horizontal" aria-valuemin="260" aria-valuemax="900" aria-valuenow="390" aria-grabbed="false" tabindex="0" title="Drag up or down to resize map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-scale-row" aria-label="Map scale"><span id="map-scale-status" class="map-scale-status" role="status" aria-live="polite"></span></div><div class="map-state-controls" aria-label="Map controls"><details id="map-types-menu" class="map-overlays-menu"><summary>Map Types</summary><div class="map-overlays-panel"><button type="button" class="map-menu-close" aria-label="Close Map Types" title="Close">×</button><label class="map-overlay-toggle"><input type="radio" name="map-type" value="map"> <span>Street Map</span></label><label id="map-type-nautical-label" class="map-overlay-toggle"><input id="map-type-nautical" type="radio" name="map-type" value="nautical"> <span>Nautical Chart <small>(Zoom 9+)</small></span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="satellite"> <span>Satellite</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="hybrid"> <span>Hybrid</span></label></div></details><details id="map-overlays-menu" class="map-overlays-menu"><summary>Map Overlays</summary><div class="map-overlays-panel"><div class="map-overlays-toolbar"><button type="button" id="map-overlays-clear" class="map-overlay-clear">Clear all overlays</button><button type="button" class="map-menu-close" aria-label="Close Map Overlays" title="Close">×</button></div><details class="map-overlay-group"><summary>Weather &amp; Hazards</summary><div class="map-overlay-group-body"><label id="map-marine-zone-control" class="map-overlay-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-smoke"> <span>Satellite smoke (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-clouds"> <span>Satellite Cloud Cover (NOAA)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-radar"> <span>Weather radar (NOAA/NWS)</span></label></div></details><details class="map-overlay-group"><summary>Wind &amp; Pressure</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-wind-barbs"> <span>Marine / Bay Wind Barbs (NOAA/NDBC)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-inland-wind-barbs"> <span>Land / Inland Wind Barbs (METAR)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-pressure"> <span>Surface Pressure / Isobars (NOAA/NWS METAR)</span></label></div></details><details class="map-overlay-group"><summary>Terrain &amp; Seafloor</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-structure"> <span>Topography &amp; Bathymetry (NOAA ETOPO + offshore feature names)</span></label></div></details><details class="map-overlay-group"><summary>Marine Places</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marinas"> <span>Marinas <small id="map-marine-count-marinas"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="boatyards"> <span>Boatyards &amp; Repair <small id="map-marine-count-boatyards"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="fuel_docks"> <span>Fuel Docks <small id="map-marine-count-fuel_docks"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="launch_ramps"> <span>Launch Ramps <small id="map-marine-count-launch_ramps"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="ferry_terminals"> <span>Ferry Terminals <small id="map-marine-count-ferry_terminals"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marine_supply"> <span>Marine Supply <small id="map-marine-count-marine_supply"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="yacht_clubs"> <span>Yacht Clubs <small id="map-marine-count-yacht_clubs"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="waterfront_restaurants"> <span>Waterfront Restaurants <small id="map-marine-count-waterfront_restaurants"></small></span></label></div></details><details class="map-overlay-group"><summary>Observations</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-saildrone"> <span>Saildrone Observations (NOAA PMEL)</span></label></div></details></div></details><details id="map-center-menu" class="map-overlays-menu"><summary>Center Map</summary><div class="map-overlays-panel map-center-panel"><button type="button" class="map-menu-close" aria-label="Close Center Map" title="Close">×</button><button type="button" id="map-geolocate" class="map-center-action" title="Center the map on your device location without changing the selected location">My location</button><button type="button" id="map-nav-coordinates" class="map-center-action" title="Center the map on the latitude and longitude shown below">Latitude &amp; Longitude</button><button type="button" id="map-nav-selected" class="map-center-action" {{if not .MapHasRequest}}disabled{{end}}>Selected location</button><button type="button" id="map-nav-wind" class="map-center-action" {{if not .MapHasWind}}disabled{{end}}>Selected wind station</button><button type="button" id="map-nav-current" class="map-center-action" {{if not .MapHasCurrent}}disabled{{end}}>Selected currents station</button></div></details></div><div class="map-primary-actions" aria-label="Location and station actions"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Find nearby stations</span><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates}}false{{else}}true{{end}}" {{if not (or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates)}}disabled{{end}}>Clear location &amp; stations</button></div><div class="map-location-info-grid"><div class="map-coordinate-entry" aria-label="Map center coordinates"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLat}}" aria-label="Map center latitude"></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLon}}" aria-label="Map center longitude"></div><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div id="selected-location-weather" class="selected-location-weather" aria-live="polite"><div class="selected-location-weather-head"><strong>Local Conditions</strong><span id="selected-location-weather-updated" class="selected-location-weather-updated">{{if .SelectedWeatherUpdated}}Updated {{.SelectedWeatherUpdated}}{{end}}</span></div><div id="selected-location-weather-place" class="selected-location-weather-place">{{if .MapHasRequest}}{{if .SelectedWeatherLocation}}{{.SelectedWeatherLocation}}{{else}}Near selected location{{end}}{{else}}Select a location for local conditions{{end}}</div><div id="selected-location-weather-content" {{if not .MapHasRequest}}hidden{{end}}><div class="selected-location-weather-metrics"><span class="selected-location-weather-metric"><b>Air temp:</b> <span id="selected-location-weather-air">{{if .SelectedWeatherAirTemp}}{{.SelectedWeatherAirTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>High:</b> <span id="selected-location-weather-high">{{if .SelectedWeatherHighTemp}}{{.SelectedWeatherHighTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>Low:</b> <span id="selected-location-weather-low">{{if .SelectedWeatherLowTemp}}{{.SelectedWeatherLowTemp}}{{else}}—{{end}}</span></span></div><p id="selected-location-weather-forecast" class="selected-location-weather-forecast" {{if not .SelectedWeatherShortForecast}}hidden{{end}}>{{.SelectedWeatherShortForecast}}</p><p id="selected-location-weather-error" class="selected-location-weather-error" {{if not .SelectedWeatherError}}hidden{{end}}>{{.SelectedWeatherError}}</p><p class="selected-location-weather-note">NWS point forecast near the selected location. Air temperature is the current-hour forecast, not a direct observation.</p></div></div></div><div class="map-controls"><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><details class="map-overlay-help"><summary>Map overlay details</summary><div class="map-overlay-help-body">Topography & Bathymetry combines NOAA/NCEI ETOPO land topography and seafloor bathymetry with NOAA Marine Cadastre official named offshore features. Fishing-relevant features such as seamounts, banks, ridges, hills, knolls, shoals, reefs, rises, plateaus, pinnacles, and escarpments are labeled locally for better contrast. It is intended for fishing-planning context, not navigation; smaller pinnacles may not appear in the global relief model. Marine / Bay Wind Barbs uses live NOAA/NDBC station observations from all active stations with usable wind inside the buffered map viewport; standard meteorological barbs show wind-from direction and speed, and stale observations are faded. Land / Inland Wind Barbs is a separate optional layer sourced from Aviation Weather Center’s complete current-METAR cache and filtered locally to the buffered viewport, including many ASOS/AWOS airport sites. Both controls are display-only and do not change the selected wind station or selected location. Wind-barb tooltips follow the shared page Wind units preference; barb geometry remains based on standard knot increments. Saildrone Observations uses NOAA PMEL public ERDDAP mission data and plots the latest reported position and met-ocean readings from configured 2026 NOAA Saildrone missions; availability is mission-dependent and these moving platforms are not a fixed station network. Exact positions are plotted only when the source provides them; fisherman shorthand such as “20×20” is shown as a derived approximate position with an uncertainty circle, and broad reports such as “Cordell to Monterey” are shown as regional zones rather than fake point coordinates. Satellite Cloud Cover uses NOAA/NESDIS GOES imagery rendered for the current map view; daylight areas appear natural-color-like and nighttime areas use infrared imagery. Radar uses Iowa State IEM's Web-Mercator CONUS NEXRAD N0Q WMS layer; a clear/transparent radar layer can simply mean no precipitation echoes are present. Surface Pressure / Isobars uses current NOAA/NWS Aviation Weather Center METAR mean sea-level-pressure observations. The browser interpolates those point observations into contour lines at a zoom-appropriate interval; it is useful pressure-gradient context but is not an official analyzed surface chart.</div></details><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-weather-overlay-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-pressure-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div id="map-structure-status" class="map-structure-status" hidden></div><div id="map-windbarb-status" class="map-windbarb-status" hidden></div><div id="map-saildrone-status" class="map-saildrone-status" hidden></div><div class="map-layer-note">Drag the handle directly below the map to make the map taller or shorter. Keyboard users can focus the handle and use ↑/↓ (Shift for larger steps).</div><div class="info-popup-row map-info-popup-row"><button id="map-legend-open" class="info-popup-open" type="button" aria-haspopup="dialog" aria-controls="map-legend-modal">ⓘ Map legend</button><button id="map-sources-open" class="info-popup-open" type="button" aria-haspopup="dialog" aria-controls="map-sources-modal">ⓘ Map &amp; data sources</button></div><div id="map-legend-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-legend-title"><div class="info-popup-dialog-head"><h2 id="map-legend-title">Map Legend</h2><button id="map-legend-close" class="info-popup-close" type="button" aria-label="Close map legend" title="Close">×</button></div><div class="info-popup-body"><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span><span class="map-key"><span class="map-dot saildrone" aria-hidden="true"></span>Saildrone latest position</span></div><div class="map-legend"><span class="map-key"><span class="map-dot marine marina" aria-hidden="true"></span>Marina</span><span class="map-key"><span class="map-dot marine boatyard" aria-hidden="true"></span>Boatyard &amp; repair</span><span class="map-key"><span class="map-dot marine fuel" aria-hidden="true"></span>Fuel dock</span><span class="map-key"><span class="map-dot marine ramp" aria-hidden="true"></span>Launch ramp</span><span class="map-key"><span class="map-dot marine ferry" aria-hidden="true"></span>Ferry terminal</span><span class="map-key"><span class="map-dot marine supply" aria-hidden="true"></span>Marine supply</span><span class="map-key"><span class="map-dot marine club" aria-hidden="true"></span>Yacht club</span><span class="map-key"><span class="map-dot marine restaurant" aria-hidden="true"></span>Waterfront restaurant</span></div></div></div></div><div id="map-sources-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-sources-title"><div class="info-popup-dialog-head"><h2 id="map-sources-title">Map &amp; Data Sources</h2><button id="map-sources-close" class="info-popup-close" type="button" aria-label="Close map and data sources" title="Close">×</button></div><div class="info-popup-body"><p class="map-sources-note">Base maps: <strong>Street Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service and is available at Zoom 9 or closer; <strong>Satellite</strong> uses Esri World Imagery; <strong>Hybrid</strong> combines Esri imagery with place/boundary labels. NWS forecast-zone, NOAA smoke, <strong>Sea Surface Temp</strong>, <strong>Satellite Cloud Cover</strong>, and radar layers remain independent overlays. The nautical chart layer is for planning/reference and does not replace official navigation products.</p></div></div></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
+<section class="card full map-card"><div class="map-intro"><div><div class="map-intro-title"><h2>Location</h2><details class="location-help"><summary aria-label="About location selection" title="About location selection">ⓘ</summary><div class="location-help-panel"><div class="location-help-header"><strong>About location selection</strong><button type="button" class="location-help-close" aria-label="Close location information" title="Close">×</button></div><div class="location-help-body"><p><strong>Selected location</strong> is the point used for selected-location weather and nearby-station searches. Click the map to set or change it.</p><p>Panning, zooming, My location, and Center Map only change the map view. The latitude/longitude fields show the map center; editing them and choosing <strong>Center Map → Latitude &amp; Longitude</strong> does not change the selected location.</p><p><strong>Find nearby stations</strong> searches around the selected location. Open a candidate station on the map to review it and commit it as the wind source; the associated currents station is previewed with it.</p></div></div></details></div><div class="map-help">Click the map to select a location for weather and nearby stations.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-alertcalifornia-panel" class="alertcalifornia-panel" hidden role="dialog" aria-modal="false" aria-labelledby="map-alertcalifornia-panel-title"><div class="alertcalifornia-panel-head"><div id="map-alertcalifornia-panel-title" class="alertcalifornia-panel-title">ALERTCalifornia camera</div><button id="map-alertcalifornia-panel-close" class="alertcalifornia-panel-close" type="button" aria-label="Close ALERTCalifornia camera" title="Close">×</button></div><div id="map-alertcalifornia-panel-body" class="alertcalifornia-panel-body"></div></div><div id="map-nautical-zoom-note" class="map-nautical-zoom-note" hidden aria-live="polite">Nautical chart available at Zoom 9+.</div><div id="map-resize-handle" class="map-resize-handle" role="separator" aria-label="Resize map vertically" aria-orientation="horizontal" aria-valuemin="260" aria-valuemax="900" aria-valuenow="390" aria-grabbed="false" tabindex="0" title="Drag up or down to resize map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-scale-row" aria-label="Map scale"><span id="map-scale-status" class="map-scale-status" role="status" aria-live="polite"></span></div><div class="map-state-controls" aria-label="Map controls"><details id="map-types-menu" class="map-overlays-menu"><summary>Map Types</summary><div class="map-overlays-panel"><button type="button" class="map-menu-close" aria-label="Close Map Types" title="Close">×</button><label class="map-overlay-toggle"><input type="radio" name="map-type" value="map"> <span>Street Map</span></label><label id="map-type-nautical-label" class="map-overlay-toggle"><input id="map-type-nautical" type="radio" name="map-type" value="nautical"> <span>Nautical Chart <small>(Zoom 9+)</small></span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="satellite"> <span>Satellite</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="hybrid"> <span>Hybrid</span></label></div></details><details id="map-overlays-menu" class="map-overlays-menu"><summary>Map Overlays</summary><div class="map-overlays-panel"><div class="map-overlays-toolbar"><button type="button" id="map-overlays-clear" class="map-overlay-clear">Clear all overlays</button><button type="button" class="map-menu-close" aria-label="Close Map Overlays" title="Close">×</button></div><details class="map-overlay-group"><summary>Weather &amp; Hazards</summary><div class="map-overlay-group-body"><label id="map-marine-zone-control" class="map-overlay-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-smoke"> <span>Satellite smoke (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-clouds"> <span>Satellite Cloud Cover (NOAA)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-radar"> <span>Weather radar (NOAA/NWS)</span></label></div></details><details class="map-overlay-group"><summary>Wind &amp; Pressure</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-wind-barbs"> <span>Marine / Bay Wind Barbs (NOAA/NDBC)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-inland-wind-barbs"> <span>Land / Inland Wind Barbs (METAR)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-pressure"> <span>Surface Pressure / Isobars (NOAA/NWS METAR)</span></label></div></details><details class="map-overlay-group"><summary>Terrain &amp; Seafloor</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-structure"> <span>Topography &amp; Bathymetry (NOAA ETOPO + offshore feature names)</span></label></div></details><details class="map-overlay-group"><summary>Marine Places</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marinas"> <span>Marinas <small id="map-marine-count-marinas"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="boatyards"> <span>Boatyards &amp; Repair <small id="map-marine-count-boatyards"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="fuel_docks"> <span>Fuel Docks <small id="map-marine-count-fuel_docks"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="launch_ramps"> <span>Launch Ramps <small id="map-marine-count-launch_ramps"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="ferry_terminals"> <span>Ferry Terminals <small id="map-marine-count-ferry_terminals"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marine_supply"> <span>Marine Supply <small id="map-marine-count-marine_supply"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="yacht_clubs"> <span>Yacht Clubs <small id="map-marine-count-yacht_clubs"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="waterfront_restaurants"> <span>Waterfront Restaurants <small id="map-marine-count-waterfront_restaurants"></small></span></label></div></details><details class="map-overlay-group"><summary>Observations</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-saildrone"> <span>Saildrone Observations (NOAA PMEL)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-alertcalifornia"> <span>ALERTCalifornia Cameras (UC San Diego)</span></label></div></details></div></details><details id="map-center-menu" class="map-overlays-menu"><summary>Center Map</summary><div class="map-overlays-panel map-center-panel"><button type="button" class="map-menu-close" aria-label="Close Center Map" title="Close">×</button><button type="button" id="map-geolocate" class="map-center-action" title="Center the map on your device location without changing the selected location">My location</button><button type="button" id="map-nav-coordinates" class="map-center-action" title="Center the map on the latitude and longitude shown below">Latitude &amp; Longitude</button><button type="button" id="map-nav-selected" class="map-center-action" {{if not .MapHasRequest}}disabled{{end}}>Selected location</button><button type="button" id="map-nav-wind" class="map-center-action" {{if not .MapHasWind}}disabled{{end}}>Selected wind station</button><button type="button" id="map-nav-current" class="map-center-action" {{if not .MapHasCurrent}}disabled{{end}}>Selected currents station</button></div></details></div><div class="map-primary-actions" aria-label="Location and station actions"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Find nearby stations</span><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates}}false{{else}}true{{end}}" {{if not (or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates)}}disabled{{end}}>Clear location &amp; stations</button></div><div class="map-location-info-grid"><div class="map-coordinate-entry" aria-label="Map center coordinates"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLat}}" aria-label="Map center latitude"></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLon}}" aria-label="Map center longitude"></div><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div id="selected-location-weather" class="selected-location-weather" aria-live="polite"><div id="selected-location-weather-content" {{if not .MapHasRequest}}hidden{{end}}><div class="selected-location-weather-columns"><div class="selected-location-weather-point-column"><div class="selected-location-weather-head"><strong>Selected Location Weather</strong></div><div id="selected-location-weather-place" class="selected-location-weather-place">{{if .MapHasRequest}}{{if .SelectedWeatherLocation}}Near {{.SelectedWeatherLocation}}{{else}}Selected location{{end}}{{else}}Select a location for weather{{end}}</div><div id="selected-location-point-forecast" {{if and .MarineForecastPeriods .SelectedWeatherError}}hidden{{end}}><div class="selected-location-point-head"><strong>NWS Point Forecast</strong><span id="selected-location-weather-updated" class="selected-location-weather-updated">{{if .SelectedWeatherUpdated}}Updated {{.SelectedWeatherUpdated}}{{end}}</span></div><div class="selected-location-weather-metrics"><span class="selected-location-weather-metric"><b>Forecast temp:</b> <span id="selected-location-weather-air">{{if .SelectedWeatherAirTemp}}{{.SelectedWeatherAirTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>High:</b> <span id="selected-location-weather-high">{{if .SelectedWeatherHighTemp}}{{.SelectedWeatherHighTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>Low:</b> <span id="selected-location-weather-low">{{if .SelectedWeatherLowTemp}}{{.SelectedWeatherLowTemp}}{{else}}—{{end}}</span></span></div><p id="selected-location-weather-forecast" class="selected-location-weather-forecast" {{if not .SelectedWeatherShortForecast}}hidden{{end}}>{{.SelectedWeatherShortForecast}}</p><p id="selected-location-weather-error" class="selected-location-weather-error" {{if or (not .SelectedWeatherError) .MarineForecastPeriods}}hidden{{end}}>{{.SelectedWeatherError}}</p><p class="selected-location-weather-note">NWS point forecast for the selected map point. Forecast temperature is the current-hour forecast, not a direct observation.</p></div><p id="selected-location-weather-context" class="selected-location-weather-context" {{if not (and .MarineForecastPeriods .SelectedWeatherError)}}hidden{{end}}>NWS point-forecast temperature data is unavailable here; the applicable marine-zone forecast is shown in the Marine Forecast section.</p></div><div id="selected-location-weather-detail" class="selected-location-weather-detail" {{if not (or .MarineForecastPeriods .MarineForecastAlerts .MarineForecastError)}}hidden{{end}}><div class="selected-location-weather-detail-head"><strong id="marine-forecast-heading">{{if .MarineForecastPeriods}}NWS Marine Forecast{{else}}NWS Forecast Zone / Alerts{{end}}</strong><span id="marine-forecast-zone" class="marine-forecast-zone" {{if not .MarineForecastZone}}hidden{{end}}>{{if .MarineForecastPeriods}}Marine zone{{else}}NWS forecast zone{{end}} {{.MarineForecastZone}}{{if .MarineForecastUpdated}} · Updated {{.MarineForecastUpdated}}{{end}}</span></div><div id="marine-forecast-alerts" class="marine-alerts" aria-label="Active National Weather Service alerts" {{if not .MarineForecastAlerts}}hidden{{end}}>{{range .MarineForecastAlerts}}<span class="marine-alert">⚠ NWS alert — {{.}}</span>{{end}}</div><div id="marine-forecast-periods" class="marine-periods" {{if not .MarineForecastPeriods}}hidden{{end}}>{{range .MarineForecastPeriods}}<div class="marine-period">{{if .Name}}<strong>{{.Name}}</strong>{{end}}{{if .Forecast}}<p>{{.Forecast}}</p>{{end}}</div>{{end}}</div><p id="marine-forecast-note" class="marine-forecast-note" {{if not .MarineForecastPeriods}}hidden{{end}}>Official NWS coastal marine-zone forecast for the zone containing the selected point. It applies to the broader marine zone, not specifically to the selected point.</p><p id="marine-forecast-error" class="marine-forecast-error" {{if not .MarineForecastError}}hidden{{end}}>{{if .MarineForecastError}}{{.MarineForecastError}}{{end}}</p></div></div></div></div><div class="map-controls"><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><details class="map-overlay-help"><summary>Map overlay details</summary><div class="map-overlay-help-body">Topography & Bathymetry combines NOAA/NCEI ETOPO land topography and seafloor bathymetry with NOAA Marine Cadastre official named offshore features. Fishing-relevant features such as seamounts, banks, ridges, hills, knolls, shoals, reefs, rises, plateaus, pinnacles, and escarpments are labeled locally for better contrast. It is intended for fishing-planning context, not navigation; smaller pinnacles may not appear in the global relief model. Marine / Bay Wind Barbs uses live NOAA/NDBC station observations from all active stations with usable wind inside the buffered map viewport; standard meteorological barbs show wind-from direction and speed, and stale observations are faded. Land / Inland Wind Barbs is a separate optional layer sourced from Aviation Weather Center’s complete current-METAR cache and filtered locally to the buffered viewport, including many ASOS/AWOS airport sites. Both controls are display-only and do not change the selected wind station or selected location. Wind-barb tooltips follow the shared page Wind units preference; barb geometry remains based on standard knot increments. Saildrone Observations uses NOAA PMEL public ERDDAP mission data and plots the latest reported position and met-ocean readings from configured 2026 NOAA Saildrone missions; availability is mission-dependent and these moving platforms are not a fixed station network. ALERTCalifornia Cameras uses the official UC San Diego/ALERTCalifornia ArcGIS camera layer, requests only cameras in the current map viewport, and shows the current camera image plus a link to the official live camera page. Camera imagery is displayed unmodified with ALERTCalifornia | UC San Diego attribution. Exact positions are plotted only when the source provides them; fisherman shorthand such as “20×20” is shown as a derived approximate position with an uncertainty circle, and broad reports such as “Cordell to Monterey” are shown as regional zones rather than fake point coordinates. Satellite Cloud Cover uses NOAA/NESDIS GOES imagery rendered for the current map view; daylight areas appear natural-color-like and nighttime areas use infrared imagery. Radar uses Iowa State IEM's Web-Mercator CONUS NEXRAD N0Q WMS layer; a clear/transparent radar layer can simply mean no precipitation echoes are present. Surface Pressure / Isobars uses current NOAA/NWS Aviation Weather Center METAR mean sea-level-pressure observations. The browser interpolates those point observations into contour lines at a zoom-appropriate interval; it is useful pressure-gradient context but is not an official analyzed surface chart.</div></details><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-weather-overlay-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-pressure-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div id="map-structure-status" class="map-structure-status" hidden></div><div id="map-windbarb-status" class="map-windbarb-status" hidden></div><div id="map-saildrone-status" class="map-saildrone-status" hidden></div><div id="map-alertcalifornia-status" class="map-alertcalifornia-status" hidden aria-live="polite"></div><div class="map-layer-note">Drag the handle directly below the map to make the map taller or shorter. Keyboard users can focus the handle and use ↑/↓ (Shift for larger steps).</div><div class="info-popup-row map-info-popup-row"><button id="map-legend-open" class="info-popup-open" type="button" aria-haspopup="dialog" aria-controls="map-legend-modal">ⓘ Map legend</button><button id="map-sources-open" class="info-popup-open" type="button" aria-haspopup="dialog" aria-controls="map-sources-modal">ⓘ Map &amp; data sources</button></div><div id="map-legend-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-legend-title"><div class="info-popup-dialog-head"><h2 id="map-legend-title">Map Legend</h2><button id="map-legend-close" class="info-popup-close" type="button" aria-label="Close map legend" title="Close">×</button></div><div class="info-popup-body"><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span><span class="map-key"><span class="map-dot saildrone" aria-hidden="true"></span>Saildrone latest position</span><span class="map-key"><span class="map-dot alertcalifornia" aria-hidden="true"></span>ALERTCalifornia camera</span></div><div class="map-legend"><span class="map-key"><span class="map-dot marine marina" aria-hidden="true"></span>Marina</span><span class="map-key"><span class="map-dot marine boatyard" aria-hidden="true"></span>Boatyard &amp; repair</span><span class="map-key"><span class="map-dot marine fuel" aria-hidden="true"></span>Fuel dock</span><span class="map-key"><span class="map-dot marine ramp" aria-hidden="true"></span>Launch ramp</span><span class="map-key"><span class="map-dot marine ferry" aria-hidden="true"></span>Ferry terminal</span><span class="map-key"><span class="map-dot marine supply" aria-hidden="true"></span>Marine supply</span><span class="map-key"><span class="map-dot marine club" aria-hidden="true"></span>Yacht club</span><span class="map-key"><span class="map-dot marine restaurant" aria-hidden="true"></span>Waterfront restaurant</span></div></div></div></div><div id="map-sources-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-sources-title"><div class="info-popup-dialog-head"><h2 id="map-sources-title">Map &amp; Data Sources</h2><button id="map-sources-close" class="info-popup-close" type="button" aria-label="Close map and data sources" title="Close">×</button></div><div class="info-popup-body"><p class="map-sources-note">Base maps: <strong>Street Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service and is available at Zoom 9 or closer; <strong>Satellite</strong> uses Esri World Imagery; <strong>Hybrid</strong> combines Esri imagery with place/boundary labels. NWS forecast-zone, NOAA smoke, <strong>Sea Surface Temp</strong>, <strong>Satellite Cloud Cover</strong>, radar, and <strong>ALERTCalifornia Cameras</strong> remain independent overlays. ALERTCalifornia camera locations and current imagery come from the official UC San Diego/ALERTCalifornia ArcGIS feed. The nautical chart layer is for planning/reference and does not replace official navigation products.</p></div></div></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
 {{if .WindError}}<section class="card full error-card"><h2>Wind station selection unavailable</h2><p class="error-message">{{.WindError}}</p><p class="error-help">The page is still available so you can inspect the request and nearby station diagnostics. Try nearby coordinates or an explicit NDBC station ID.</p></section>{{end}}
 <section class="card full wind-card"><div class="wind-card-head"><h2>Wind</h2></div>
 <div class="metrics">
@@ -6418,13 +6564,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 <p id="offshore-trip-error" class="offshore-trip-error" hidden></p>
 </section>
 
-<section id="marine-forecast-card" class="card full marine-forecast-card" {{if not (or .MarineForecastPeriods .MarineForecastError)}}hidden{{end}}>
-<div class="marine-forecast-head"><div><h2 id="marine-forecast-title">NWS Forecast{{if .MarineForecastStation}}{{if eq .MarineForecastStation "selected location"}} — selected location{{else}} — near {{.MarineForecastStation}}{{end}}{{end}}</h2><div id="marine-forecast-zone" class="marine-forecast-zone" {{if not .MarineForecastZone}}hidden{{end}}>National Weather Service forecast zone {{.MarineForecastZone}}{{if .MarineForecastUpdated}} · Marine forecast updated {{.MarineForecastUpdated}}{{end}}</div></div></div>
-<div id="marine-forecast-alerts" class="marine-alerts" aria-label="Active National Weather Service alerts" {{if not .MarineForecastAlerts}}hidden{{end}}>{{range .MarineForecastAlerts}}<span class="marine-alert">⚠ NWS alert — {{.}}</span>{{end}}</div>
-<div id="marine-forecast-periods" class="marine-periods" {{if not .MarineForecastPeriods}}hidden{{end}}>{{range .MarineForecastPeriods}}<div class="marine-period">{{if .Name}}<strong>{{.Name}}</strong>{{end}}{{if .Forecast}}<p>{{.Forecast}}</p>{{end}}</div>{{end}}</div>
-<p id="marine-forecast-note" class="marine-forecast-note" {{if not .MarineForecastPeriods}}hidden{{end}}>Official NWS marine-zone forecast selected from the selected location. Forecasts and marine-zone advisories apply to the broader zone, not specifically to that point; use the map overlay to see the zone extent. Conditions can vary within the zone.</p>
-<p id="marine-forecast-error" class="marine-forecast-error" {{if not .MarineForecastError}}hidden{{end}}>{{if .MarineForecastError}}{{.MarineForecastError}}{{end}}</p>
-</section>
+
 
 <div class="tide-context-launcher full"><button id="tide-context-open" class="tide-context-open" type="button" aria-haspopup="dialog" aria-controls="tide-context-modal"><span id="tide-context-launcher-label">Tidal &amp; Lunar Context{{if .CurrentDateLabel}} — {{.CurrentDateLabel}}{{end}}</span><span aria-hidden="true">View →</span></button></div><div id="tide-context-modal" class="tide-context-modal" hidden><div class="tide-context-dialog" role="dialog" aria-modal="true" aria-labelledby="tide-context-title"><div class="tide-context-dialog-head"><h2 id="tide-context-title">Tidal &amp; Lunar Context{{if .CurrentDateLabel}} — {{.CurrentDateLabel}}{{end}}</h2><button id="tide-context-close" class="tide-context-close" type="button" aria-label="Close Tidal and Lunar Context" title="Close">×</button></div><section id="tide-context-card" class="tide-context-body">{{if .TideContextMoon}}<p><strong>{{.TideContextMoon}}</strong></p>{{end}}{{if .TideContextCycle}}<p>{{.TideContextCycle}}</p>{{end}}{{if .TideContextStation}}<div class="station">{{.TideContextStation}}</div>{{end}}{{if .TideContextStationMeta}}<div class="meta">{{.TideContextStationMeta}}</div>{{end}}{{if .TideContextRange}}<p><strong>Tidal range context:</strong> {{.TideContextRange}}</p>{{end}}{{if .TideContextComparison}}<p><strong>{{.TideContextComparison}}</strong></p>{{end}}{{if .TideContextNote}}<p class="note">{{.TideContextNote}} NOAA does not provide a universal “king tide” classification here; the 28-day range comparison provides the quantitative context across roughly one lunar cycle.</p>{{end}}</section></div></div>
 
@@ -6630,6 +6770,9 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 
   map.createPane("saildronePane");
   map.getPane("saildronePane").style.zIndex = 432;
+
+  map.createPane("alertCaliforniaPane");
+  map.getPane("alertCaliforniaPane").style.zIndex = 640;
 
   map.createPane("cloudOverlayPane");
   map.getPane("cloudOverlayPane").style.zIndex = 430;
@@ -7429,6 +7572,264 @@ function positionMapOverlaysPanel() {
           true
         );
       });
+  }
+
+  var alertCaliforniaLayer = L.layerGroup();
+  var alertCaliforniaRequestSerial = 0;
+  var alertCaliforniaRefreshTimer = null;
+  var alertCaliforniaLoadedBounds = null;
+  var alertCaliforniaDisplayedKeys = Object.create(null);
+  var alertCaliforniaOpenCameraKey = "";
+  var alertCaliforniaDisplayLimit = 75;
+  var alertCaliforniaRetentionFactor = 0.92;
+
+  function setAlertCaliforniaStatus(message, isError) {
+    var status = document.getElementById("map-alertcalifornia-status");
+    if (!status) return;
+    message = String(message || "").trim();
+    status.hidden = !message;
+    status.textContent = message;
+    status.style.color = isError ? "#9a352f" : "";
+  }
+
+  function alertCaliforniaHTTPSURL(value) {
+    value = String(value || "").trim();
+    if (!/^https:\/\//i.test(value)) return "";
+    return value;
+  }
+
+  function alertCaliforniaPanelHTML(properties) {
+    properties = properties || {};
+    var name = escapeHTML(String(properties.cameraName || "ALERTCalifornia camera"));
+    var county = escapeHTML(String(properties.county || ""));
+    var online = String(properties.isOnline || "").toLowerCase() === "online";
+    var viewTime = escapeHTML(String(properties.viewTime || ""));
+    var cameraURL = alertCaliforniaHTTPSURL(properties.cameraURL);
+    var imageURL = alertCaliforniaHTTPSURL(properties.imageURL);
+    var imageHTML = "";
+    if (imageURL) {
+      var separator = imageURL.indexOf("?") >= 0 ? "&" : "?";
+      var refreshedURL = imageURL + separator + "_=" + Date.now();
+      imageHTML = "<img src=\"" + escapeHTML(refreshedURL) +
+        "\" alt=\"Current ALERTCalifornia view from " + name +
+        "\" loading=\"lazy\" referrerpolicy=\"no-referrer\">";
+    }
+    var meta = [];
+    if (county) meta.push(county + " County");
+    meta.push(online ? "Online" : "Offline");
+    if (viewTime) meta.push("View " + viewTime);
+    var linkHTML = cameraURL
+      ? "<a class=\"camera-link\" href=\"" + escapeHTML(cameraURL) +
+        "\" target=\"_blank\" rel=\"noopener noreferrer\">Open live camera ↗</a>"
+      : "";
+    return "<div class=\"camera-meta\">" + meta.join(" · ") + "</div>" +
+      imageHTML +
+      linkHTML +
+      "<div class=\"camera-meta\">ALERTCalifornia | UC San Diego</div>";
+  }
+
+  function closeAlertCaliforniaPanel() {
+    var panel = document.getElementById("map-alertcalifornia-panel");
+    var body = document.getElementById("map-alertcalifornia-panel-body");
+    if (panel) panel.hidden = true;
+    if (body) body.innerHTML = "";
+    alertCaliforniaOpenCameraKey = "";
+  }
+
+  function openAlertCaliforniaPanel(properties, cameraKey) {
+    properties = properties || {};
+    var panel = document.getElementById("map-alertcalifornia-panel");
+    var title = document.getElementById("map-alertcalifornia-panel-title");
+    var body = document.getElementById("map-alertcalifornia-panel-body");
+    if (!panel || !title || !body) return;
+    title.textContent = String(properties.cameraName || "ALERTCalifornia camera");
+    body.innerHTML = alertCaliforniaPanelHTML(properties);
+    panel.hidden = false;
+    alertCaliforniaOpenCameraKey = String(cameraKey || "");
+  }
+
+  function alertCaliforniaCameraKey(feature) {
+    feature = feature || {};
+    var properties = feature.properties || {};
+    var objectID = String(properties.OBJECTID == null ? "" : properties.OBJECTID).trim();
+    if (objectID) return "oid:" + objectID;
+
+    var siteID = String(properties.siteId || "").trim();
+    var cameraName = String(properties.cameraName || "").trim();
+    var coordinates = feature.geometry && Array.isArray(feature.geometry.coordinates)
+      ? feature.geometry.coordinates
+      : [];
+    var lon = Number(coordinates[0]);
+    var lat = Number(coordinates[1]);
+    var coordinateKey = Number.isFinite(lat) && Number.isFinite(lon)
+      ? lat.toFixed(6) + "," + lon.toFixed(6)
+      : "";
+    return "site:" + siteID + "|name:" + cameraName + "|coord:" + coordinateKey;
+  }
+
+  function selectAlertCaliforniaFeatures(features) {
+    var size = map.getSize();
+    var centerPoint = L.point(size.x / 2, size.y / 2);
+    var ranked = [];
+
+    features.forEach(function(feature) {
+      if (!feature || !feature.geometry ||
+          feature.geometry.type !== "Point" ||
+          !Array.isArray(feature.geometry.coordinates)) return;
+      var lon = Number(feature.geometry.coordinates[0]);
+      var lat = Number(feature.geometry.coordinates[1]);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+
+      var point = map.latLngToContainerPoint([lat, lon]);
+      var dx = (point.x - centerPoint.x) / Math.max(1, size.x / 2);
+      var dy = (point.y - centerPoint.y) / Math.max(1, size.y / 2);
+      var key = alertCaliforniaCameraKey(feature);
+      var distance = Math.sqrt(dx * dx + dy * dy);
+      if (alertCaliforniaDisplayedKeys[key]) distance *= alertCaliforniaRetentionFactor;
+      ranked.push({feature: feature, key: key, score: distance});
+    });
+
+    ranked.sort(function(a, b) {
+      if (a.score !== b.score) return a.score - b.score;
+      return a.key < b.key ? -1 : (a.key > b.key ? 1 : 0);
+    });
+
+    if (ranked.length > alertCaliforniaDisplayLimit) {
+      ranked = ranked.slice(0, alertCaliforniaDisplayLimit);
+    }
+    return ranked;
+  }
+
+  function renderAlertCaliforniaCameras(payload, requestedBounds) {
+    var features = Array.isArray(payload && payload.features) ? payload.features : [];
+    var selected = selectAlertCaliforniaFeatures(features);
+    var nextDisplayedKeys = Object.create(null);
+    var nextLayer = L.layerGroup();
+    var plotted = 0;
+    var onlineCount = 0;
+
+    selected.forEach(function(item) {
+      var feature = item.feature;
+      var coordinates = feature.geometry.coordinates;
+      var lon = Number(coordinates[0]);
+      var lat = Number(coordinates[1]);
+      var properties = feature.properties || {};
+      var online = String(properties.isOnline || "").toLowerCase() === "online";
+      if (online) onlineCount++;
+      nextDisplayedKeys[item.key] = true;
+
+      var marker = L.circleMarker([lat, lon], {
+        pane: "alertCaliforniaPane",
+        radius: online ? 6 : 5,
+        color: "#ffffff",
+        weight: 2,
+        opacity: online ? 1 : 0.8,
+        fillColor: online ? "#c74634" : "#777777",
+        fillOpacity: online ? 0.95 : 0.62,
+        bubblingMouseEvents: false,
+        className: "alertcalifornia-marker"
+      });
+      marker.on("click", function(event) {
+        if (event && event.originalEvent) L.DomEvent.stop(event.originalEvent);
+        openAlertCaliforniaPanel(properties, item.key);
+      });
+      marker.addTo(nextLayer);
+      plotted++;
+    });
+
+    nextLayer.addTo(map);
+    var oldLayer = alertCaliforniaLayer;
+    alertCaliforniaLayer = nextLayer;
+    if (oldLayer && oldLayer !== alertCaliforniaLayer && map.hasLayer(oldLayer)) {
+      map.removeLayer(oldLayer);
+    }
+
+    alertCaliforniaDisplayedKeys = nextDisplayedKeys;
+    alertCaliforniaLoadedBounds = requestedBounds;
+    if (alertCaliforniaOpenCameraKey && !alertCaliforniaDisplayedKeys[alertCaliforniaOpenCameraKey]) {
+      closeAlertCaliforniaPanel();
+    }
+
+    var status = "ALERTCalifornia | UC San Diego · " + plotted;
+    if (features.length > plotted) {
+      status += " of " + features.length + " cameras shown · center-prioritized";
+    } else {
+      status += " camera" + (plotted === 1 ? "" : "s") + " in current view";
+    }
+    status += " · " + onlineCount + " online";
+    setAlertCaliforniaStatus(status, false);
+  }
+
+  function loadAlertCaliforniaCameras() {
+    if (!mapState.alertCaliforniaVisible) return;
+
+    var bounds = map.getBounds();
+    var requestBounds = {
+      west: bounds.getWest(),
+      south: bounds.getSouth(),
+      east: bounds.getEast(),
+      north: bounds.getNorth()
+    };
+    var params = new URLSearchParams();
+    params.set("west", requestBounds.west.toFixed(6));
+    params.set("south", requestBounds.south.toFixed(6));
+    params.set("east", requestBounds.east.toFixed(6));
+    params.set("north", requestBounds.north.toFixed(6));
+
+    var serial = ++alertCaliforniaRequestSerial;
+    setAlertCaliforniaStatus("Loading ALERTCalifornia cameras…", false);
+    fetch("/alertcalifornia-cameras?" + params.toString(), {
+      headers: {"Accept": "application/geo+json, application/json"}
+    })
+      .then(function(response) {
+        if (!response.ok) {
+          return response.text().then(function(detail) {
+            throw new Error(String(detail || "HTTP " + response.status).trim());
+          });
+        }
+        return response.json();
+      })
+      .then(function(payload) {
+        if (!mapState.alertCaliforniaVisible || serial !== alertCaliforniaRequestSerial) return;
+        renderAlertCaliforniaCameras(payload, requestBounds);
+      })
+      .catch(function(err) {
+        if (!mapState.alertCaliforniaVisible || serial !== alertCaliforniaRequestSerial) return;
+        setAlertCaliforniaStatus(
+          "ALERTCalifornia cameras failed: " +
+          String(err && err.message ? err.message : err || "unknown error") +
+          " · retaining previous camera markers",
+          true
+        );
+      });
+  }
+
+  function scheduleAlertCaliforniaRefresh() {
+    if (!mapState.alertCaliforniaVisible) return;
+    if (alertCaliforniaRefreshTimer) window.clearTimeout(alertCaliforniaRefreshTimer);
+    alertCaliforniaRefreshTimer = window.setTimeout(function() {
+      alertCaliforniaRefreshTimer = null;
+      loadAlertCaliforniaCameras();
+    }, 280);
+  }
+
+  function setAlertCaliforniaVisible(visible) {
+    mapState.alertCaliforniaVisible = !!visible;
+    alertCaliforniaRequestSerial++;
+    if (!mapState.alertCaliforniaVisible) {
+      if (alertCaliforniaRefreshTimer) {
+        window.clearTimeout(alertCaliforniaRefreshTimer);
+        alertCaliforniaRefreshTimer = null;
+      }
+      if (map.hasLayer(alertCaliforniaLayer)) map.removeLayer(alertCaliforniaLayer);
+      alertCaliforniaLayer = L.layerGroup();
+      alertCaliforniaLoadedBounds = null;
+      alertCaliforniaDisplayedKeys = Object.create(null);
+      closeAlertCaliforniaPanel();
+      setAlertCaliforniaStatus("", false);
+      return;
+    }
+    loadAlertCaliforniaCameras();
   }
 
   function setStructureStatus(message, isError) {
@@ -8357,6 +8758,7 @@ function positionMapOverlaysPanel() {
     windBarbsVisible: false,
     inlandWindBarbsVisible: false,
     saildroneVisible: false,
+    alertCaliforniaVisible: false,
     cloudOverlayVisible: false,
     radarOverlayVisible: false,
     pressureOverlayVisible: false
@@ -9346,6 +9748,19 @@ function positionMapOverlaysPanel() {
     });
   }
 
+  var alertCaliforniaPanelClose = document.getElementById("map-alertcalifornia-panel-close");
+  if (alertCaliforniaPanelClose) {
+    alertCaliforniaPanelClose.addEventListener("click", closeAlertCaliforniaPanel);
+  }
+
+  var alertCaliforniaCheckbox = document.getElementById("map-show-alertcalifornia");
+  if (alertCaliforniaCheckbox) {
+    alertCaliforniaCheckbox.checked = !!mapState.alertCaliforniaVisible;
+    alertCaliforniaCheckbox.addEventListener("change", function() {
+      setAlertCaliforniaVisible(!!alertCaliforniaCheckbox.checked);
+    });
+  }
+
   var cloudCheckbox = document.getElementById("map-show-clouds");
   if (cloudCheckbox) {
     cloudCheckbox.checked = !!mapState.cloudOverlayVisible;
@@ -9385,6 +9800,7 @@ function positionMapOverlaysPanel() {
     if (mapState.pressureOverlayVisible) schedulePressureRefresh();
     if (mapState.windBarbsVisible || mapState.inlandWindBarbsVisible) scheduleWindBarbRefresh();
     if (mapState.saildroneVisible && saildroneLayer) updateSaildroneViewportStatus();
+    if (mapState.alertCaliforniaVisible) scheduleAlertCaliforniaRefresh();
 
     if (!mapState.smokeOverlayVisible || !smokeLayer) return;
     var visibleCount = 0;
@@ -9478,6 +9894,32 @@ function positionMapOverlaysPanel() {
   var marineForecastRequestSerial = 0;
   var offshoreTripRequestSerial = 0;
   var fishingPlanningRequestSerial = 0;
+  var selectedPointWeatherHasData = false;
+  var selectedPointWeatherError = "";
+  var selectedMarineForecastHasPeriods = false;
+
+  function syncSelectedLocationWeatherSections() {
+    var pointSection = document.getElementById("selected-location-point-forecast");
+    var pointError = document.getElementById("selected-location-weather-error");
+    var context = document.getElementById("selected-location-weather-context");
+
+    var useMarineFallback =
+      selectedMarineForecastHasPeriods &&
+      !selectedPointWeatherHasData &&
+      !!selectedPointWeatherError;
+
+    if (pointSection) pointSection.hidden = useMarineFallback;
+    if (context) {
+      context.hidden = !useMarineFallback;
+      context.textContent = useMarineFallback
+        ? "NWS point-forecast temperature data is unavailable here; the applicable marine-zone forecast is shown in the Marine Forecast section."
+        : "";
+    }
+    if (pointError) {
+      pointError.hidden = !selectedPointWeatherError || useMarineFallback;
+      pointError.textContent = selectedPointWeatherError;
+    }
+  }
 
   function renderSelectedLocationWeather(weather) {
     weather = weather || {};
@@ -9501,11 +9943,15 @@ function positionMapOverlaysPanel() {
     var forecastText = String(weather.short_forecast || "").trim();
     var updatedText = String(weather.updated || "").trim();
     var errorText = String(weather.error || "").trim();
+    var hasPointData = !!(airText || highText || lowText || forecastText);
+
+    selectedPointWeatherHasData = hasPointData;
+    selectedPointWeatherError = errorText;
 
     if (place) {
       place.textContent = mapState.selectedLocation
-        ? (locationText || "Near selected location")
-        : "Select a location for local conditions";
+        ? (locationText ? "Near " + locationText : "Selected location")
+        : "Select a location for weather";
     }
     if (content) content.hidden = !mapState.selectedLocation;
     if (air) air.textContent = airText || "—";
@@ -9517,10 +9963,10 @@ function positionMapOverlaysPanel() {
     }
     if (updated) updated.textContent = updatedText ? "Updated " + updatedText : "";
     if (errorBox) {
-      errorBox.hidden = !errorText;
       errorBox.textContent = errorText;
     }
 
+    syncSelectedLocationWeatherSections();
     box.hidden = false;
   }
 
@@ -9883,8 +10329,8 @@ function positionMapOverlaysPanel() {
   function renderMarineForecast(payload) {
     payload = payload || {};
 
-    var card = document.getElementById("marine-forecast-card");
-    var title = document.getElementById("marine-forecast-title");
+    var detail = document.getElementById("selected-location-weather-detail");
+    var heading = document.getElementById("marine-forecast-heading");
     var zoneLine = document.getElementById("marine-forecast-zone");
     var alertsBox = document.getElementById("marine-forecast-alerts");
     var periodsBox = document.getElementById("marine-forecast-periods");
@@ -9896,14 +10342,20 @@ function positionMapOverlaysPanel() {
     var periods = Array.isArray(payload.periods) ? payload.periods : [];
     var alerts = Array.isArray(payload.alerts) ? payload.alerts : [];
     var error = String(payload.error || "").trim();
+    var hasMarineForecast = periods.length > 0;
+    selectedMarineForecastHasPeriods = hasMarineForecast;
 
-    if (title) title.textContent = "NWS Forecast — selected location";
+    if (heading) {
+      heading.textContent = hasMarineForecast
+        ? (zone ? "NWS Marine Forecast — Zone " + zone : "NWS Marine Forecast")
+        : "NWS Forecast Zone / Alerts";
+    }
 
     if (zoneLine) {
       zoneLine.hidden = !zone;
       zoneLine.textContent = zone
-        ? "National Weather Service forecast zone " + zone +
-          (updated ? " · Marine forecast updated " + updated : "")
+        ? (hasMarineForecast ? "Marine zone " : "NWS forecast zone ") + zone +
+          (updated ? " · Updated " + updated : "")
         : "";
     }
 
@@ -9927,14 +10379,20 @@ function positionMapOverlaysPanel() {
       }).join("");
     }
 
-    if (note) note.hidden = periods.length === 0;
+    if (note) {
+      note.hidden = periods.length === 0;
+      note.textContent = periods.length
+        ? "Official NWS coastal marine-zone forecast for the zone containing the selected point. It applies to the broader marine zone, not specifically to the selected point."
+        : "";
+    }
 
     if (errorBox) {
       errorBox.hidden = !error;
       errorBox.textContent = error;
     }
 
-    if (card) card.hidden = !(periods.length || error);
+    if (detail) detail.hidden = !(zone || periods.length || alerts.length || error);
+    syncSelectedLocationWeatherSections();
     setMarineZoneOverlay(zone, payload.geometry || null);
   }
 
@@ -9973,26 +10431,26 @@ function positionMapOverlaysPanel() {
         if (serial !== marineForecastRequestSerial) return;
         setMarineZoneOverlay("", null);
 
-        var card = document.getElementById("marine-forecast-card");
-        var title = document.getElementById("marine-forecast-title");
+        var detail = document.getElementById("selected-location-weather-detail");
         var periodsBox = document.getElementById("marine-forecast-periods");
         var alertsBox = document.getElementById("marine-forecast-alerts");
         var note = document.getElementById("marine-forecast-note");
         var errorBox = document.getElementById("marine-forecast-error");
         var zoneLine = document.getElementById("marine-forecast-zone");
 
-        if (title) title.textContent = "NWS Forecast — selected location";
         if (zoneLine) zoneLine.hidden = true;
         if (periodsBox) periodsBox.hidden = true;
         if (alertsBox) alertsBox.hidden = true;
         if (note) note.hidden = true;
+        selectedMarineForecastHasPeriods = false;
         if (errorBox) {
           errorBox.hidden = false;
           errorBox.textContent =
             "NWS forecast information could not be refreshed: " +
             (err && err.message ? err.message : "unknown error");
         }
-        if (card) card.hidden = false;
+        if (detail) detail.hidden = false;
+        syncSelectedLocationWeatherSections();
       });
   }
 
@@ -10369,8 +10827,9 @@ function positionMapOverlaysPanel() {
         : null;
 
     if (originalTarget && originalTarget.closest &&
-        originalTarget.closest(".map-wind-candidate")) {
-      // Selecting a wind source must never move the ★ sailing location.
+        (originalTarget.closest(".map-wind-candidate") ||
+         originalTarget.closest(".alertcalifornia-marker"))) {
+      // Selecting a wind source or opening a camera must never move the ★ sailing location.
       return;
     }
 
@@ -10405,8 +10864,12 @@ function positionMapOverlaysPanel() {
       pointWeatherRequestSerial++;
       marineForecastRequestSerial++;
       setMarineZoneOverlay("", null);
-      var marineForecastCard = document.getElementById("marine-forecast-card");
-      if (marineForecastCard) marineForecastCard.hidden = true;
+      selectedPointWeatherHasData = false;
+      selectedPointWeatherError = "";
+      selectedMarineForecastHasPeriods = false;
+      var selectedWeatherDetail = document.getElementById("selected-location-weather-detail");
+      if (selectedWeatherDetail) selectedWeatherDetail.hidden = true;
+      syncSelectedLocationWeatherSections();
       offshoreTripRequestSerial++;
       fishingPlanningRequestSerial++;
       var offshoreTripCard = document.getElementById("offshore-trip-card");

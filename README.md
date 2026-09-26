@@ -6,8 +6,8 @@ The default wind station is **PSBC1**.
 
 ## Current release
 
-**Public version: 1.10.0**  
-**Generated source lineage: v263**
+**Public version: 1.11.0**  
+**Generated source lineage: v272**
 
 **Current SST status:** deferred/disabled in v195; see **Deferred SST — future approach** below.
 **Current chlorophyll status:** both Chlorophyll Field and Chlorophyll Contours are deferred/disabled in v198.
@@ -17,6 +17,92 @@ Version 1.9.2 builds on the streamlined browser workflow with clearer observatio
 
 
 
+
+## v272 / 1.11.0 release management + weather-column alignment
+
+- Advances the public application version to **1.11.0** and generated build to **v272**.
+- Treats the ALERTCalifornia camera integration introduced across the v264-v267 work as the feature that begins the **1.11.x** release line.
+- Top-aligns the two desktop weather columns: **Selected Location Weather / NWS Point Forecast** starts at the top of the left column and **NWS Marine Forecast** starts at the same top edge on the right.
+- Keeps the v271 full-width weather panel, desktop two-column split, narrow-screen stacking, and all v270 point-vs-marine behavior unchanged.
+- Adds an explicit README version-management policy requiring every future `regen` to make a deliberate SemVer decision before assigning the next build number.
+- Makes semantic-version carry-forward an explicit decision rather than an automatic default.
+
+## v271 / 1.10.0 Selected Location Weather two-column layout
+
+- Advances the generated application build to **v271** while retaining public version **1.10.0**.
+- Moves the **Selected Location Weather** panel to the full available width below the latitude/longitude controls instead of constraining it to the right half of the Location card.
+- On desktop, lays out **NWS Point Forecast** on the left and the wider **NWS Marine Forecast** section on the right, using approximately a 37/63 split so marine forecast periods have more room.
+- Replaces the vertical divider between point and marine products with a responsive layout boundary; on narrow screens the two forecast sections stack vertically with a horizontal divider.
+- Keeps all v270 point-vs-marine terminology, conditional point-forecast suppression, NWS retrieval behavior, forecast-zone handling, and unrelated map/report behavior unchanged.
+
+## v270 / 1.10.0 NWS point-vs-marine forecast labeling
+
+- Advances the generated application build to **v270** while retaining public version **1.10.0**.
+- Keeps the unified **Selected Location Weather** box but explicitly distinguishes **NWS Point Forecast** from **NWS Marine Forecast**.
+- Labels populated coastal marine products as **NWS Marine Forecast — Zone [zone]** and labels the zone metadata as **Marine zone [zone]**.
+- Treats the nearby city/state returned by NWS as a reference location by displaying **Near [place]**, rather than implying the selected map point is physically inside that city.
+- When NWS point-weather temperature/high/low data is unavailable but a valid marine-zone forecast exists, hides the empty point-temperature row and suppresses the misleading red point-forecast error. A neutral message explains that the marine-zone forecast below is the applicable product.
+- Keeps point-forecast errors visible when there is no valid marine forecast to substitute.
+- Repairs two v269 JavaScript variable-reference regressions in the offshore-trip and marine-forecast error paths discovered during this normalization pass.
+- Leaves NWS retrieval endpoints, forecast-zone geometry, ALERTCalifornia behavior, station selection, and wind/current calculations unchanged.
+
+## v269 / 1.10.0 Selected Location Weather merge
+
+- Advances the generated application build to **v269** while retaining public version **1.10.0**.
+- Replaces the two separate selected-location NWS weather/forecast boxes with one **Selected Location Weather** box in the Location section.
+- Keeps the compact NWS point-forecast summary at the top: selected place, current-hour forecast temperature, high, low, short forecast, and update time.
+- Places the detailed **NWS Forecast** content in the same box below the local summary, including active alerts, forecast-zone metadata, marine forecast periods, explanatory note, and forecast errors.
+- Removes the separate full-width `NWS Forecast — Selected Location` card and the v268 JavaScript summary-copy bridge, eliminating duplicated weather information and duplicate headings.
+- Keeps the existing NWS point-weather and marine-forecast retrieval endpoints, forecast-zone overlay behavior, and all v267 ALERTCalifornia behavior unchanged.
+
+## v268 / 1.10.0 selected-location NWS forecast normalization
+
+- Advances the generated application build to **v268** while retaining public version **1.10.0**.
+- Normalizes the compact selected-location weather panel and the detailed NWS forecast card around the same **NWS Forecast — Selected Location** terminology.
+- Renames **Air temp** to **Forecast temp** so the current-hour NWS forecast value is not mistaken for a direct weather observation.
+- Uses the same selected-place label, forecast temperature, expected high/low, and short-forecast phrase in both forecast surfaces.
+- Adds the compact selected-location forecast summary to the detailed NWS card and keeps it synchronized when the selected point changes or fresh point-forecast data arrives.
+- Standardizes detailed-card metadata to **NWS forecast zone … · Updated …** while preserving official marine-zone forecast periods, alerts, zone geometry, and all existing retrieval logic.
+- Leaves ALERTCalifornia v267 behavior, station selection, map state, wind/current calculations, and all unrelated report behavior unchanged.
+
+## v267 / 1.10.0 ALERTCalifornia camera-key regression repair
+
+- Advances the generated application build to **v267** while retaining public version **1.10.0**.
+- Repairs the v266 ALERTCalifornia rendering regression by defining the missing `alertCaliforniaCameraKey(feature)` helper used by the center-priority selection and hysteresis logic.
+- Uses ArcGIS `OBJECTID` as the primary deterministic camera key, with `siteId`, camera name, and coordinates as a fallback when an object ID is unavailable.
+- Leaves the v266 paging, 75-camera center-priority cap, retention hysteresis, failed-refresh preservation, camera-click isolation, and v265 fixed camera panel behavior unchanged.
+
+## v266 / 1.10.0 ALERTCalifornia complete paging + center-stable density filtering
+
+- Advances the generated application build to **v266** while retaining public version **1.10.0**.
+- Fixes dense ALERTCalifornia views being incomplete or apparently random by paging through the ArcGIS FeatureServer in deterministic `OBJECTID` order instead of accepting only the service's first 50 records.
+- Keeps the geographic request bounded to the current map viewport, but now returns the complete camera set in that viewport before applying any display-density policy.
+- Caps displayed camera markers at **75** only when the complete viewport contains more than 75 cameras. Cameras are ranked by normalized screen distance from the current map center, so the central field remains populated while the outer periphery is thinned first.
+- Adds mild retention hysteresis for cameras already being displayed, reducing marker swapping near the 75-camera cutoff during small pans and recenters while preserving a hard 75-marker cap.
+- Reports dense-view filtering explicitly, for example `75 of 103 cameras shown · center-prioritized`, rather than making omitted peripheral cameras look like missing source data.
+- Replaces the camera layer only after a complete successful response is ready; a failed refresh keeps the previous markers instead of blanking the overlay.
+- Adds Leaflet `bubblingMouseEvents: false` plus an ALERTCalifornia-marker guard in the map click handler so opening a camera cannot move the selected ★ sailing location.
+- Preserves the v265 fixed camera panel, official camera imagery/live links, UC San Diego attribution, and all unrelated map/report behavior.
+
+## v265 / 1.10.0 ALERTCalifornia fixed camera panel
+
+- Advances the generated application build to **v265** while retaining public version **1.10.0**.
+- Replaces ALERTCalifornia's large marker-anchored Leaflet popup with a fixed camera panel inside the map container so camera details are not clipped near map edges and clicking a camera no longer auto-pans or jumps the map.
+- Keeps the camera name in a fixed panel header with an explicit close button and places metadata, current unmodified image, official live-camera link, and **ALERTCalifornia | UC San Diego** attribution in a scrollable panel body.
+- Constrains the panel and image to the current map height, with a smaller responsive image cap on narrow screens.
+- Closes the camera panel when the camera overlay is disabled or refreshed for a new viewport, preventing stale camera details from remaining after the marker set changes.
+- Leaves the v264 ALERTCalifornia server proxy, viewport filtering, marker status colors, source attribution, and all other map behavior unchanged.
+
+## v264 / 1.10.0 ALERTCalifornia camera overlay
+
+- Advances the generated application build to **v264** while retaining public version **1.10.0**.
+- Adds an optional **Map Overlays → Observations → ALERTCalifornia Cameras (UC San Diego)** layer.
+- Adds `/alertcalifornia-cameras`, a bounded server-side proxy to the official ALERTCalifornia ArcGIS FeatureServer. The browser sends the current map viewport and the server requests only intersecting camera records.
+- Camera markers distinguish online and offline status. Each marker popup shows the camera name, county/status context, the current unmodified camera image when available, a link to the official live-camera page, and **ALERTCalifornia | UC San Diego** attribution.
+- Camera image URLs and external camera links are accepted only when they are HTTPS URLs.
+- The layer is off by default, reloads after map movement only while enabled, and participates in **Clear all overlays** without changing the selected sailing location or station state.
+- Adds ALERTCalifornia to the map legend, overlay help, map/data sources information, Welcome-page map description, and map-choice FAQ.
+- Preserves the v263 Ferry Terminals overlay work, the v257 fixed-position Map Overlays popup behavior, and all existing NOAA/NWS/NDBC/Marine Places overlays.
 
 ## Marine Places generator v32 route-member endpoint parser + ferry dataset v3
 
@@ -744,16 +830,18 @@ The local default port is `8080`. On Render, the `PORT` environment variable is 
 
 The normal development workflow is:
 
-1. Generate and review a versioned source candidate such as `main-updated-v115.go`.
-2. Run `gofmt` on the generated source.
-3. Record SHA-256 checkpoints.
-4. Manually copy the reviewed generated source to `main.go`.
-5. Copy the reviewed README candidate to `README.md` when applicable.
-6. Run the local project-state checker.
-7. Build and test locally.
-8. Inspect the Git diff.
-9. Commit and push to GitHub `main`.
-10. Allow Render to deploy the new revision.
+1. Classify the requested change as **major**, **minor**, **patch/micro**, or **no application semantic-version change**.
+2. Set the intended `appVersion` deliberately and increment `buildVersion` for the new generated candidate.
+3. Generate and review a versioned source candidate such as `main-updated-v115.go`.
+4. Run `gofmt` on the generated source.
+5. Record SHA-256 checkpoints.
+6. Manually copy the reviewed generated source to `main.go`.
+7. Copy the reviewed README candidate to `README.md` when applicable.
+8. Run the local project-state checker.
+9. Build and test locally.
+10. Inspect the Git diff.
+11. Commit and push to GitHub `main`.
+12. Allow Render to deploy the new revision.
 
 Generated source filenames are development lineage identifiers and are not the same thing as the public application version.
 
@@ -761,13 +849,28 @@ Generated source filenames are development lineage identifiers and are not the s
 
 The public application version is maintained in the `appVersion` constant in `main.go`.
 
+### Active version-management policy
+
+Versioning must be actively managed on **every generated build**. Before generating a new `main-updated-vNN.go`, explicitly classify the requested change and decide whether `appVersion` must change. Never carry the previous semantic version forward merely because the next `buildVersion` is being generated.
+
+Use these rules:
+
+- **`buildVersion`** increments for every generated application-source candidate: `v271` → `v272` → `v273`.
+- **Patch / micro** (`1.11.0` → `1.11.1`) is for bug fixes, regressions, and UI refinements that do not add a substantial user-facing capability.
+- **Minor** (`1.10.0` → `1.11.0`) is for meaningful new user-facing capabilities, overlays, endpoints, workflows, or data products.
+- **Major** is reserved for intentionally incompatible or fundamental application changes.
+- **Generator/data-only changes** may retain the current application semantic version when deployed application behavior is unchanged.
+- Every `regen` must explicitly verify both `appVersion` and `buildVersion`.
+- The README **Current release**, the newest release-note heading, the expected runtime identity, and the managed `main.go` SHA-256 checkpoint must agree with the generated source.
+- Once a semantic release line is started, subsequent build-only candidates may retain that semantic version only when that carry-forward is deliberate.
+
 The project uses three-part versions:
 
 - **major** — finalized release milestone
 - **minor** — new feature or significant behavior change
 - **micro** — small UI polish or minor refinement
 
-The current release candidate is **1.10.0**. Generated source builds also carry a separate `buildVersion` identifier so test clients can distinguish successive candidates.
+The current release candidate is **1.11.0**. Generated source builds also carry a separate `buildVersion` identifier so test clients can distinguish successive candidates.
 
 ### 1.9.1 / v131
 
@@ -1547,7 +1650,7 @@ This section is the authoritative development handoff for this repository. A new
 
 | Repository file | SHA-256 |
 | --- | --- |
-| `main.go` | `f6e3ac34372688442618fe84e27414a1f9048069db294952b795eb49157d469c` |
+| `main.go` | `ede5416e8fc8c747f493003440e8b46f0fb879013a10d6b20ca5d4c615ca16fb` |
 | `assets/yogiisms.txt` | `4ebf00217e194ee26a8e8fe38237b298800b36ead0c64accdbb82f623c142371` |
 | `assets/fishing_reports.json` | `02b01de77784153157c6a4a60d6ad21e286f7c191bbe204fed605659ea15ca5e` |
 | `check-project-state.sh` | `85fa5062e2ae4509174b6843ebc0066f4a94e2f2e90001230ca74c07aeb500dc` |
@@ -1564,7 +1667,7 @@ The generated build number is immutable. Any change to generated Go source bytes
 
 The public application version and generated build are separate identities. The current runtime identity is expected to render as:
 
-`Version 1.9.3 · Build v234`
+`Version 1.11.0 · Build v272`
 
 For future public pushes, increment the patch/micro version (`1.9.2` → `1.9.3` → `1.9.4`, and so on). Existing Git release tags are immutable: never reuse or move an existing version tag.
 
@@ -1612,7 +1715,7 @@ Conditions Now displays the active wind/current station context, compact wind me
 
 The shared **Wind units: Knots / MPH** and **Distance units: Nautical Miles / Miles** controls appear immediately below the hero image on both Conditions Now and Planning and Details. They use `wind_unit` and `distance_unit` query state so both preferences remain synchronized during navigation.
 
-Planning and Details includes location selection, nearby wind-station discovery, current-station context, 1/3/7-day current planning, wind history from 1h through 24h, NWS forecast context, Local Conditions at a selected point, map types, independent map overlays, and Center Map controls.
+Planning and Details includes location selection, nearby wind-station discovery, current-station context, 1/3/7-day current planning, wind history from 1h through 24h, selected-location NWS point and marine forecast context, map types, independent map overlays, and Center Map controls.
 
 The **Location** card treats selected location and map viewport center as separate state. Latitude/Longitude display the viewport center and can be edited without side effects; **Center Map → Latitude & Longitude** explicitly applies those values. Candidate wind stations appear only after an actual selected location exists. Detailed behavior is available from the card’s **ⓘ About location selection** popover.
 
@@ -1620,7 +1723,7 @@ The **Center Map** menu uses momentary actions for My location, Latitude & Longi
 
 The selected currents station associated with the active wind station is shown automatically when available. **Clear selected location, station & candidates** removes the selected location, committed wind-station map selection, associated currents-station marker, and derived wind candidates while leaving active wind-barb overlays in place.
 
-The **Local Conditions** panel is permanently reserved beside the Lat/Lon controls on wider screens to avoid layout jumps. For a selected location it uses NWS point metadata/forecast data to show nearby city/state, current-hour forecast temperature, expected high/low, and a short forecast phrase.
+The **Selected Location Weather** panel spans the Location card below the Lat/Lon controls. On desktop it presents **NWS Point Forecast** and **NWS Marine Forecast** side by side and top-aligned, with the marine section given more width for forecast periods; on narrow screens the two sections stack. If point-temperature data is unavailable while a valid marine forecast exists, the empty point-weather row is suppressed and the marine forecast is presented as the applicable product.
 
 Dynamic HTML responses use no-cache headers so Safari/Dock WebView clients pick up new builds without requiring repeated manual website-data clearing. Runtime HTML displays both public version and generated build.
 
