@@ -29,8 +29,8 @@ import (
 )
 
 const (
-	appVersion                      = "1.11.0"
-	buildVersion                    = "v272"
+	appVersion                      = "1.12.8"
+	buildVersion                    = "v293"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -2241,6 +2241,298 @@ func runServer(
 
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "private, max-age=60")
+		if err := json.NewEncoder(w).Encode(payload); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+
+	// Global swell forecast used by the optional surfer-oriented map overlay.
+	// Source: PacIOOS public ERDDAP WaveWatch III global model, lon +/-180
+	// variant. The model is ~0.5 degree (~50 km) resolution and is appropriate
+	// for basin-scale swell tracking, not surf-break-scale forecasting.
+	mux.HandleFunc("/swell-forecast", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		q := r.URL.Query()
+		parseFinite := func(name string) (float64, error) {
+			raw := strings.TrimSpace(q.Get(name))
+			if raw == "" {
+				return 0, fmt.Errorf("%s is required", name)
+			}
+			v, err := strconv.ParseFloat(raw, 64)
+			if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
+				return 0, fmt.Errorf("%s must be a finite number", name)
+			}
+			return v, nil
+		}
+
+		west, err := parseFinite("west")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		south, err := parseFinite("south")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		east, err := parseFinite("east")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		north, err := parseFinite("north")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if west < -180 || east > 180 || south < -90 || north > 90 ||
+			west >= east || south >= north {
+			http.Error(w, "invalid swell map bounds", http.StatusBadRequest)
+			return
+		}
+
+		// PacIOOS ww3_global_lon180 exposes longitude samples from -179.5
+		// through +179.5. Clamp to the actual ERDDAP axis before constructing
+		// the griddap constraint so padded/world-wrap requests never ask for
+		// a non-existent 180.0-degree grid point.
+		west = math.Max(-179.5, west)
+		east = math.Min(179.5, east)
+
+		// The operational global model spans roughly +/-77.5 latitude.
+		south = math.Max(-77.5, south)
+		north = math.Min(77.5, north)
+		if west >= east || south >= north {
+			http.Error(w, "map bounds are outside the WaveWatch III grid", http.StatusBadRequest)
+			return
+		}
+
+		hoursAhead := 0
+		if raw := strings.TrimSpace(q.Get("hours")); raw != "" {
+			parsed, err := strconv.Atoi(raw)
+			if err != nil || parsed < 0 || parsed > 120 {
+				http.Error(w, "hours must be an integer from 0 through 120", http.StatusBadRequest)
+				return
+			}
+			hoursAhead = parsed
+		}
+
+		// Use one stride for every world-wrap segment in a browser view. When
+		// supplied by the browser, this keeps all segments on the same global
+		// WW3 sampling lattice. Legacy/direct callers still get the automatic
+		// responsive stride calculation.
+		const nativeStep = 0.5
+		stride := 0
+		if raw := strings.TrimSpace(q.Get("stride")); raw != "" {
+			parsed, err := strconv.Atoi(raw)
+			if err != nil || parsed < 1 || parsed > 20 {
+				http.Error(w, "stride must be an integer from 1 through 20", http.StatusBadRequest)
+				return
+			}
+			stride = parsed
+		}
+		if stride == 0 {
+			lonCells := math.Max(1, (east-west)/nativeStep)
+			latCells := math.Max(1, (north-south)/nativeStep)
+			stride = int(math.Ceil(math.Max(lonCells/48.0, latCells/32.0)))
+			if stride < 1 {
+				stride = 1
+			}
+			if stride > 20 {
+				stride = 20
+			}
+		}
+
+		// Axis geometry for ww3_global_lon180. Build latitude/longitude subsets
+		// with integer indices aligned to the global origin instead of using
+		// coordinate-valued starts. ERDDAP strides are index-based, so this
+		// guarantees that independently requested wrapped segments use the same
+		// congruence class and cannot drift onto different coarse lattices.
+		const (
+			lonMinIndex = 0
+			lonMaxIndex = 718 // -179.5 .. +179.5 at 0.5 degree spacing
+			latMinIndex = 0
+			latMaxIndex = 310 // -77.5 .. +77.5 at 0.5 degree spacing
+			lonOrigin   = -179.5
+			latOrigin   = -77.5
+		)
+
+		indexFloor := func(value, origin float64) int {
+			return int(math.Floor((value-origin)/nativeStep + 1e-9))
+		}
+		indexCeil := func(value, origin float64) int {
+			return int(math.Ceil((value-origin)/nativeStep - 1e-9))
+		}
+		alignDown := func(index, step int) int {
+			if index < 0 {
+				return 0
+			}
+			return (index / step) * step
+		}
+		alignUp := func(index, step, maximum int) int {
+			if index < 0 {
+				index = 0
+			}
+			aligned := ((index + step - 1) / step) * step
+			if aligned > maximum {
+				aligned = maximum
+			}
+			return aligned
+		}
+
+		lonStart := alignDown(indexFloor(west, lonOrigin), stride)
+		lonStop := alignUp(indexCeil(east, lonOrigin), stride, lonMaxIndex)
+		latStart := alignDown(indexFloor(south, latOrigin), stride)
+		latStop := alignUp(indexCeil(north, latOrigin), stride, latMaxIndex)
+
+		if lonStart < lonMinIndex {
+			lonStart = lonMinIndex
+		}
+		if lonStop > lonMaxIndex {
+			lonStop = lonMaxIndex
+		}
+		if latStart < latMinIndex {
+			latStart = latMinIndex
+		}
+		if latStop > latMaxIndex {
+			latStop = latMaxIndex
+		}
+		if lonStart > lonStop || latStart > latStop {
+			http.Error(w, "map bounds produce an empty WaveWatch III index subset", http.StatusBadRequest)
+			return
+		}
+
+		target := time.Now().UTC().Truncate(time.Hour).Add(time.Duration(hoursAhead) * time.Hour)
+		targetText := target.Format("2006-01-02T15:04:05Z")
+		subset := fmt.Sprintf(
+			"[(%s)][(0.0)][%d:%d:%d][%d:%d:%d]",
+			targetText, latStart, stride, latStop, lonStart, stride, lonStop,
+		)
+		projection := "shgt" + subset + ",sper" + subset + ",sdir" + subset
+		upstreamURL := "https://pae-paha.pacioos.hawaii.edu/erddap/griddap/ww3_global_lon180.json?" +
+			url.QueryEscape(projection)
+
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, upstreamURL, nil)
+		if err != nil {
+			http.Error(w, "could not build swell request: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "MauriWeatherWaterConditions/"+appVersion)
+
+		client := &http.Client{Timeout: 18 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			http.Error(w, "PacIOOS WaveWatch III request failed: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := ioutil.ReadAll(io.LimitReader(resp.Body, 4096))
+			detail := strings.TrimSpace(string(body))
+			if detail == "" {
+				detail = resp.Status
+			}
+			http.Error(w, "PacIOOS WaveWatch III: "+detail, http.StatusBadGateway)
+			return
+		}
+
+		var upstream struct {
+			Table struct {
+				ColumnNames []string        `json:"columnNames"`
+				Rows        [][]interface{} `json:"rows"`
+			} `json:"table"`
+		}
+		decoder := json.NewDecoder(io.LimitReader(resp.Body, 8<<20))
+		if err := decoder.Decode(&upstream); err != nil {
+			http.Error(w, "could not decode PacIOOS WaveWatch III response: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+
+		columnIndex := map[string]int{}
+		for i, name := range upstream.Table.ColumnNames {
+			columnIndex[name] = i
+		}
+		required := []string{"time", "latitude", "longitude", "shgt", "sper", "sdir"}
+		for _, name := range required {
+			if _, ok := columnIndex[name]; !ok {
+				http.Error(w, "PacIOOS WaveWatch III response missing "+name, http.StatusBadGateway)
+				return
+			}
+		}
+
+		type swellPoint struct {
+			Lat          float64 `json:"lat"`
+			Lon          float64 `json:"lon"`
+			HeightM      float64 `json:"height_m"`
+			PeriodS      float64 `json:"period_s"`
+			DirectionDEG float64 `json:"direction_deg"`
+		}
+		points := make([]swellPoint, 0, len(upstream.Table.Rows))
+		actualTime := ""
+
+		asFloat := func(row []interface{}, index int) (float64, bool) {
+			if index < 0 || index >= len(row) || row[index] == nil {
+				return 0, false
+			}
+			v, ok := row[index].(float64)
+			if !ok || math.IsNaN(v) || math.IsInf(v, 0) {
+				return 0, false
+			}
+			return v, true
+		}
+
+		for _, row := range upstream.Table.Rows {
+			if actualTime == "" {
+				if idx := columnIndex["time"]; idx >= 0 && idx < len(row) {
+					if t, ok := row[idx].(string); ok {
+						actualTime = strings.TrimSpace(t)
+					}
+				}
+			}
+			lat, okLat := asFloat(row, columnIndex["latitude"])
+			lon, okLon := asFloat(row, columnIndex["longitude"])
+			height, okHeight := asFloat(row, columnIndex["shgt"])
+			period, okPeriod := asFloat(row, columnIndex["sper"])
+			direction, okDirection := asFloat(row, columnIndex["sdir"])
+			if !okLat || !okLon || !okHeight || !okPeriod || !okDirection ||
+				height < 0 || period <= 0 {
+				continue
+			}
+			points = append(points, swellPoint{
+				Lat:          lat,
+				Lon:          lon,
+				HeightM:      math.Round(height*100) / 100,
+				PeriodS:      math.Round(period*10) / 10,
+				DirectionDEG: math.Mod(math.Mod(direction, 360)+360, 360),
+			})
+		}
+
+		payload := struct {
+			ForecastTime string       `json:"forecast_time"`
+			HoursAhead   int          `json:"hours_ahead"`
+			GridStepDEG  float64      `json:"grid_step_deg"`
+			GridStride   int          `json:"grid_stride"`
+			Points       []swellPoint `json:"points"`
+			Source       string       `json:"source"`
+			Note         string       `json:"note"`
+		}{
+			ForecastTime: actualTime,
+			HoursAhead:   hoursAhead,
+			GridStepDEG:  nativeStep * float64(stride),
+			GridStride:   stride,
+			Points:       points,
+			Source:       "PacIOOS / NOAA-NCEP WaveWatch III global swell forecast",
+			Note:         "Approximately 0.5-degree (~50 km) model for basin-scale swell tracking; not a surf-break forecast.",
+		}
+
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "private, max-age=300")
 		if err := json.NewEncoder(w).Encode(payload); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
@@ -6210,7 +6502,7 @@ h3{margin:1.2rem 0 .35rem;color:var(--navy)}
 <details><summary>What does Local Conditions show?</summary><p>For the selected map point, the app uses the NWS point forecast to show the nearby city/state label, current-hour forecast temperature, expected high/low, and a short forecast phrase.</p></details>
 <details><summary>Can I choose another wind station?</summary><p>Yes. Nearby wind-station candidates appear after you select a location. You can compare them on the map/table and choose the station you think best represents the water you care about.</p></details>
 <details><summary>Is this tide data or current data?</summary><p><strong>Current data.</strong> The graph is predicted speed and direction of moving water — flood above zero, ebb below zero, and crossings near slack. Tide height and current are related, but they are not the same thing.</p></details>
-<details><summary>What map choices are available?</summary><p>Planning and Details includes Street Map, Nautical Chart, Satellite, and Hybrid basemaps; independent forecast-zone, satellite-smoke, NOAA CoastWatch Sea Surface Temp, NOAA/NESDIS cloud-cover, NEXRAD radar, and ALERTCalifornia camera overlays; and Center Map actions for your location, entered coordinates, selected location, wind station, and currents station.</p></details>
+<details><summary>What map choices are available?</summary><p>Planning and Details includes Street Map, Nautical Chart, Satellite, and Hybrid basemaps; independent forecast-zone, satellite-smoke, global PacIOOS/NOAA WaveWatch III swell, NOAA CoastWatch Sea Surface Temp, NOAA/NESDIS cloud-cover, NEXRAD radar, and ALERTCalifornia camera overlays; and Center Map actions for your location, entered coordinates, selected location, wind station, and currents station.</p></details>
 <details><summary>Is this for navigation or safety decisions?</summary><p>No. It is a conditions-planning and exploration tool. Observations can be delayed or missing, station exposure differs, and current/forecast products have limitations. Use official marine forecasts, charts, notices, local knowledge, and prudent seamanship.</p></details>
 </section>
 
@@ -6376,14 +6668,14 @@ var sailingHTMLTemplate = template.Must(template.New("sailing").Parse(`<!doctype
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <style>:root{--navy:#082b45;--blue:#126b91;--sea:#0b8793;--ink:#153242;--muted:#607886;--paper:#f5fafc;--card:#fff;--line:#d8e7ed;--flood:#087f8c;--ebb:#365f91;--slack:#756d64;--shadow:0 12px 34px rgba(8,43,69,.10)}*{box-sizing:border-box}body.tide-context-modal-open{overflow:hidden}body{margin:0;background:linear-gradient(180deg,#dff3f8,#f7fbfc 32rem);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Avenir Next",Avenir,Helvetica,Arial,sans-serif;line-height:1.45}.shell{max-width:880px;margin:auto;padding:28px 18px 64px}.hero{color:#fff;padding:34px 30px 30px;border-radius:24px;min-height:360px;display:flex;flex-direction:column;justify-content:flex-end;background:
 linear-gradient(180deg,rgba(4,24,38,.06) 12%,rgba(4,24,38,.24) 48%,rgba(4,24,38,.86) 100%),
-url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text-shadow:0 2px 12px rgba(0,0,0,.45)}.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-weight:800;font-size:.76rem;opacity:.8}.photo-tag{margin-top:14px;font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;opacity:.72}h1{font-size:clamp(1.8rem,6vw,3.2rem);line-height:1.05;margin:.4rem 0 .6rem;letter-spacing:-.035em}.sub{opacity:.82}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}.full{grid-column:1/-1}h2{font-size:.82rem;letter-spacing:.13em;text-transform:uppercase;color:var(--blue);margin:0 0 16px}.bottom{font-size:1.13rem}.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.wind-card .metric{min-width:0}.wind-card .value{white-space:nowrap}@media(max-width:640px){.wind-card .metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}.metric{background:var(--paper);border-radius:15px;padding:14px}.label{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700}.value{font-size:1.55rem;font-weight:800;color:var(--navy)}.meta{color:var(--muted);font-size:.88rem;margin-top:12px}.station{font-weight:800;font-size:1.1rem;color:var(--navy)}.wind-distance-warning{margin-top:10px;padding:10px 12px;border:1px solid #e7c978;border-radius:12px;background:#fff8df;color:#654d08;font-size:.9rem}.wind-distance-warning strong{color:#4e3a00}.wind-summary{white-space:pre-line;margin-top:14px;padding:13px 14px;background:#eef7fa;border-left:4px solid var(--sea);border-radius:10px;color:var(--ink);font-size:.92rem}.event{display:grid;grid-template-columns:88px 12px 1fr;gap:12px;align-items:center;min-height:58px}.time{font-weight:800;color:var(--navy)}.dot{width:12px;height:12px;border-radius:50%;background:var(--slack);box-shadow:0 0 0 5px #edf3f5}.flood .dot{background:var(--flood)}.ebb .dot{background:var(--ebb)}.eventbody{border-left:2px solid var(--line);padding:8px 0 8px 18px}.eventlabel{font-weight:800}.eventdata{color:var(--muted);font-size:.9rem}.badge{display:inline-block;border-radius:999px;padding:5px 10px;background:#e9f6fb;color:var(--blue);font-size:.75rem;font-weight:800;margin-top:12px}.footer{text-align:center;color:var(--muted);font-size:.78rem;margin-top:22px}.hero .yogiism{margin:18px 0 0;max-width:720px;color:#fff;font-style:italic;font-size:.96rem;line-height:1.4;opacity:.96}.full-report{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:.88rem;line-height:1.55;background:#071f31;color:#e7f4f8;border-radius:14px;padding:18px;overflow-x:auto}.wind-readings{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}.wind-readings-header{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:8px}.wind-readings-title{font-weight:850;color:var(--navy)}.wind-reading-control{display:flex;align-items:flex-end;gap:7px;flex-wrap:wrap}.wind-reading-control label{display:flex;flex-direction:column;gap:3px;color:var(--muted);font-size:.72rem;font-weight:850;text-transform:uppercase;letter-spacing:.04em}.wind-reading-control select{min-width:76px;padding:6px 28px 6px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;font:inherit}.wind-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap}.wind-card-head h2{margin-bottom:16px}.wind-unit-control{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:.72rem;font-weight:850;text-transform:uppercase;letter-spacing:.04em}.wind-unit-control select{padding:6px 28px 6px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;font:inherit;color:var(--ink)}.wind-reading-chart{margin:4px 0 12px;border:1px solid var(--line);border-radius:10px;background:#fff;padding:8px}.wind-reading-chart svg{display:block;width:100%;height:auto;min-height:260px;max-height:320px}.wind-chart-grid{stroke:#dce6e9;stroke-width:1}.wind-chart-axis{stroke:#8aa0a8;stroke-width:1}.wind-chart-wind{fill:none;stroke:#126b91;stroke-width:2.5;stroke-linejoin:round;stroke-linecap:round}.wind-chart-gust{fill:none;stroke:#a95a24;stroke-width:1.7;stroke-linejoin:round;stroke-linecap:round}.wind-chart-label{fill:#60747c;font-size:12px;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}@media(max-width:640px){.wind-chart-label{font-size:13px}.wind-chart-readout{font-size:.9rem}.wind-chart-legend{font-size:.86rem}}.wind-chart-legend{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin:0 0 6px;color:var(--muted);font-size:.78rem;font-weight:750}.wind-chart-key{display:inline-flex;align-items:center;gap:6px}.wind-chart-key-line{display:inline-block;width:22px;border-top:3px solid #126b91}.wind-chart-key-line.gust{border-top-color:#a95a24;border-top-width:2px;border-top-style:solid}.wind-chart-empty{padding:34px 12px;text-align:center;color:var(--muted);font-size:.85rem}.wind-chart-cursor{stroke:#263b46;stroke-width:1.4;pointer-events:none}.wind-chart-cursor-dot{fill:#fff;stroke-width:2;pointer-events:none}.wind-chart-cursor-dot.wind{stroke:#126b91}.wind-chart-cursor-dot.gust{stroke:#a95a24}.wind-chart-hit{fill:transparent;cursor:crosshair;touch-action:none}.wind-chart-readout{margin:-2px 0 8px;color:var(--ink);font-size:.82rem;font-weight:750;min-height:1.2em}.wind-readings-scroll-shell{position:relative}.wind-readings-wrap{max-height:132px;overflow:auto;border:1px solid var(--line);border-radius:10px;-webkit-overflow-scrolling:touch}.wind-readings-scroll-cue{display:none}@media(max-width:640px){.wind-readings-scroll-shell.has-more::after{content:"";position:absolute;left:1px;right:1px;bottom:1px;height:40px;border-radius:0 0 9px 9px;background:linear-gradient(to bottom,rgba(255,255,255,0),rgba(255,255,255,.94));pointer-events:none}.wind-readings-scroll-cue{position:absolute;z-index:3;left:50%;bottom:6px;transform:translateX(-50%);display:none;padding:3px 8px;border-radius:999px;background:rgba(255,255,255,.94);box-shadow:0 1px 5px rgba(7,31,49,.16);color:var(--muted);font-size:.68rem;font-weight:850;letter-spacing:.03em;white-space:nowrap;pointer-events:none}.wind-readings-scroll-shell.has-more .wind-readings-scroll-cue{display:block}}.wind-readings-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.84rem}.wind-readings-table th,.wind-readings-table td{padding:7px 9px;border-top:1px solid var(--line);text-align:left;white-space:nowrap}.wind-readings-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc;color:var(--muted);font-size:.7rem;text-transform:uppercase;letter-spacing:.05em}.wind-readings-table tbody tr:first-child td{border-top:0}.card-action-row{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}#current-summary-card,.wind-card{min-width:0}.timeline-scope-note{margin:.15rem 0 1rem;color:var(--muted);font-size:.88rem}.current-events-integrated{margin:14px 0 4px;padding:10px 0 0;border-top:1px solid var(--line)}.current-events-head{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:8px}.current-events-head strong{color:var(--navy);font-size:.92rem}.current-events-head span{color:var(--muted);font-size:.78rem}.current-key-times{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:28px;row-gap:2px}.current-key-time{display:grid;grid-template-columns:76px minmax(0,1fr);gap:10px;align-items:baseline;padding:5px 0;border-bottom:1px solid #edf2f3;font-size:.86rem}.current-key-time-time{font-weight:800;color:var(--navy);white-space:nowrap}.current-key-time-label{color:var(--ink)}.current-key-time-label strong{font-weight:800}.current-key-time-meta{color:var(--muted);margin-left:6px;white-space:nowrap}@media(max-width:640px){.current-key-times{grid-template-columns:1fr}.current-key-time{grid-template-columns:72px minmax(0,1fr)}}.details-link-card{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap}.details-link-card h2{margin-bottom:.2rem}.details-link{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;white-space:nowrap}.details-note{color:var(--muted);font-size:.88rem;margin:-4px 0 14px}.info-popup-row{display:flex;justify-content:flex-end;margin:8px 0 12px}.map-info-popup-row{gap:8px;flex-wrap:wrap}.info-popup-open{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);border-radius:999px;padding:8px 12px;background:#fff;color:var(--blue);font:inherit;font-size:.84rem;font-weight:850;cursor:pointer}.info-popup-open:hover{background:var(--paper)}.info-popup-open:focus-visible{outline:2px solid var(--blue);outline-offset:2px}.tide-context-launcher{grid-column:1/-1}.tide-context-open{width:100%;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px 18px;border:1px solid var(--line);border-radius:16px;background:#fff;color:var(--blue);box-shadow:var(--shadow);font:inherit;font-weight:850;cursor:pointer;text-align:left}.tide-context-open:hover{background:var(--paper)}.tide-context-open:focus-visible{outline:2px solid var(--blue);outline-offset:2px}.tide-context-modal,.info-popup-modal{position:fixed;inset:0;z-index:3000;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(7,31,49,.38)}.tide-context-modal[hidden],.info-popup-modal[hidden]{display:none}.tide-context-dialog,.info-popup-dialog{width:min(640px,calc(100vw - 32px));max-height:min(78vh,720px);display:flex;flex-direction:column;background:#fff;border:1px solid var(--line);border-radius:20px;box-shadow:0 24px 70px rgba(7,31,49,.32);overflow:hidden}.tide-context-dialog-head,.info-popup-dialog-head{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:16px 16px 12px 20px;border-bottom:1px solid var(--line);background:#fff;flex:0 0 auto}.tide-context-dialog-head h2,.info-popup-dialog-head h2{margin:0}.tide-context-close,.info-popup-close{display:inline-flex;align-items:center;justify-content:center;width:42px;height:42px;flex:0 0 42px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--navy);font:inherit;font-size:1.55rem;font-weight:700;line-height:1;cursor:pointer}.tide-context-close:hover,.info-popup-close:hover{background:var(--paper)}.tide-context-body,.info-popup-body{overflow:auto;padding:18px 20px 22px;-webkit-overflow-scrolling:touch}.tide-context-body>:first-child,.info-popup-body>:first-child{margin-top:0}.tide-context-body>:last-child,.info-popup-body>:last-child{margin-bottom:0}@media(max-width:700px){.tide-context-modal,.info-popup-modal{align-items:flex-end;padding:0;background:rgba(7,31,49,.42)}.tide-context-dialog,.info-popup-dialog{width:100%;max-height:calc(86dvh - env(safe-area-inset-bottom));border-radius:20px 20px 0 0;border-bottom:0}.tide-context-dialog-head,.info-popup-dialog-head{padding-top:14px;padding-right:max(12px,env(safe-area-inset-right));padding-left:max(18px,env(safe-area-inset-left))}.tide-context-close,.info-popup-close{width:44px;height:44px;flex-basis:44px}.tide-context-body,.info-popup-body{padding-right:max(18px,env(safe-area-inset-right));padding-bottom:max(24px,calc(env(safe-area-inset-bottom) + 14px));padding-left:max(18px,env(safe-area-inset-left))}}.current-chart-header{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap}.current-window-inline{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin:2px 0 10px;color:var(--muted);font-size:.86rem}.current-window-inline strong{color:var(--navy);font-size:.86rem}.current-window-inline span{white-space:nowrap}.current-chart-header h2{margin-bottom:.15rem}.current-date-label{color:var(--muted);font-weight:750;font-size:.9rem}.current-range-toolbar{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin:8px 0 10px;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:var(--paper)}.current-range-toolbar .current-date-nav{display:inline-flex;align-items:center;min-height:44px;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:8px 12px;background:#fff;color:var(--blue);font-size:.86rem;font-weight:850}.current-range-toolbar .current-date-nav.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-control-label{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:.75rem;font-weight:850}.current-control-label .current-date-picker{min-height:44px;font-size:1rem}@media(max-width:640px){.current-range-toolbar{align-items:stretch}.current-control-label{flex:1 1 140px}.current-range-toolbar .current-date-nav{justify-content:center;flex:1 1 135px}}.current-date-controls{display:flex;gap:7px;flex-wrap:wrap;align-items:center}.current-date-picker{border:1px solid var(--line);border-radius:999px;padding:6px 10px;background:#fff;color:var(--navy);font:inherit;font-size:.82rem;font-weight:750;min-height:34px}.current-date-picker:focus{outline:2px solid var(--blue);outline-offset:2px}.current-refreshing{opacity:.55;transition:opacity .15s ease}.current-date-controls a{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:7px 11px;background:#fff;color:var(--blue);font-size:.82rem;font-weight:850}.current-date-controls a:hover{background:var(--paper)}.current-date-controls a.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-planning{margin:16px 0 12px;padding:14px 16px;border:1px solid var(--line);border-radius:16px;background:#fff}.current-planning-head{display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:10px}.current-planning-head strong{color:var(--navy);font-size:1rem}.current-planning-head span{color:var(--muted);font-size:.82rem}.planning-preferences{display:flex;flex-direction:column;gap:10px;margin:8px 0 12px}.planning-preferences-row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;width:100%}.planning-preferences label{display:flex;gap:5px;align-items:center;color:var(--muted);font-size:.78rem;font-weight:850}.planning-preferences input{min-height:40px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--navy);font:inherit;font-size:1rem;padding:6px 8px}.planning-preferences input[type="number"]{width:76px}.planning-preferences b{color:var(--muted);font-size:.82rem}@media(max-width:640px){.planning-preferences label{flex:1 1 130px;justify-content:space-between}.planning-preferences input[type="time"]{min-width:110px}}.planning-help{margin:2px 0 12px;padding:10px 12px;border-radius:10px;background:#f7f9fa;color:var(--ink);font-size:.82rem;line-height:1.45}.planning-help strong{color:var(--navy)}.current-planning-days{display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:8px}.planning-day{border:1px solid var(--line);border-radius:12px;padding:10px;min-width:0}.planning-day.preferred{background:#eef8f3}.planning-day.caution{background:#fff8df;border-color:#e7c978}.planning-day.redflag{background:#fff0ed;border-color:#dfa297}.planning-date{font-size:.78rem;font-weight:850;color:var(--navy)}.planning-status{font-size:.92rem;font-weight:900;margin-top:2px}.preferred .planning-status{color:#176246}.caution .planning-status{color:#775900}.redflag .planning-status{color:#9a3328}.planning-detail{font-size:.78rem;line-height:1.35;color:var(--ink);margin-top:5px}.planning-disclaimer{color:var(--muted);font-size:.75rem;margin-top:9px}@media(max-width:640px){.current-planning-days{grid-template-columns:1fr 1fr}.planning-detail{font-size:.8rem}}.current-chart-wrap .event-point,.current-chart-wrap .event-point:hover{cursor:default!important;pointer-events:none}.current-chart-wrap{margin-top:16px}.current-chart-svg{display:block;width:100%;height:auto;background:#f8fbfc;border:1px solid var(--line);border-radius:16px}.grid-line{stroke:#d9e4e8;stroke-width:1}.v-grid-line{stroke:#e6eef1;stroke-width:1}.day-grid-line{stroke:#b7cbd4;stroke-width:1.4}.zero-line{stroke:#17384a;stroke-width:2}.axis-label{fill:#657d89;font-size:11px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.y-label{text-anchor:end}.x-label{text-anchor:middle}.axis-title{fill:#657d89;font-size:11px;text-anchor:middle}.tide-y-label{text-anchor:start}.tide-range-bar{opacity:1;stroke-width:3;stroke-linecap:round;fill:none}.tide-range-bar.typical{stroke:#4a6473}.tide-range-bar.elevated{stroke:#d5ad28}.tide-range-bar.large{stroke:#d9791f}.tide-range-bar.exceptional{stroke:#c94a3f}.tide-range-value{font-size:11px;font-weight:900;text-anchor:middle;paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round;fill:#17384a}.tide-range-toggle{display:flex;align-items:center;gap:7px;color:var(--ink);font-size:.84rem;font-weight:800}.tide-range-toggle input{margin:0}.tide-range-legend{display:flex;gap:10px;flex-wrap:wrap;align-items:center;color:var(--muted);font-size:.76rem}.tide-range-key{display:inline-flex;align-items:center;gap:5px}.tide-range-swatch{width:11px;height:11px;border-radius:3px;display:inline-block}.tide-range-swatch.typical{background:#4a6473}.tide-range-swatch.elevated{background:#d5ad28}.tide-range-swatch.large{background:#d9791f}.tide-range-swatch.exceptional{background:#c94a3f}.night-window{fill:#aebdc4;opacity:.78}.sail-window{fill:#f8fbfc;opacity:.96}.preferred-window{fill:#f0d46d;opacity:.34}.flood-area{fill:#6d8fd0;opacity:.86}.ebb-area{fill:#0b9d83;opacity:.90}.current-line{fill:none;stroke:#214b62;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}.event-point{stroke:#fff;stroke-width:1.5}.event-point.flood{fill:#5478bd}.event-point.ebb{fill:#078a75}.event-point.slack{fill:#756d64}.event-time{fill:#17384a;font-size:9px;font-weight:800;text-anchor:middle;paint-order:stroke;stroke:#fff;stroke-width:2.5px;stroke-linejoin:round}.event-time.flood{fill:#294f91}.event-time.ebb{fill:#066c5d}.event-time.slack{fill:#514b46}.now-line{stroke:#c63a2b;stroke-width:2.5}.now-label{fill:#c63a2b;font-size:11px;font-weight:800}.chart-explainer{color:var(--ink);font-size:.94rem;line-height:1.45;margin:2px 0 12px}.chart-note{color:var(--muted);font-size:.82rem;margin-top:9px}.candidate-table{width:100%;border-collapse:collapse;font-size:.86rem}.candidate-table th,.candidate-table td{padding:10px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}.candidate-table th{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}.candidate-table td.num,.candidate-table th.num{text-align:right;white-space:nowrap}.candidate-good td.status{font-weight:800}.candidate-bad{opacity:.82}.candidate-selected{background:rgba(20,120,100,.08)}.candidate-selected td:first-child{font-weight:800}.candidate-note{color:var(--muted);font-size:.82rem;margin:0 0 12px}.candidate-scroll{overflow-x:auto}.candidate-link{color:var(--blue);text-decoration:none;font-weight:800}.candidate-link:hover{text-decoration:underline}.candidate-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:0 0 12px}.nearest-link{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:7px 12px;color:var(--blue);font-weight:800;text-decoration:none;background:#fff}.nearest-link:hover{background:var(--paper)}.map-card{overflow:hidden}.map-intro{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px}.map-intro-title{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.map-intro-title h2{margin:0}.map-help{color:var(--muted);font-size:.9rem;max-width:600px;margin-top:6px}.location-help{position:relative}.location-help>summary{list-style:none;display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--blue);font-size:1rem;font-weight:900;cursor:pointer;box-shadow:0 2px 8px rgba(8,43,69,.08)}.location-help>summary::-webkit-details-marker{display:none}.location-help>summary:focus{outline:2px solid var(--blue);outline-offset:2px}.location-help-panel{position:absolute;z-index:1450;top:calc(100% + 8px);left:0;width:min(430px,calc(100vw - 48px));padding:0;border:1px solid var(--line);border-radius:14px;background:#fff;box-shadow:0 14px 34px rgba(8,43,69,.20);color:var(--ink);font-size:.88rem;line-height:1.45;text-transform:none;letter-spacing:normal;font-weight:500;overflow:hidden}.location-help-header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 10px 8px 16px;border-bottom:1px solid var(--line);background:#f8fbfc}.location-help-header strong{color:var(--navy);font-size:.9rem}.location-help-body{padding:12px 16px 14px}.location-help-close{position:static;flex:0 0 auto;width:36px;height:36px;display:flex;align-items:center;justify-content:center;border:0;border-radius:999px;background:#eef5f8;color:var(--navy);font:inherit;font-size:1.35rem;font-weight:900;line-height:1;cursor:pointer}.location-help-close:hover{background:#e1edf2}.location-help-close:focus{outline:2px solid var(--blue);outline-offset:2px}.location-help-panel p{margin:0 0 9px}.location-help-panel p:last-child{margin-bottom:0}@media(max-width:640px){.location-help-panel{position:fixed;z-index:2400;top:calc(env(safe-area-inset-top,0px) + 70px);left:14px;right:14px;width:auto;max-height:calc(100dvh - env(safe-area-inset-top,0px) - env(safe-area-inset-bottom,0px) - 100px);overflow:auto;-webkit-overflow-scrolling:touch}.location-help-header{position:sticky;top:0;z-index:2}.location-help-close{width:44px;height:44px}}.map-wrap{border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#dfecef}.location-map{height:390px;width:100%}.map-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px}.map-coordinate{font-variant-numeric:tabular-nums;color:var(--muted);font-size:.9rem}.map-go{display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--blue);border-radius:999px;padding:10px 16px;background:var(--blue);color:#fff;font-weight:850;text-decoration:none;cursor:pointer;min-height:42px}.map-go[aria-disabled="true"]{opacity:.45;pointer-events:none}.map-search-area{cursor:pointer}.map-search-area[aria-disabled="true"]{opacity:.45;pointer-events:none}.map-search-area[hidden]{display:none}.map-search-status{color:var(--muted);font-size:.82rem}.map-primary-actions{display:flex;gap:12px;align-items:stretch;flex-wrap:wrap;margin-top:12px}.map-primary-actions .map-go,.map-primary-actions .map-reset{flex:1 1 220px;max-width:360px;min-height:44px;padding:10px 16px;border:1px solid var(--blue);border-radius:999px;background:var(--blue);color:#fff;font:inherit;font-weight:850;text-align:center;justify-content:center;cursor:pointer}.map-reset{display:inline-flex;align-items:center}.map-reset:disabled{opacity:.45;cursor:default}.location-map .leaflet-popup-pane{z-index:1200}.location-map .leaflet-control-attribution,.location-map .map-scale-status{pointer-events:none}@media(max-width:700px){.location-map .leaflet-bottom.leaflet-right{z-index:650}.map-primary-actions{display:grid;grid-template-columns:1fr;gap:10px}.map-primary-actions .map-go,.map-primary-actions .map-reset{width:100%;max-width:none;min-height:46px}}.map-navigation{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}.map-state-controls{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:10px}.map-current-toggle{display:inline-flex;align-items:center;gap:7px;color:var(--ink);font-weight:750;font-size:.88rem}.map-current-toggle input{margin:0}.map-overlays-menu{position:relative}.map-overlays-menu summary{list-style:none;cursor:pointer;border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;font-size:.88rem}.map-overlays-menu summary::-webkit-details-marker{display:none}.map-overlays-menu summary::after{content:" ▾";font-size:.78em}.map-overlays-menu[open] summary::after{content:" ▴"}.map-overlays-panel{position:absolute;z-index:700;top:calc(100% + 6px);left:0;min-width:270px;max-width:min(360px,88vw);padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:#fff;box-shadow:0 10px 28px rgba(7,31,49,.18);display:flex;flex-direction:column;gap:10px}.map-overlays-menu#map-overlays-menu>.map-overlays-panel{position:fixed;z-index:12000;top:12px;bottom:auto;left:12px;right:auto;transform:none;width:min(380px,calc(100vw - 24px));max-width:none;max-height:none;overflow:hidden}.map-overlays-toolbar{display:flex;align-items:center;gap:8px;flex:0 0 auto;background:#fff}.map-overlays-toolbar .map-overlay-clear{flex:1;min-width:0}.map-overlays-toolbar .map-menu-close{position:static;align-self:center;margin:0 0 0 auto}.map-overlay-group{border:1px solid var(--line);border-radius:10px;background:#fbfdfe;overflow:hidden}.map-overlay-group+ .map-overlay-group{margin-top:2px}.map-overlay-group>summary{list-style:none;cursor:pointer;padding:9px 10px;font-size:.78rem;font-weight:900;letter-spacing:.055em;text-transform:uppercase;color:var(--navy);display:flex;align-items:center;justify-content:space-between;gap:10px;background:#f5f9fa}.map-overlay-group>summary::-webkit-details-marker{display:none}.map-overlay-group>summary::after{content:"▸";font-size:.82rem;color:var(--muted);transition:transform .15s ease}.map-overlay-group[open]>summary::after{transform:rotate(90deg)}.map-overlay-group-body{display:flex;flex-direction:column;gap:8px;padding:9px 10px 10px;overflow-y:visible;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}.map-overlay-group .map-overlay-toggle{font-size:.84rem}.map-overlay-group .map-overlay-toggle span{min-width:0}.map-overlay-note{max-height:150px;overflow:auto;padding-right:3px}.map-overlay-toggle{display:flex;align-items:flex-start;gap:8px;color:var(--ink);font-weight:750;font-size:.88rem;line-height:1.3}.map-overlay-toggle input{margin-top:2px}.map-overlay-note{color:var(--muted);font-size:.76rem;line-height:1.35;padding-top:2px;border-top:1px solid var(--line)}.map-overlay-help{margin-top:8px;color:var(--muted);font-size:.78rem;line-height:1.4}.map-overlay-help summary{cursor:pointer;color:var(--blue);font-weight:800}.map-overlay-help-body{margin-top:6px;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#f8fbfc}
+url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text-shadow:0 2px 12px rgba(0,0,0,.45)}.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-weight:800;font-size:.76rem;opacity:.8}.photo-tag{margin-top:14px;font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;opacity:.72}h1{font-size:clamp(1.8rem,6vw,3.2rem);line-height:1.05;margin:.4rem 0 .6rem;letter-spacing:-.035em}.sub{opacity:.82}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}.full{grid-column:1/-1}h2{font-size:.82rem;letter-spacing:.13em;text-transform:uppercase;color:var(--blue);margin:0 0 16px}.bottom{font-size:1.13rem}.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.wind-card .metric{min-width:0}.wind-card .value{white-space:nowrap}@media(max-width:640px){.wind-card .metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}.metric{background:var(--paper);border-radius:15px;padding:14px}.label{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700}.value{font-size:1.55rem;font-weight:800;color:var(--navy)}.meta{color:var(--muted);font-size:.88rem;margin-top:12px}.station{font-weight:800;font-size:1.1rem;color:var(--navy)}.wind-distance-warning{margin-top:10px;padding:10px 12px;border:1px solid #e7c978;border-radius:12px;background:#fff8df;color:#654d08;font-size:.9rem}.wind-distance-warning strong{color:#4e3a00}.wind-summary{white-space:pre-line;margin-top:14px;padding:13px 14px;background:#eef7fa;border-left:4px solid var(--sea);border-radius:10px;color:var(--ink);font-size:.92rem}.event{display:grid;grid-template-columns:88px 12px 1fr;gap:12px;align-items:center;min-height:58px}.time{font-weight:800;color:var(--navy)}.dot{width:12px;height:12px;border-radius:50%;background:var(--slack);box-shadow:0 0 0 5px #edf3f5}.flood .dot{background:var(--flood)}.ebb .dot{background:var(--ebb)}.eventbody{border-left:2px solid var(--line);padding:8px 0 8px 18px}.eventlabel{font-weight:800}.eventdata{color:var(--muted);font-size:.9rem}.badge{display:inline-block;border-radius:999px;padding:5px 10px;background:#e9f6fb;color:var(--blue);font-size:.75rem;font-weight:800;margin-top:12px}.footer{text-align:center;color:var(--muted);font-size:.78rem;margin-top:22px}.hero .yogiism{margin:18px 0 0;max-width:720px;color:#fff;font-style:italic;font-size:.96rem;line-height:1.4;opacity:.96}.full-report{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:.88rem;line-height:1.55;background:#071f31;color:#e7f4f8;border-radius:14px;padding:18px;overflow-x:auto}.wind-readings{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}.wind-readings-header{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:8px}.wind-readings-title{font-weight:850;color:var(--navy)}.wind-reading-control{display:flex;align-items:flex-end;gap:7px;flex-wrap:wrap}.wind-reading-control label{display:flex;flex-direction:column;gap:3px;color:var(--muted);font-size:.72rem;font-weight:850;text-transform:uppercase;letter-spacing:.04em}.wind-reading-control select{min-width:76px;padding:6px 28px 6px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;font:inherit}.wind-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap}.wind-card-head h2{margin-bottom:16px}.wind-unit-control{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:.72rem;font-weight:850;text-transform:uppercase;letter-spacing:.04em}.wind-unit-control select{padding:6px 28px 6px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;font:inherit;color:var(--ink)}.wind-reading-chart{margin:4px 0 12px;border:1px solid var(--line);border-radius:10px;background:#fff;padding:8px}.wind-reading-chart svg{display:block;width:100%;height:auto;min-height:260px;max-height:320px}.wind-chart-grid{stroke:#dce6e9;stroke-width:1}.wind-chart-axis{stroke:#8aa0a8;stroke-width:1}.wind-chart-wind{fill:none;stroke:#126b91;stroke-width:2.5;stroke-linejoin:round;stroke-linecap:round}.wind-chart-gust{fill:none;stroke:#a95a24;stroke-width:1.7;stroke-linejoin:round;stroke-linecap:round}.wind-chart-label{fill:#60747c;font-size:12px;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}@media(max-width:640px){.wind-chart-label{font-size:13px}.wind-chart-readout{font-size:.9rem}.wind-chart-legend{font-size:.86rem}}.wind-chart-legend{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin:0 0 6px;color:var(--muted);font-size:.78rem;font-weight:750}.wind-chart-key{display:inline-flex;align-items:center;gap:6px}.wind-chart-key-line{display:inline-block;width:22px;border-top:3px solid #126b91}.wind-chart-key-line.gust{border-top-color:#a95a24;border-top-width:2px;border-top-style:solid}.wind-chart-empty{padding:34px 12px;text-align:center;color:var(--muted);font-size:.85rem}.wind-chart-cursor{stroke:#263b46;stroke-width:1.4;pointer-events:none}.wind-chart-cursor-dot{fill:#fff;stroke-width:2;pointer-events:none}.wind-chart-cursor-dot.wind{stroke:#126b91}.wind-chart-cursor-dot.gust{stroke:#a95a24}.wind-chart-hit{fill:transparent;cursor:crosshair;touch-action:none}.wind-chart-readout{margin:-2px 0 8px;color:var(--ink);font-size:.82rem;font-weight:750;min-height:1.2em}.wind-readings-scroll-shell{position:relative}.wind-readings-wrap{max-height:132px;overflow:auto;border:1px solid var(--line);border-radius:10px;-webkit-overflow-scrolling:touch}.wind-readings-scroll-cue{display:none}@media(max-width:640px){.wind-readings-scroll-shell.has-more::after{content:"";position:absolute;left:1px;right:1px;bottom:1px;height:40px;border-radius:0 0 9px 9px;background:linear-gradient(to bottom,rgba(255,255,255,0),rgba(255,255,255,.94));pointer-events:none}.wind-readings-scroll-cue{position:absolute;z-index:3;left:50%;bottom:6px;transform:translateX(-50%);display:none;padding:3px 8px;border-radius:999px;background:rgba(255,255,255,.94);box-shadow:0 1px 5px rgba(7,31,49,.16);color:var(--muted);font-size:.68rem;font-weight:850;letter-spacing:.03em;white-space:nowrap;pointer-events:none}.wind-readings-scroll-shell.has-more .wind-readings-scroll-cue{display:block}}.wind-readings-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.84rem}.wind-readings-table th,.wind-readings-table td{padding:7px 9px;border-top:1px solid var(--line);text-align:left;white-space:nowrap}.wind-readings-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc;color:var(--muted);font-size:.7rem;text-transform:uppercase;letter-spacing:.05em}.wind-readings-table tbody tr:first-child td{border-top:0}.card-action-row{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}#current-summary-card,.wind-card{min-width:0}.timeline-scope-note{margin:.15rem 0 1rem;color:var(--muted);font-size:.88rem}.current-events-integrated{margin:14px 0 4px;padding:10px 0 0;border-top:1px solid var(--line)}.current-events-head{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:8px}.current-events-head strong{color:var(--navy);font-size:.92rem}.current-events-head span{color:var(--muted);font-size:.78rem}.current-key-times{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:28px;row-gap:2px}.current-key-time{display:grid;grid-template-columns:76px minmax(0,1fr);gap:10px;align-items:baseline;padding:5px 0;border-bottom:1px solid #edf2f3;font-size:.86rem}.current-key-time-time{font-weight:800;color:var(--navy);white-space:nowrap}.current-key-time-label{color:var(--ink)}.current-key-time-label strong{font-weight:800}.current-key-time-meta{color:var(--muted);margin-left:6px;white-space:nowrap}@media(max-width:640px){.current-key-times{grid-template-columns:1fr}.current-key-time{grid-template-columns:72px minmax(0,1fr)}}.details-link-card{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap}.details-link-card h2{margin-bottom:.2rem}.details-link{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;white-space:nowrap}.details-note{color:var(--muted);font-size:.88rem;margin:-4px 0 14px}.info-popup-row{display:flex;justify-content:flex-end;margin:8px 0 12px}.map-info-popup-row{gap:8px;flex-wrap:wrap}.info-popup-open{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);border-radius:999px;padding:8px 12px;background:#fff;color:var(--blue);font:inherit;font-size:.84rem;font-weight:850;cursor:pointer}.info-popup-open:hover{background:var(--paper)}.info-popup-open:focus-visible{outline:2px solid var(--blue);outline-offset:2px}.tide-context-launcher{grid-column:1/-1}.tide-context-open{width:100%;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px 18px;border:1px solid var(--line);border-radius:16px;background:#fff;color:var(--blue);box-shadow:var(--shadow);font:inherit;font-weight:850;cursor:pointer;text-align:left}.tide-context-open:hover{background:var(--paper)}.tide-context-open:focus-visible{outline:2px solid var(--blue);outline-offset:2px}.tide-context-modal,.info-popup-modal{position:fixed;inset:0;z-index:3000;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(7,31,49,.38)}.tide-context-modal[hidden],.info-popup-modal[hidden]{display:none}.tide-context-dialog,.info-popup-dialog{width:min(640px,calc(100vw - 32px));max-height:min(78vh,720px);display:flex;flex-direction:column;background:#fff;border:1px solid var(--line);border-radius:20px;box-shadow:0 24px 70px rgba(7,31,49,.32);overflow:hidden}.tide-context-dialog-head,.info-popup-dialog-head{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:16px 16px 12px 20px;border-bottom:1px solid var(--line);background:#fff;flex:0 0 auto}.tide-context-dialog-head h2,.info-popup-dialog-head h2{margin:0}.tide-context-close,.info-popup-close{display:inline-flex;align-items:center;justify-content:center;width:42px;height:42px;flex:0 0 42px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--navy);font:inherit;font-size:1.55rem;font-weight:700;line-height:1;cursor:pointer}.tide-context-close:hover,.info-popup-close:hover{background:var(--paper)}.tide-context-body,.info-popup-body{overflow:auto;padding:18px 20px 22px;-webkit-overflow-scrolling:touch}.tide-context-body>:first-child,.info-popup-body>:first-child{margin-top:0}.tide-context-body>:last-child,.info-popup-body>:last-child{margin-bottom:0}@media(max-width:700px){.tide-context-modal,.info-popup-modal{align-items:flex-end;padding:0;background:rgba(7,31,49,.42)}.tide-context-dialog,.info-popup-dialog{width:100%;max-height:calc(86dvh - env(safe-area-inset-bottom));border-radius:20px 20px 0 0;border-bottom:0}.tide-context-dialog-head,.info-popup-dialog-head{padding-top:14px;padding-right:max(12px,env(safe-area-inset-right));padding-left:max(18px,env(safe-area-inset-left))}.tide-context-close,.info-popup-close{width:44px;height:44px;flex-basis:44px}.tide-context-body,.info-popup-body{padding-right:max(18px,env(safe-area-inset-right));padding-bottom:max(24px,calc(env(safe-area-inset-bottom) + 14px));padding-left:max(18px,env(safe-area-inset-left))}}.current-chart-header{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap}.current-window-inline{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin:2px 0 10px;color:var(--muted);font-size:.86rem}.current-window-inline strong{color:var(--navy);font-size:.86rem}.current-window-inline span{white-space:nowrap}.current-chart-header h2{margin-bottom:.15rem}.current-date-label{color:var(--muted);font-weight:750;font-size:.9rem}.current-range-toolbar{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin:8px 0 10px;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:var(--paper)}.current-range-toolbar .current-date-nav{display:inline-flex;align-items:center;min-height:44px;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:8px 12px;background:#fff;color:var(--blue);font-size:.86rem;font-weight:850}.current-range-toolbar .current-date-nav.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-control-label{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:.75rem;font-weight:850}.current-control-label .current-date-picker{min-height:44px;font-size:1rem}@media(max-width:640px){.current-range-toolbar{align-items:stretch}.current-control-label{flex:1 1 140px}.current-range-toolbar .current-date-nav{justify-content:center;flex:1 1 135px}}.current-date-controls{display:flex;gap:7px;flex-wrap:wrap;align-items:center}.current-date-picker{border:1px solid var(--line);border-radius:999px;padding:6px 10px;background:#fff;color:var(--navy);font:inherit;font-size:.82rem;font-weight:750;min-height:34px}.current-date-picker:focus{outline:2px solid var(--blue);outline-offset:2px}.current-refreshing{opacity:.55;transition:opacity .15s ease}.current-date-controls a{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:7px 11px;background:#fff;color:var(--blue);font-size:.82rem;font-weight:850}.current-date-controls a:hover{background:var(--paper)}.current-date-controls a.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-planning{margin:16px 0 12px;padding:14px 16px;border:1px solid var(--line);border-radius:16px;background:#fff}.current-planning-head{display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:10px}.current-planning-head strong{color:var(--navy);font-size:1rem}.current-planning-head span{color:var(--muted);font-size:.82rem}.planning-preferences{display:flex;flex-direction:column;gap:10px;margin:8px 0 12px}.planning-preferences-row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;width:100%}.planning-preferences label{display:flex;gap:5px;align-items:center;color:var(--muted);font-size:.78rem;font-weight:850}.planning-preferences input{min-height:40px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--navy);font:inherit;font-size:1rem;padding:6px 8px}.planning-preferences input[type="number"]{width:76px}.planning-preferences b{color:var(--muted);font-size:.82rem}@media(max-width:640px){.planning-preferences label{flex:1 1 130px;justify-content:space-between}.planning-preferences input[type="time"]{min-width:110px}}.planning-help{margin:2px 0 12px;padding:10px 12px;border-radius:10px;background:#f7f9fa;color:var(--ink);font-size:.82rem;line-height:1.45}.planning-help strong{color:var(--navy)}.current-planning-days{display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:8px}.planning-day{border:1px solid var(--line);border-radius:12px;padding:10px;min-width:0}.planning-day.preferred{background:#eef8f3}.planning-day.caution{background:#fff8df;border-color:#e7c978}.planning-day.redflag{background:#fff0ed;border-color:#dfa297}.planning-date{font-size:.78rem;font-weight:850;color:var(--navy)}.planning-status{font-size:.92rem;font-weight:900;margin-top:2px}.preferred .planning-status{color:#176246}.caution .planning-status{color:#775900}.redflag .planning-status{color:#9a3328}.planning-detail{font-size:.78rem;line-height:1.35;color:var(--ink);margin-top:5px}.planning-disclaimer{color:var(--muted);font-size:.75rem;margin-top:9px}@media(max-width:640px){.current-planning-days{grid-template-columns:1fr 1fr}.planning-detail{font-size:.8rem}}.current-chart-wrap .event-point,.current-chart-wrap .event-point:hover{cursor:default!important;pointer-events:none}.current-chart-wrap{margin-top:16px}.current-chart-svg{display:block;width:100%;height:auto;background:#f8fbfc;border:1px solid var(--line);border-radius:16px}.grid-line{stroke:#d9e4e8;stroke-width:1}.v-grid-line{stroke:#e6eef1;stroke-width:1}.day-grid-line{stroke:#b7cbd4;stroke-width:1.4}.zero-line{stroke:#17384a;stroke-width:2}.axis-label{fill:#657d89;font-size:11px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.y-label{text-anchor:end}.x-label{text-anchor:middle}.axis-title{fill:#657d89;font-size:11px;text-anchor:middle}.tide-y-label{text-anchor:start}.tide-range-bar{opacity:1;stroke-width:3;stroke-linecap:round;fill:none}.tide-range-bar.typical{stroke:#4a6473}.tide-range-bar.elevated{stroke:#d5ad28}.tide-range-bar.large{stroke:#d9791f}.tide-range-bar.exceptional{stroke:#c94a3f}.tide-range-value{font-size:11px;font-weight:900;text-anchor:middle;paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round;fill:#17384a}.tide-range-toggle{display:flex;align-items:center;gap:7px;color:var(--ink);font-size:.84rem;font-weight:800}.tide-range-toggle input{margin:0}.tide-range-legend{display:flex;gap:10px;flex-wrap:wrap;align-items:center;color:var(--muted);font-size:.76rem}.tide-range-key{display:inline-flex;align-items:center;gap:5px}.tide-range-swatch{width:11px;height:11px;border-radius:3px;display:inline-block}.tide-range-swatch.typical{background:#4a6473}.tide-range-swatch.elevated{background:#d5ad28}.tide-range-swatch.large{background:#d9791f}.tide-range-swatch.exceptional{background:#c94a3f}.night-window{fill:#aebdc4;opacity:.78}.sail-window{fill:#f8fbfc;opacity:.96}.preferred-window{fill:#f0d46d;opacity:.34}.flood-area{fill:#6d8fd0;opacity:.86}.ebb-area{fill:#0b9d83;opacity:.90}.current-line{fill:none;stroke:#214b62;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}.event-point{stroke:#fff;stroke-width:1.5}.event-point.flood{fill:#5478bd}.event-point.ebb{fill:#078a75}.event-point.slack{fill:#756d64}.event-time{fill:#17384a;font-size:9px;font-weight:800;text-anchor:middle;paint-order:stroke;stroke:#fff;stroke-width:2.5px;stroke-linejoin:round}.event-time.flood{fill:#294f91}.event-time.ebb{fill:#066c5d}.event-time.slack{fill:#514b46}.now-line{stroke:#c63a2b;stroke-width:2.5}.now-label{fill:#c63a2b;font-size:11px;font-weight:800}.chart-explainer{color:var(--ink);font-size:.94rem;line-height:1.45;margin:2px 0 12px}.chart-note{color:var(--muted);font-size:.82rem;margin-top:9px}.candidate-table{width:100%;border-collapse:collapse;font-size:.86rem}.candidate-table th,.candidate-table td{padding:10px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}.candidate-table th{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}.candidate-table td.num,.candidate-table th.num{text-align:right;white-space:nowrap}.candidate-good td.status{font-weight:800}.candidate-bad{opacity:.82}.candidate-selected{background:rgba(20,120,100,.08)}.candidate-selected td:first-child{font-weight:800}.candidate-note{color:var(--muted);font-size:.82rem;margin:0 0 12px}.candidate-scroll{overflow-x:auto}.candidate-link{color:var(--blue);text-decoration:none;font-weight:800}.candidate-link:hover{text-decoration:underline}.candidate-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:0 0 12px}.nearest-link{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:7px 12px;color:var(--blue);font-weight:800;text-decoration:none;background:#fff}.nearest-link:hover{background:var(--paper)}.map-card{overflow:hidden}.map-intro{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px}.map-intro-title{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.map-intro-title h2{margin:0}.map-help{color:var(--muted);font-size:.9rem;max-width:600px;margin-top:6px}.location-help{position:relative}.location-help>summary{list-style:none;display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--blue);font-size:1rem;font-weight:900;cursor:pointer;box-shadow:0 2px 8px rgba(8,43,69,.08)}.location-help>summary::-webkit-details-marker{display:none}.location-help>summary:focus{outline:2px solid var(--blue);outline-offset:2px}.location-help-panel{position:absolute;z-index:1450;top:calc(100% + 8px);left:0;width:min(430px,calc(100vw - 48px));padding:0;border:1px solid var(--line);border-radius:14px;background:#fff;box-shadow:0 14px 34px rgba(8,43,69,.20);color:var(--ink);font-size:.88rem;line-height:1.45;text-transform:none;letter-spacing:normal;font-weight:500;overflow:hidden}.location-help-header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 10px 8px 16px;border-bottom:1px solid var(--line);background:#f8fbfc}.location-help-header strong{color:var(--navy);font-size:.9rem}.location-help-body{padding:12px 16px 14px}.location-help-close{position:static;flex:0 0 auto;width:36px;height:36px;display:flex;align-items:center;justify-content:center;border:0;border-radius:999px;background:#eef5f8;color:var(--navy);font:inherit;font-size:1.35rem;font-weight:900;line-height:1;cursor:pointer}.location-help-close:hover{background:#e1edf2}.location-help-close:focus{outline:2px solid var(--blue);outline-offset:2px}.location-help-panel p{margin:0 0 9px}.location-help-panel p:last-child{margin-bottom:0}@media(max-width:640px){.location-help-panel{position:fixed;z-index:2400;top:calc(env(safe-area-inset-top,0px) + 70px);left:14px;right:14px;width:auto;max-height:calc(100dvh - env(safe-area-inset-top,0px) - env(safe-area-inset-bottom,0px) - 100px);overflow:auto;-webkit-overflow-scrolling:touch}.location-help-header{position:sticky;top:0;z-index:2}.location-help-close{width:44px;height:44px}}.map-wrap{border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#dfecef}.location-map{height:390px;width:100%}.map-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px}.map-coordinate{font-variant-numeric:tabular-nums;color:var(--muted);font-size:.9rem}.map-go{display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--blue);border-radius:999px;padding:10px 16px;background:var(--blue);color:#fff;font-weight:850;text-decoration:none;cursor:pointer;min-height:42px}.map-go[aria-disabled="true"]{opacity:.45;pointer-events:none}.map-search-area{cursor:pointer}.map-search-area[aria-disabled="true"]{opacity:.45;pointer-events:none}.map-search-area[hidden]{display:none}.map-search-status{color:var(--muted);font-size:.82rem}.map-primary-actions{display:flex;gap:12px;align-items:stretch;flex-wrap:wrap;margin-top:12px}.map-primary-actions .map-go,.map-primary-actions .map-reset{flex:1 1 220px;max-width:360px;min-height:44px;padding:10px 16px;border:1px solid var(--blue);border-radius:999px;background:var(--blue);color:#fff;font:inherit;font-weight:850;text-align:center;justify-content:center;cursor:pointer}.map-reset{display:inline-flex;align-items:center}.map-reset:disabled{opacity:.45;cursor:default}.location-map .leaflet-popup-pane{z-index:1200}.location-map .leaflet-control-attribution,.location-map .map-scale-status{pointer-events:none}@media(max-width:700px){.location-map .leaflet-bottom.leaflet-right{z-index:650}.map-primary-actions{display:grid;grid-template-columns:1fr;gap:10px}.map-primary-actions .map-go,.map-primary-actions .map-reset{width:100%;max-width:none;min-height:46px}}.map-navigation{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}.map-state-controls{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:10px}.map-current-toggle{display:inline-flex;align-items:center;gap:7px;color:var(--ink);font-weight:750;font-size:.88rem}.map-current-toggle input{margin:0}.map-overlays-menu{position:relative}.map-overlays-menu summary{list-style:none;cursor:pointer;border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;font-size:.88rem}.map-overlays-menu summary::-webkit-details-marker{display:none}.map-overlays-menu summary::after{content:" ▾";font-size:.78em}.map-overlays-menu[open] summary::after{content:" ▴"}.map-overlays-panel{position:absolute;z-index:700;top:calc(100% + 6px);left:0;min-width:270px;max-width:min(360px,88vw);padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:#fff;box-shadow:0 10px 28px rgba(7,31,49,.18);display:flex;flex-direction:column;gap:10px}.map-overlays-menu#map-overlays-menu>.map-overlays-panel{position:fixed;z-index:12000;top:24px;bottom:auto;left:50%;right:auto;transform:translateX(-50%);width:min(420px,calc(100vw - 32px));max-width:none;max-height:calc(100dvh - 48px);overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;touch-action:pan-y}.map-overlays-toolbar{display:flex;align-items:center;gap:8px;flex:0 0 auto;position:sticky;top:-12px;z-index:4;background:#fff;padding:12px 0 8px}.map-overlays-toolbar .map-overlay-clear{flex:1;min-width:0}.map-overlays-toolbar .map-menu-close{position:static;align-self:center;margin:0 0 0 auto}.map-overlay-group{border:1px solid var(--line);border-radius:10px;background:#fbfdfe;overflow:hidden}.map-overlay-group+ .map-overlay-group{margin-top:2px}.map-overlay-group>summary{list-style:none;cursor:pointer;padding:9px 10px;font-size:.78rem;font-weight:900;letter-spacing:.055em;text-transform:uppercase;color:var(--navy);display:flex;align-items:center;justify-content:space-between;gap:10px;background:#f5f9fa}.map-overlay-group>summary::-webkit-details-marker{display:none}.map-overlay-group>summary::after{content:"▸";font-size:.82rem;color:var(--muted);transition:transform .15s ease}.map-overlay-group[open]>summary::after{transform:rotate(90deg)}.map-overlay-group-body{display:flex;flex-direction:column;gap:8px;padding:9px 10px 10px;max-height:none!important;overflow:visible!important;overscroll-behavior:auto}.map-overlay-group .map-overlay-toggle{font-size:.84rem}.map-overlay-group .map-overlay-toggle span{min-width:0}.map-overlay-note{max-height:150px;overflow:auto;padding-right:3px}.map-overlay-toggle{display:flex;align-items:flex-start;gap:8px;color:var(--ink);font-weight:750;font-size:.88rem;line-height:1.3}.map-overlay-toggle input{margin-top:2px}.map-overlay-note{color:var(--muted);font-size:.76rem;line-height:1.35;padding-top:2px;border-top:1px solid var(--line)}.map-overlay-help{margin-top:8px;color:var(--muted);font-size:.78rem;line-height:1.4}.map-overlay-help summary{cursor:pointer;color:var(--blue);font-weight:800}.map-overlay-help-body{margin-top:6px;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#f8fbfc}
 .map-menu-close{display:inline-flex;align-items:center;justify-content:center;position:relative;top:auto;align-self:flex-end;z-index:2;width:36px;height:36px;margin:0;border:0;border-radius:999px;background:#edf4f6;color:var(--navy);font:inherit;font-size:1.35rem;font-weight:900;line-height:1;cursor:pointer;flex:0 0 auto}
 .map-menu-close:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
 @media(max-width:700px){
   .map-overlays-menu>.map-overlays-panel{position:fixed;z-index:12000;left:max(10px,env(safe-area-inset-left));right:max(10px,env(safe-area-inset-right));top:auto;bottom:max(10px,env(safe-area-inset-bottom));width:auto;min-width:0;max-width:none;max-height:calc(100dvh - max(20px,env(safe-area-inset-top)) - max(20px,env(safe-area-inset-bottom)));overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;touch-action:pan-y}
-  .map-overlays-menu#map-overlays-menu>.map-overlays-panel{position:fixed;left:max(10px,env(safe-area-inset-left));right:max(10px,env(safe-area-inset-right));top:auto;bottom:max(10px,env(safe-area-inset-bottom));width:auto;min-width:0;max-width:none;max-height:calc(100dvh - max(20px,env(safe-area-inset-top)) - max(20px,env(safe-area-inset-bottom)));overflow-y:auto}
+  .map-overlays-menu#map-overlays-menu>.map-overlays-panel{position:fixed;left:max(10px,env(safe-area-inset-left));right:max(10px,env(safe-area-inset-right));top:max(10px,env(safe-area-inset-top));bottom:auto;transform:none;width:auto;min-width:0;max-width:none;max-height:calc(100dvh - max(20px,env(safe-area-inset-top)) - max(20px,env(safe-area-inset-bottom)));overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;touch-action:pan-y}
   .map-menu-close{width:44px;height:44px;font-size:1.45rem}
-}@media(max-width:700px){.map-overlays-menu>.map-overlays-panel,.map-overlays-menu#map-overlays-menu>.map-overlays-panel{max-height:none;overflow:visible}.map-overlay-group-body{max-height:min(34dvh,280px)}}.map-center-panel{min-width:240px}.map-center-action{width:100%;border:0;border-radius:10px;padding:9px 10px;background:transparent;color:var(--ink);font:inherit;font-size:.88rem;font-weight:750;text-align:left;cursor:pointer}.map-center-action:hover,.map-center-action:focus-visible{background:var(--paper);outline:none}.map-center-action:disabled{opacity:.45;cursor:default;background:transparent}.map-nav-button{border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;cursor:pointer}.map-nav-button:disabled{opacity:.45;cursor:default}.map-layer-note{margin-top:8px;color:var(--muted);font-size:.8rem;line-height:1.4}.map-smoke-legend{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:8px;color:var(--muted);font-size:.78rem}.map-smoke-legend[hidden]{display:none}.map-smoke-legend span{display:inline-flex;align-items:center;gap:5px}.smoke-swatch{display:inline-block;width:18px;height:10px;border:1px solid rgba(70,70,70,.5);border-radius:2px}.smoke-swatch.light{background:rgba(174,181,184,.32)}.smoke-swatch.medium{background:rgba(226,163,63,.42)}.smoke-swatch.heavy{background:rgba(194,79,67,.52)}.map-smoke-note{font-style:italic}.map-symbol{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;margin-right:4px;font-size:27px;font-weight:950;line-height:1;vertical-align:-6px;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff,0 2px 3px rgba(0,0,0,.35)}
+}@media(max-width:700px){.map-overlay-group-body{max-height:none!important;overflow:visible!important}}.map-center-panel{min-width:240px}.map-center-action{width:100%;border:0;border-radius:10px;padding:9px 10px;background:transparent;color:var(--ink);font:inherit;font-size:.88rem;font-weight:750;text-align:left;cursor:pointer}.map-center-action:hover,.map-center-action:focus-visible{background:var(--paper);outline:none}.map-center-action:disabled{opacity:.45;cursor:default;background:transparent}.map-nav-button{border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;cursor:pointer}.map-nav-button:disabled{opacity:.45;cursor:default}.map-layer-note{margin-top:8px;color:var(--muted);font-size:.8rem;line-height:1.4}.map-smoke-legend{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:8px;color:var(--muted);font-size:.78rem}.map-smoke-legend[hidden]{display:none}.map-smoke-legend span{display:inline-flex;align-items:center;gap:5px}.smoke-swatch{display:inline-block;width:18px;height:10px;border:1px solid rgba(70,70,70,.5);border-radius:2px}.smoke-swatch.light{background:rgba(174,181,184,.32)}.smoke-swatch.medium{background:rgba(226,163,63,.42)}.smoke-swatch.heavy{background:rgba(194,79,67,.52)}.map-smoke-note{font-style:italic}.map-symbol{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;margin-right:4px;font-size:27px;font-weight:950;line-height:1;vertical-align:-6px;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff,0 2px 3px rgba(0,0,0,.35)}
 .map-symbol.request{color:#126b91}.map-symbol.wind{color:#2f855a}.map-symbol.current{color:#7d55a6}.map-symbol.wind-candidate{color:#4f6978}
 .map-leaflet-symbol{background:transparent;border:0}
 .location-map,
@@ -6488,8 +6780,8 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 .map-resize-handle[aria-grabbed="true"]{background:#edf4f6}
 body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 @media(max-width:600px){.map-resize-handle{height:22px}}
-.map-location-info-grid{display:grid;grid-template-columns:1fr;gap:12px;margin-top:10px}.map-location-info-grid .map-coordinate-entry{margin-top:0;align-self:start}.selected-location-weather{margin-top:0;padding:14px 16px;border:1px solid var(--line);border-radius:14px;background:var(--paper);min-height:128px}.selected-location-weather-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;margin:0 0 4px}.selected-location-weather-head strong{color:var(--navy);font-size:1rem}.selected-location-weather-place{font-size:.86rem;font-weight:750;color:var(--ink);margin:0 0 10px}.selected-location-weather-columns{display:grid;grid-template-columns:minmax(240px,.78fr) minmax(0,1.32fr);gap:18px;align-items:start}.selected-location-weather-point-column{min-width:0}.selected-location-weather-updated{color:var(--muted);font-size:.75rem}.selected-location-weather-metrics{display:flex;gap:14px;flex-wrap:wrap;align-items:baseline}.selected-location-weather-metric{font-size:.88rem;color:var(--ink)}.selected-location-weather-metric b{color:var(--navy)}.selected-location-weather-forecast{margin:7px 0 0;color:var(--ink);font-size:.9rem}.selected-location-weather-note{margin:6px 0 0;color:var(--muted);font-size:.75rem}.selected-location-weather-error{margin:6px 0 0;color:#8b2c2c;font-size:.82rem}.selected-location-weather-detail{margin:0;padding:0 0 0 18px;border-left:1px solid var(--line);min-width:0;align-self:start}.selected-location-weather-detail-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:8px}.selected-location-weather-detail-head strong{color:var(--navy);font-size:.92rem}.selected-location-point-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:7px}.selected-location-point-head strong{color:var(--navy);font-size:.88rem}.selected-location-weather-context{margin:7px 0 0;color:var(--muted);font-size:.82rem;line-height:1.4}@media(max-width:760px){.selected-location-weather{min-height:0}.selected-location-weather-columns{grid-template-columns:1fr;gap:12px}.selected-location-weather-detail{padding:12px 0 0;border-left:0;border-top:1px solid var(--line)}}.map-coordinate-entry{display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-top:10px}.map-coordinate-field{display:flex;flex-direction:column;gap:3px}.map-coordinate-field label{font-size:.72rem;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}.map-coordinate-field input{width:132px;padding:7px 9px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--ink);font:inherit}.map-coordinate-use{padding:8px 12px;border:1px solid #126b91;border-radius:9px;background:#126b91;color:#fff;font-weight:850;cursor:pointer}.map-coordinate-use:hover{filter:brightness(.97)}.map-coordinate-error{font-size:.8rem;color:#9b3027;min-height:1.2em}
-.map-station-list{margin-top:12px}.map-station-list-title{font-weight:850;color:var(--navy);margin:0 0 8px}.map-station-table-wrap{max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:14px;background:#fff}.map-station-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.86rem}.map-station-table th,.map-station-table td{padding:8px 10px;border-top:1px solid var(--line);text-align:left;vertical-align:top;background:#fff}.map-station-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc}.map-station-table th{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}.map-station-table tbody tr:first-child td{border-top:0}.map-station-table a{color:var(--blue);font-weight:800;text-decoration:none}.map-station-table a:hover{text-decoration:underline}.map-scale-status{color:var(--muted);font-size:.78rem;font-weight:800;line-height:1.25;white-space:nowrap}.map-nautical-zoom-note{position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:850;background:rgba(7,31,49,.92);color:#fff;border-radius:999px;padding:7px 12px;font-size:.78rem;font-weight:850;box-shadow:0 2px 8px rgba(0,0,0,.2);pointer-events:none;white-space:nowrap;max-width:calc(100% - 32px);overflow:hidden;text-overflow:ellipsis}.map-overlay-toggle.is-unavailable{opacity:.5}.map-structure-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-structure-status[hidden]{display:none}.map-saildrone-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-saildrone-status[hidden]{display:none}.map-alertcalifornia-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-alertcalifornia-status[hidden]{display:none}.alertcalifornia-panel{position:absolute;top:14px;right:14px;z-index:900;width:min(330px,calc(100% - 76px));max-height:calc(100% - 28px);display:flex;flex-direction:column;background:#fff;border:1px solid rgba(16,47,68,.22);border-radius:14px;box-shadow:0 12px 30px rgba(7,31,49,.28);overflow:hidden}.alertcalifornia-panel[hidden]{display:none}.alertcalifornia-panel-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 11px 8px;border-bottom:1px solid var(--line);background:#f8fbfc}.alertcalifornia-panel-title{min-width:0;color:var(--navy);font-weight:900;line-height:1.2;overflow-wrap:anywhere}.alertcalifornia-panel-close{flex:0 0 auto;width:30px;height:30px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--blue);font:inherit;font-size:1.25rem;line-height:1;cursor:pointer}.alertcalifornia-panel-close:hover{background:var(--paper)}.alertcalifornia-panel-body{padding:10px 11px 12px;overflow:auto;-webkit-overflow-scrolling:touch}.alertcalifornia-panel img{display:block;width:100%;height:auto;max-height:190px;object-fit:contain;margin:8px 0 7px;border-radius:8px;background:#eef3f5}.alertcalifornia-panel .camera-meta{margin-top:4px;color:#5f7380;font-size:.78rem}.alertcalifornia-panel .camera-link{display:inline-block;margin-top:7px;font-weight:850;color:#126b91;text-decoration:none}.alertcalifornia-panel .camera-link:hover{text-decoration:underline}@media(max-width:600px){.alertcalifornia-panel{top:10px;right:10px;width:min(290px,calc(100% - 64px));max-height:calc(100% - 20px)}.alertcalifornia-panel img{max-height:150px}}.map-windbarb-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-windbarb-status[hidden]{display:none}.wind-barb-icon{background:transparent!important;border:0!important}.wind-barb-icon svg{overflow:visible;filter:drop-shadow(0 1px 1px rgba(255,255,255,.95))}.wind-barb-icon .barb-stroke{stroke:#102f44;stroke-width:2;fill:none;stroke-linecap:round;stroke-linejoin:round}.wind-barb-icon .barb-flag{fill:#102f44;stroke:#102f44;stroke-width:1}.wind-barb-icon.stale{opacity:.48}.map-undersea-feature-label{background:transparent!important;border:0!important;box-shadow:none!important;white-space:nowrap;pointer-events:none}.map-undersea-feature-label .undersea-dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;background:#ffd166;border:1px solid #20323c;vertical-align:1px;box-shadow:0 0 0 1px rgba(255,255,255,.75)}.map-undersea-feature-label .undersea-name{font-size:13px;font-weight:850;letter-spacing:.01em;color:#fff7d1;text-shadow:-2px -2px 0 #102a38,2px -2px 0 #102a38,-2px 2px 0 #102a38,2px 2px 0 #102a38,0 2px 3px rgba(0,0,0,.85)}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#2f855a}.map-dot.current{background:#7d55a6}.map-dot.saildrone{width:12px;height:12px;background:#8d3fb0;border:2px solid #fff;box-shadow:0 0 0 1px #8d3fb0}.map-dot.alertcalifornia{width:12px;height:12px;background:#c74634;border:2px solid #fff;box-shadow:0 0 0 1px #a93628}.map-dot.marine{width:12px;height:12px;border:2px solid #fff;box-shadow:0 0 0 1px rgba(16,47,68,.35)}.map-dot.marina{background:#126b91}.map-dot.boatyard{background:#7a4a21}.map-dot.fuel{background:#347a4b}.map-dot.ramp{background:#376f9c}.map-dot.ferry{background:#247f8f}.map-dot.supply{background:#805f2f}.map-dot.club{background:#6c4a91}.map-dot.restaurant{background:#a45135}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}
+.map-location-info-grid{display:grid;grid-template-columns:1fr;gap:12px;margin-top:10px}.map-location-info-grid .map-coordinate-entry{margin-top:0;align-self:start}.selected-location-weather{margin-top:0;padding:14px 16px;border:1px solid var(--line);border-radius:14px;background:var(--paper);min-height:128px}.selected-location-weather-empty{min-height:98px;display:flex;flex-direction:column;justify-content:center;gap:7px;color:var(--muted)}.selected-location-weather-empty[hidden]{display:none}.selected-location-weather-empty strong{color:var(--navy);font-size:1rem}.selected-location-weather-empty span{line-height:1.4}.selected-location-weather-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;margin:0 0 4px}.selected-location-weather-head strong{color:var(--navy);font-size:1rem}.selected-location-weather-place{font-size:.86rem;font-weight:750;color:var(--ink);margin:0 0 10px}.selected-location-weather-columns{display:grid;grid-template-columns:minmax(240px,.78fr) minmax(0,1.32fr);gap:18px;align-items:start}.selected-location-weather-point-column{min-width:0}.selected-location-weather-updated{color:var(--muted);font-size:.75rem}.selected-location-weather-metrics{display:flex;gap:14px;flex-wrap:wrap;align-items:baseline}.selected-location-weather-metric{font-size:.88rem;color:var(--ink)}.selected-location-weather-metric b{color:var(--navy)}.selected-location-weather-forecast{margin:7px 0 0;color:var(--ink);font-size:.9rem}.selected-location-weather-note{margin:6px 0 0;color:var(--muted);font-size:.75rem}.selected-location-weather-error{margin:6px 0 0;color:#8b2c2c;font-size:.82rem}.selected-location-weather-detail{margin:0;padding:0 0 0 18px;border-left:1px solid var(--line);min-width:0;align-self:start}.selected-location-weather-detail-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:8px}.selected-location-weather-detail-head strong{color:var(--navy);font-size:.92rem}.selected-location-point-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:7px}.selected-location-point-head strong{color:var(--navy);font-size:.88rem}.selected-location-weather-context{margin:7px 0 0;color:var(--muted);font-size:.82rem;line-height:1.4}@media(max-width:760px){.selected-location-weather{min-height:0}.selected-location-weather-columns{grid-template-columns:1fr;gap:12px}.selected-location-weather-detail{padding:12px 0 0;border-left:0;border-top:1px solid var(--line)}}.map-coordinate-entry{display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-top:10px}.map-coordinate-field{display:flex;flex-direction:column;gap:3px}.map-coordinate-field label{font-size:.72rem;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}.map-coordinate-field input{width:132px;padding:7px 9px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--ink);font:inherit}.map-coordinate-use{padding:8px 12px;border:1px solid #126b91;border-radius:9px;background:#126b91;color:#fff;font-weight:850;cursor:pointer}.map-coordinate-use:hover{filter:brightness(.97)}.map-coordinate-error{font-size:.8rem;color:#9b3027;min-height:1.2em}
+.map-station-list{margin-top:12px}.map-station-list-title{font-weight:850;color:var(--navy);margin:0 0 8px}.map-station-table-wrap{max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:14px;background:#fff}.map-station-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.86rem}.map-station-table th,.map-station-table td{padding:8px 10px;border-top:1px solid var(--line);text-align:left;vertical-align:top;background:#fff}.map-station-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc}.map-station-table th{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}.map-station-table tbody tr:first-child td{border-top:0}.map-station-table a{color:var(--blue);font-weight:800;text-decoration:none}.map-station-table a:hover{text-decoration:underline}.map-scale-status{color:var(--muted);font-size:.78rem;font-weight:800;line-height:1.25;white-space:nowrap}.map-nautical-zoom-note{position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:850;background:rgba(7,31,49,.92);color:#fff;border-radius:999px;padding:7px 12px;font-size:.78rem;font-weight:850;box-shadow:0 2px 8px rgba(0,0,0,.2);pointer-events:none;white-space:nowrap;max-width:calc(100% - 32px);overflow:hidden;text-overflow:ellipsis}.map-overlay-toggle.is-unavailable{opacity:.5}.map-structure-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-structure-status[hidden]{display:none}.map-saildrone-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-saildrone-status[hidden]{display:none}.map-alertcalifornia-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-alertcalifornia-status[hidden]{display:none}.map-swell-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-swell-status[hidden]{display:none}.map-swell-controls{margin:2px 0 8px 26px;padding:8px 10px;border-left:2px solid var(--line);font-size:.78rem;color:var(--muted)}.map-swell-controls[hidden]{display:none}.map-swell-control-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.map-swell-control-row input[type=range]{flex:1 1 150px;min-width:120px}.map-swell-time{font-weight:850;color:var(--navy)}.map-swell-slider-wrap{flex:1 1 220px;min-width:180px}.map-swell-slider-wrap input[type=range]{width:100%;min-width:0;height:34px;margin:0;touch-action:pan-y;cursor:pointer}.map-swell-slider-wrap input[type=range]::-webkit-slider-thumb{cursor:pointer}.map-swell-slider-wrap input[type=range]::-moz-range-thumb{cursor:pointer}.map-swell-slider-labels{display:flex;justify-content:space-between;gap:12px;margin-top:2px;color:var(--muted);font-size:.72rem;font-weight:800}.map-swell-selected-time{margin-top:6px;color:var(--navy);font-size:.79rem;font-weight:850;line-height:1.35}.map-swell-control-note{margin-top:5px;line-height:1.35}.map-swell-legend{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:6px;color:var(--muted);font-size:.76rem}.map-swell-legend[hidden]{display:none}.map-swell-gradient{width:170px;height:10px;border-radius:999px;background:linear-gradient(90deg,#123a8c,#006fc4,#00a8b5,#34b34a,#f0cf22,#f07818,#c91515);border:1px solid rgba(16,47,68,.35)}.swell-arrow-icon{background:transparent!important;border:0!important;pointer-events:auto!important;cursor:pointer}.swell-arrow-wrap{position:relative;width:28px;height:24px;transform-origin:14px 12px;opacity:.68}.swell-arrow-glyph{position:absolute;left:7px;top:2px;font-size:15px;line-height:17px;color:#062838;text-shadow:0 1px 1px rgba(255,255,255,.72)}.swell-info-panel{position:absolute;top:14px;right:14px;z-index:905;width:min(300px,calc(100% - 76px));max-height:calc(100% - 28px);display:flex;flex-direction:column;background:#fff;border:1px solid rgba(16,47,68,.22);border-radius:14px;box-shadow:0 12px 30px rgba(7,31,49,.28);overflow:hidden}.swell-info-panel[hidden]{display:none}.swell-info-panel-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 11px 8px;border-bottom:1px solid var(--line);background:#f8fbfc}.swell-info-panel-title{min-width:0;color:var(--navy);font-weight:900;line-height:1.2}.swell-info-panel-close{flex:0 0 auto;width:30px;height:30px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--blue);font:inherit;font-size:1.25rem;line-height:1;cursor:pointer}.swell-info-panel-close:hover{background:var(--paper)}.swell-info-panel-body{padding:10px 11px 12px;overflow:auto;-webkit-overflow-scrolling:touch;font-size:.82rem;line-height:1.35}.swell-info-row{display:flex;justify-content:space-between;gap:14px;margin-top:5px}.swell-info-label{color:var(--muted)}@media(max-width:600px){.swell-info-panel{top:10px;right:10px;width:min(280px,calc(100% - 64px));max-height:calc(100% - 20px)}}.alertcalifornia-panel{position:absolute;top:14px;right:14px;z-index:900;width:min(330px,calc(100% - 76px));max-height:calc(100% - 28px);display:flex;flex-direction:column;background:#fff;border:1px solid rgba(16,47,68,.22);border-radius:14px;box-shadow:0 12px 30px rgba(7,31,49,.28);overflow:hidden}.alertcalifornia-panel[hidden]{display:none}.alertcalifornia-panel-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 11px 8px;border-bottom:1px solid var(--line);background:#f8fbfc}.alertcalifornia-panel-title{min-width:0;color:var(--navy);font-weight:900;line-height:1.2;overflow-wrap:anywhere}.alertcalifornia-panel-close{flex:0 0 auto;width:30px;height:30px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--blue);font:inherit;font-size:1.25rem;line-height:1;cursor:pointer}.alertcalifornia-panel-close:hover{background:var(--paper)}.alertcalifornia-panel-body{padding:10px 11px 12px;overflow:auto;-webkit-overflow-scrolling:touch}.alertcalifornia-panel img{display:block;width:100%;height:auto;max-height:190px;object-fit:contain;margin:8px 0 7px;border-radius:8px;background:#eef3f5}.alertcalifornia-panel .camera-meta{margin-top:4px;color:#5f7380;font-size:.78rem}.alertcalifornia-panel .camera-link{display:inline-block;margin-top:7px;font-weight:850;color:#126b91;text-decoration:none}.alertcalifornia-panel .camera-link:hover{text-decoration:underline}@media(max-width:600px){.alertcalifornia-panel{top:10px;right:10px;width:min(290px,calc(100% - 64px));max-height:calc(100% - 20px)}.alertcalifornia-panel img{max-height:150px}}.map-windbarb-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-windbarb-status[hidden]{display:none}.wind-barb-icon{background:transparent!important;border:0!important}.wind-barb-icon svg{overflow:visible;filter:drop-shadow(0 1px 1px rgba(255,255,255,.95))}.wind-barb-icon .barb-stroke{stroke:#102f44;stroke-width:2;fill:none;stroke-linecap:round;stroke-linejoin:round}.wind-barb-icon .barb-flag{fill:#102f44;stroke:#102f44;stroke-width:1}.wind-barb-icon.stale{opacity:.48}.map-undersea-feature-label{background:transparent!important;border:0!important;box-shadow:none!important;white-space:nowrap;pointer-events:none}.map-undersea-feature-label .undersea-dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;background:#ffd166;border:1px solid #20323c;vertical-align:1px;box-shadow:0 0 0 1px rgba(255,255,255,.75)}.map-undersea-feature-label .undersea-name{font-size:13px;font-weight:850;letter-spacing:.01em;color:#fff7d1;text-shadow:-2px -2px 0 #102a38,2px -2px 0 #102a38,-2px 2px 0 #102a38,2px 2px 0 #102a38,0 2px 3px rgba(0,0,0,.85)}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#2f855a}.map-dot.current{background:#7d55a6}.map-dot.saildrone{width:12px;height:12px;background:#8d3fb0;border:2px solid #fff;box-shadow:0 0 0 1px #8d3fb0}.map-dot.alertcalifornia{width:12px;height:12px;background:#c74634;border:2px solid #fff;box-shadow:0 0 0 1px #a93628}.map-dot.marine{width:12px;height:12px;border:2px solid #fff;box-shadow:0 0 0 1px rgba(16,47,68,.35)}.map-dot.marina{background:#126b91}.map-dot.boatyard{background:#7a4a21}.map-dot.fuel{background:#347a4b}.map-dot.ramp{background:#376f9c}.map-dot.ferry{background:#247f8f}.map-dot.supply{background:#805f2f}.map-dot.club{background:#6c4a91}.map-dot.restaurant{background:#a45135}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}
 .offshore-trip-card{border-left:5px solid #126b91}.offshore-trip-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap}.offshore-trip-coords{color:var(--muted);font-size:.82rem;font-weight:750}.offshore-trip-summary{margin:10px 0 12px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:#f7fbfc}.offshore-trip-summary strong{color:var(--navy)}.offshore-trip-metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:10px 0}.offshore-trip-metric{padding:9px 10px;border:1px solid var(--line);border-radius:11px;background:#fff}.offshore-trip-metric .label{font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:850}.offshore-trip-metric .value{margin-top:3px;color:var(--navy);font-weight:900;font-size:1rem}.offshore-trip-buoy{margin:4px 0 8px;color:var(--ink);font-size:.86rem}.offshore-trip-watch{margin:8px 0 0;padding-left:20px;color:var(--ink)}.offshore-trip-watch li{margin:3px 0}.offshore-trip-forecast{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px}.offshore-trip-period{padding:10px 12px;border:1px solid var(--line);border-radius:11px;background:#fbfdfe}.offshore-trip-period strong{display:block;color:var(--navy);margin-bottom:3px}.offshore-trip-period p{margin:0;line-height:1.42;font-size:.88rem}.offshore-trip-note{margin:9px 0 0;color:var(--muted);font-size:.78rem;line-height:1.45}.offshore-trip-error{color:#8b2c2c;font-size:.88rem}.offshore-trip-loading{color:var(--muted);font-weight:750}.fishing-planning{margin-top:18px;padding-top:16px;border-top:2px solid #dce8ed}.fishing-planning-head{display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap}.fishing-planning-head h3{margin:0;color:var(--navy);font-size:1.05rem}.fishing-planning-status{color:var(--muted);font-size:.78rem}.fishing-planning-summary{margin:10px 0;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:#fffdf5;line-height:1.45}.fishing-planning-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.fishing-planning-item{padding:10px 11px;border:1px solid var(--line);border-radius:11px;background:#fff}.fishing-planning-item .label{font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:850}.fishing-planning-item .value{margin-top:3px;color:var(--navy);font-weight:900;line-height:1.25}.fishing-planning-item .detail{margin-top:4px;color:var(--muted);font-size:.77rem;line-height:1.35}.fishing-planning-error{margin:8px 0 0;color:#8b2c2c;font-size:.82rem}@media(max-width:850px){.fishing-planning-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:520px){.fishing-planning-grid{grid-template-columns:1fr}}@media(max-width:800px){.offshore-trip-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:640px){.offshore-trip-forecast{grid-template-columns:1fr}}.marine-forecast-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap}
 .marine-forecast-zone{color:var(--muted);font-size:.84rem;font-weight:750}
 .marine-alerts{margin:8px 0 14px;display:flex;gap:7px;flex-wrap:wrap}
@@ -6511,7 +6803,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 <section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Open the full planning dashboard for location, wind, currents, forecasts, map layers, and customization controls.</p></div><a id="planning-page-link" class="planning-page-link" href="{{.PlanningDetailsURL}}">Planning and Details →</a></section>
 {{else}}
 <section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Full planning dashboard and customization controls.</p></div><a id="conditions-page-link" class="planning-page-link" href="{{.ConditionsURL}}">← Back to Conditions Now</a></section>
-<section class="card full map-card"><div class="map-intro"><div><div class="map-intro-title"><h2>Location</h2><details class="location-help"><summary aria-label="About location selection" title="About location selection">ⓘ</summary><div class="location-help-panel"><div class="location-help-header"><strong>About location selection</strong><button type="button" class="location-help-close" aria-label="Close location information" title="Close">×</button></div><div class="location-help-body"><p><strong>Selected location</strong> is the point used for selected-location weather and nearby-station searches. Click the map to set or change it.</p><p>Panning, zooming, My location, and Center Map only change the map view. The latitude/longitude fields show the map center; editing them and choosing <strong>Center Map → Latitude &amp; Longitude</strong> does not change the selected location.</p><p><strong>Find nearby stations</strong> searches around the selected location. Open a candidate station on the map to review it and commit it as the wind source; the associated currents station is previewed with it.</p></div></div></details></div><div class="map-help">Click the map to select a location for weather and nearby stations.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-alertcalifornia-panel" class="alertcalifornia-panel" hidden role="dialog" aria-modal="false" aria-labelledby="map-alertcalifornia-panel-title"><div class="alertcalifornia-panel-head"><div id="map-alertcalifornia-panel-title" class="alertcalifornia-panel-title">ALERTCalifornia camera</div><button id="map-alertcalifornia-panel-close" class="alertcalifornia-panel-close" type="button" aria-label="Close ALERTCalifornia camera" title="Close">×</button></div><div id="map-alertcalifornia-panel-body" class="alertcalifornia-panel-body"></div></div><div id="map-nautical-zoom-note" class="map-nautical-zoom-note" hidden aria-live="polite">Nautical chart available at Zoom 9+.</div><div id="map-resize-handle" class="map-resize-handle" role="separator" aria-label="Resize map vertically" aria-orientation="horizontal" aria-valuemin="260" aria-valuemax="900" aria-valuenow="390" aria-grabbed="false" tabindex="0" title="Drag up or down to resize map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-scale-row" aria-label="Map scale"><span id="map-scale-status" class="map-scale-status" role="status" aria-live="polite"></span></div><div class="map-state-controls" aria-label="Map controls"><details id="map-types-menu" class="map-overlays-menu"><summary>Map Types</summary><div class="map-overlays-panel"><button type="button" class="map-menu-close" aria-label="Close Map Types" title="Close">×</button><label class="map-overlay-toggle"><input type="radio" name="map-type" value="map"> <span>Street Map</span></label><label id="map-type-nautical-label" class="map-overlay-toggle"><input id="map-type-nautical" type="radio" name="map-type" value="nautical"> <span>Nautical Chart <small>(Zoom 9+)</small></span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="satellite"> <span>Satellite</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="hybrid"> <span>Hybrid</span></label></div></details><details id="map-overlays-menu" class="map-overlays-menu"><summary>Map Overlays</summary><div class="map-overlays-panel"><div class="map-overlays-toolbar"><button type="button" id="map-overlays-clear" class="map-overlay-clear">Clear all overlays</button><button type="button" class="map-menu-close" aria-label="Close Map Overlays" title="Close">×</button></div><details class="map-overlay-group"><summary>Weather &amp; Hazards</summary><div class="map-overlay-group-body"><label id="map-marine-zone-control" class="map-overlay-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-smoke"> <span>Satellite smoke (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-clouds"> <span>Satellite Cloud Cover (NOAA)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-radar"> <span>Weather radar (NOAA/NWS)</span></label></div></details><details class="map-overlay-group"><summary>Wind &amp; Pressure</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-wind-barbs"> <span>Marine / Bay Wind Barbs (NOAA/NDBC)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-inland-wind-barbs"> <span>Land / Inland Wind Barbs (METAR)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-pressure"> <span>Surface Pressure / Isobars (NOAA/NWS METAR)</span></label></div></details><details class="map-overlay-group"><summary>Terrain &amp; Seafloor</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-structure"> <span>Topography &amp; Bathymetry (NOAA ETOPO + offshore feature names)</span></label></div></details><details class="map-overlay-group"><summary>Marine Places</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marinas"> <span>Marinas <small id="map-marine-count-marinas"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="boatyards"> <span>Boatyards &amp; Repair <small id="map-marine-count-boatyards"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="fuel_docks"> <span>Fuel Docks <small id="map-marine-count-fuel_docks"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="launch_ramps"> <span>Launch Ramps <small id="map-marine-count-launch_ramps"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="ferry_terminals"> <span>Ferry Terminals <small id="map-marine-count-ferry_terminals"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marine_supply"> <span>Marine Supply <small id="map-marine-count-marine_supply"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="yacht_clubs"> <span>Yacht Clubs <small id="map-marine-count-yacht_clubs"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="waterfront_restaurants"> <span>Waterfront Restaurants <small id="map-marine-count-waterfront_restaurants"></small></span></label></div></details><details class="map-overlay-group"><summary>Observations</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-saildrone"> <span>Saildrone Observations (NOAA PMEL)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-alertcalifornia"> <span>ALERTCalifornia Cameras (UC San Diego)</span></label></div></details></div></details><details id="map-center-menu" class="map-overlays-menu"><summary>Center Map</summary><div class="map-overlays-panel map-center-panel"><button type="button" class="map-menu-close" aria-label="Close Center Map" title="Close">×</button><button type="button" id="map-geolocate" class="map-center-action" title="Center the map on your device location without changing the selected location">My location</button><button type="button" id="map-nav-coordinates" class="map-center-action" title="Center the map on the latitude and longitude shown below">Latitude &amp; Longitude</button><button type="button" id="map-nav-selected" class="map-center-action" {{if not .MapHasRequest}}disabled{{end}}>Selected location</button><button type="button" id="map-nav-wind" class="map-center-action" {{if not .MapHasWind}}disabled{{end}}>Selected wind station</button><button type="button" id="map-nav-current" class="map-center-action" {{if not .MapHasCurrent}}disabled{{end}}>Selected currents station</button></div></details></div><div class="map-primary-actions" aria-label="Location and station actions"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Find nearby stations</span><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates}}false{{else}}true{{end}}" {{if not (or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates)}}disabled{{end}}>Clear location &amp; stations</button></div><div class="map-location-info-grid"><div class="map-coordinate-entry" aria-label="Map center coordinates"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLat}}" aria-label="Map center latitude"></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLon}}" aria-label="Map center longitude"></div><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div id="selected-location-weather" class="selected-location-weather" aria-live="polite"><div id="selected-location-weather-content" {{if not .MapHasRequest}}hidden{{end}}><div class="selected-location-weather-columns"><div class="selected-location-weather-point-column"><div class="selected-location-weather-head"><strong>Selected Location Weather</strong></div><div id="selected-location-weather-place" class="selected-location-weather-place">{{if .MapHasRequest}}{{if .SelectedWeatherLocation}}Near {{.SelectedWeatherLocation}}{{else}}Selected location{{end}}{{else}}Select a location for weather{{end}}</div><div id="selected-location-point-forecast" {{if and .MarineForecastPeriods .SelectedWeatherError}}hidden{{end}}><div class="selected-location-point-head"><strong>NWS Point Forecast</strong><span id="selected-location-weather-updated" class="selected-location-weather-updated">{{if .SelectedWeatherUpdated}}Updated {{.SelectedWeatherUpdated}}{{end}}</span></div><div class="selected-location-weather-metrics"><span class="selected-location-weather-metric"><b>Forecast temp:</b> <span id="selected-location-weather-air">{{if .SelectedWeatherAirTemp}}{{.SelectedWeatherAirTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>High:</b> <span id="selected-location-weather-high">{{if .SelectedWeatherHighTemp}}{{.SelectedWeatherHighTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>Low:</b> <span id="selected-location-weather-low">{{if .SelectedWeatherLowTemp}}{{.SelectedWeatherLowTemp}}{{else}}—{{end}}</span></span></div><p id="selected-location-weather-forecast" class="selected-location-weather-forecast" {{if not .SelectedWeatherShortForecast}}hidden{{end}}>{{.SelectedWeatherShortForecast}}</p><p id="selected-location-weather-error" class="selected-location-weather-error" {{if or (not .SelectedWeatherError) .MarineForecastPeriods}}hidden{{end}}>{{.SelectedWeatherError}}</p><p class="selected-location-weather-note">NWS point forecast for the selected map point. Forecast temperature is the current-hour forecast, not a direct observation.</p></div><p id="selected-location-weather-context" class="selected-location-weather-context" {{if not (and .MarineForecastPeriods .SelectedWeatherError)}}hidden{{end}}>NWS point-forecast temperature data is unavailable here; the applicable marine-zone forecast is shown in the Marine Forecast section.</p></div><div id="selected-location-weather-detail" class="selected-location-weather-detail" {{if not (or .MarineForecastPeriods .MarineForecastAlerts .MarineForecastError)}}hidden{{end}}><div class="selected-location-weather-detail-head"><strong id="marine-forecast-heading">{{if .MarineForecastPeriods}}NWS Marine Forecast{{else}}NWS Forecast Zone / Alerts{{end}}</strong><span id="marine-forecast-zone" class="marine-forecast-zone" {{if not .MarineForecastZone}}hidden{{end}}>{{if .MarineForecastPeriods}}Marine zone{{else}}NWS forecast zone{{end}} {{.MarineForecastZone}}{{if .MarineForecastUpdated}} · Updated {{.MarineForecastUpdated}}{{end}}</span></div><div id="marine-forecast-alerts" class="marine-alerts" aria-label="Active National Weather Service alerts" {{if not .MarineForecastAlerts}}hidden{{end}}>{{range .MarineForecastAlerts}}<span class="marine-alert">⚠ NWS alert — {{.}}</span>{{end}}</div><div id="marine-forecast-periods" class="marine-periods" {{if not .MarineForecastPeriods}}hidden{{end}}>{{range .MarineForecastPeriods}}<div class="marine-period">{{if .Name}}<strong>{{.Name}}</strong>{{end}}{{if .Forecast}}<p>{{.Forecast}}</p>{{end}}</div>{{end}}</div><p id="marine-forecast-note" class="marine-forecast-note" {{if not .MarineForecastPeriods}}hidden{{end}}>Official NWS coastal marine-zone forecast for the zone containing the selected point. It applies to the broader marine zone, not specifically to the selected point.</p><p id="marine-forecast-error" class="marine-forecast-error" {{if not .MarineForecastError}}hidden{{end}}>{{if .MarineForecastError}}{{.MarineForecastError}}{{end}}</p></div></div></div></div><div class="map-controls"><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><details class="map-overlay-help"><summary>Map overlay details</summary><div class="map-overlay-help-body">Topography & Bathymetry combines NOAA/NCEI ETOPO land topography and seafloor bathymetry with NOAA Marine Cadastre official named offshore features. Fishing-relevant features such as seamounts, banks, ridges, hills, knolls, shoals, reefs, rises, plateaus, pinnacles, and escarpments are labeled locally for better contrast. It is intended for fishing-planning context, not navigation; smaller pinnacles may not appear in the global relief model. Marine / Bay Wind Barbs uses live NOAA/NDBC station observations from all active stations with usable wind inside the buffered map viewport; standard meteorological barbs show wind-from direction and speed, and stale observations are faded. Land / Inland Wind Barbs is a separate optional layer sourced from Aviation Weather Center’s complete current-METAR cache and filtered locally to the buffered viewport, including many ASOS/AWOS airport sites. Both controls are display-only and do not change the selected wind station or selected location. Wind-barb tooltips follow the shared page Wind units preference; barb geometry remains based on standard knot increments. Saildrone Observations uses NOAA PMEL public ERDDAP mission data and plots the latest reported position and met-ocean readings from configured 2026 NOAA Saildrone missions; availability is mission-dependent and these moving platforms are not a fixed station network. ALERTCalifornia Cameras uses the official UC San Diego/ALERTCalifornia ArcGIS camera layer, requests only cameras in the current map viewport, and shows the current camera image plus a link to the official live camera page. Camera imagery is displayed unmodified with ALERTCalifornia | UC San Diego attribution. Exact positions are plotted only when the source provides them; fisherman shorthand such as “20×20” is shown as a derived approximate position with an uncertainty circle, and broad reports such as “Cordell to Monterey” are shown as regional zones rather than fake point coordinates. Satellite Cloud Cover uses NOAA/NESDIS GOES imagery rendered for the current map view; daylight areas appear natural-color-like and nighttime areas use infrared imagery. Radar uses Iowa State IEM's Web-Mercator CONUS NEXRAD N0Q WMS layer; a clear/transparent radar layer can simply mean no precipitation echoes are present. Surface Pressure / Isobars uses current NOAA/NWS Aviation Weather Center METAR mean sea-level-pressure observations. The browser interpolates those point observations into contour lines at a zoom-appropriate interval; it is useful pressure-gradient context but is not an official analyzed surface chart.</div></details><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-weather-overlay-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-pressure-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div id="map-structure-status" class="map-structure-status" hidden></div><div id="map-windbarb-status" class="map-windbarb-status" hidden></div><div id="map-saildrone-status" class="map-saildrone-status" hidden></div><div id="map-alertcalifornia-status" class="map-alertcalifornia-status" hidden aria-live="polite"></div><div class="map-layer-note">Drag the handle directly below the map to make the map taller or shorter. Keyboard users can focus the handle and use ↑/↓ (Shift for larger steps).</div><div class="info-popup-row map-info-popup-row"><button id="map-legend-open" class="info-popup-open" type="button" aria-haspopup="dialog" aria-controls="map-legend-modal">ⓘ Map legend</button><button id="map-sources-open" class="info-popup-open" type="button" aria-haspopup="dialog" aria-controls="map-sources-modal">ⓘ Map &amp; data sources</button></div><div id="map-legend-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-legend-title"><div class="info-popup-dialog-head"><h2 id="map-legend-title">Map Legend</h2><button id="map-legend-close" class="info-popup-close" type="button" aria-label="Close map legend" title="Close">×</button></div><div class="info-popup-body"><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span><span class="map-key"><span class="map-dot saildrone" aria-hidden="true"></span>Saildrone latest position</span><span class="map-key"><span class="map-dot alertcalifornia" aria-hidden="true"></span>ALERTCalifornia camera</span></div><div class="map-legend"><span class="map-key"><span class="map-dot marine marina" aria-hidden="true"></span>Marina</span><span class="map-key"><span class="map-dot marine boatyard" aria-hidden="true"></span>Boatyard &amp; repair</span><span class="map-key"><span class="map-dot marine fuel" aria-hidden="true"></span>Fuel dock</span><span class="map-key"><span class="map-dot marine ramp" aria-hidden="true"></span>Launch ramp</span><span class="map-key"><span class="map-dot marine ferry" aria-hidden="true"></span>Ferry terminal</span><span class="map-key"><span class="map-dot marine supply" aria-hidden="true"></span>Marine supply</span><span class="map-key"><span class="map-dot marine club" aria-hidden="true"></span>Yacht club</span><span class="map-key"><span class="map-dot marine restaurant" aria-hidden="true"></span>Waterfront restaurant</span></div></div></div></div><div id="map-sources-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-sources-title"><div class="info-popup-dialog-head"><h2 id="map-sources-title">Map &amp; Data Sources</h2><button id="map-sources-close" class="info-popup-close" type="button" aria-label="Close map and data sources" title="Close">×</button></div><div class="info-popup-body"><p class="map-sources-note">Base maps: <strong>Street Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service and is available at Zoom 9 or closer; <strong>Satellite</strong> uses Esri World Imagery; <strong>Hybrid</strong> combines Esri imagery with place/boundary labels. NWS forecast-zone, NOAA smoke, <strong>Sea Surface Temp</strong>, <strong>Satellite Cloud Cover</strong>, radar, and <strong>ALERTCalifornia Cameras</strong> remain independent overlays. ALERTCalifornia camera locations and current imagery come from the official UC San Diego/ALERTCalifornia ArcGIS feed. The nautical chart layer is for planning/reference and does not replace official navigation products.</p></div></div></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
+<section class="card full map-card"><div class="map-intro"><div><div class="map-intro-title"><h2>Location</h2><details class="location-help"><summary aria-label="About location selection" title="About location selection">ⓘ</summary><div class="location-help-panel"><div class="location-help-header"><strong>About location selection</strong><button type="button" class="location-help-close" aria-label="Close location information" title="Close">×</button></div><div class="location-help-body"><p><strong>Selected location</strong> is the point used for selected-location weather and nearby-station searches. Click the map to set or change it.</p><p>Panning, zooming, My location, and Center Map only change the map view. The latitude/longitude fields show the map center; editing them and choosing <strong>Center Map → Latitude &amp; Longitude</strong> does not change the selected location.</p><p><strong>Find nearby stations</strong> searches around the selected location. Open a candidate station on the map to review it and commit it as the wind source; the associated currents station is previewed with it.</p></div></div></details></div><div class="map-help">Click the map to select a location for weather and nearby stations.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-alertcalifornia-panel" class="alertcalifornia-panel" hidden role="dialog" aria-modal="false" aria-labelledby="map-alertcalifornia-panel-title"><div class="alertcalifornia-panel-head"><div id="map-alertcalifornia-panel-title" class="alertcalifornia-panel-title">ALERTCalifornia camera</div><button id="map-alertcalifornia-panel-close" class="alertcalifornia-panel-close" type="button" aria-label="Close ALERTCalifornia camera" title="Close">×</button></div><div id="map-alertcalifornia-panel-body" class="alertcalifornia-panel-body"></div></div><div id="map-swell-info-panel" class="swell-info-panel" hidden role="dialog" aria-modal="false" aria-labelledby="map-swell-info-panel-title"><div class="swell-info-panel-head"><div id="map-swell-info-panel-title" class="swell-info-panel-title">Swell Forecast</div><button id="map-swell-info-panel-close" class="swell-info-panel-close" type="button" aria-label="Close swell forecast information" title="Close">×</button></div><div id="map-swell-info-panel-body" class="swell-info-panel-body"></div></div><div id="map-nautical-zoom-note" class="map-nautical-zoom-note" hidden aria-live="polite">Nautical chart available at Zoom 9+.</div><div id="map-resize-handle" class="map-resize-handle" role="separator" aria-label="Resize map vertically" aria-orientation="horizontal" aria-valuemin="260" aria-valuemax="900" aria-valuenow="390" aria-grabbed="false" tabindex="0" title="Drag up or down to resize map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-scale-row" aria-label="Map scale"><span id="map-scale-status" class="map-scale-status" role="status" aria-live="polite"></span></div><div class="map-state-controls" aria-label="Map controls"><details id="map-types-menu" class="map-overlays-menu"><summary>Map Types</summary><div class="map-overlays-panel"><button type="button" class="map-menu-close" aria-label="Close Map Types" title="Close">×</button><label class="map-overlay-toggle"><input type="radio" name="map-type" value="map"> <span>Street Map</span></label><label id="map-type-nautical-label" class="map-overlay-toggle"><input id="map-type-nautical" type="radio" name="map-type" value="nautical"> <span>Nautical Chart <small>(Zoom 9+)</small></span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="satellite"> <span>Satellite</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="hybrid"> <span>Hybrid</span></label></div></details><details id="map-overlays-menu" class="map-overlays-menu"><summary>Map Overlays</summary><div class="map-overlays-panel"><div class="map-overlays-toolbar"><button type="button" id="map-overlays-clear" class="map-overlay-clear">Clear all overlays</button><button type="button" class="map-menu-close" aria-label="Close Map Overlays" title="Close">×</button></div><details class="map-overlay-group"><summary>Weather &amp; Hazards</summary><div class="map-overlay-group-body"><label id="map-marine-zone-control" class="map-overlay-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-smoke"> <span>Satellite smoke (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-clouds"> <span>Satellite Cloud Cover (NOAA)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-radar"> <span>Weather radar (NOAA/NWS)</span></label></div></details><details class="map-overlay-group"><summary>Wind &amp; Pressure</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-wind-barbs"> <span>Marine / Bay Wind Barbs (NOAA/NDBC)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-inland-wind-barbs"> <span>Land / Inland Wind Barbs (METAR)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-pressure"> <span>Surface Pressure / Isobars (NOAA/NWS METAR)</span></label></div></details><details class="map-overlay-group"><summary>Surf &amp; Swell</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-swell"> <span>Global Swell Forecast (PacIOOS / NOAA WW3)</span></label><div id="map-swell-controls" class="map-swell-controls" hidden><div class="map-swell-control-row"><label for="map-swell-hours">Forecast time</label><div class="map-swell-slider-wrap"><input id="map-swell-hours" type="range" min="0" max="120" step="6" value="0" aria-label="Swell forecast time, from now through 120 hours in the future"><div class="map-swell-slider-labels"><span>Now</span><span>+120h (5 days)</span></div></div></div><div id="map-swell-time" class="map-swell-selected-time">Selected: Now</div><div class="map-swell-control-note">Smooth color = swell height · arrows = swell travel direction. Forecast range: Now to +120h (5 days). Tap/click the colored swell field or an arrow for details.</div></div></div></details><details class="map-overlay-group"><summary>Terrain &amp; Seafloor</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-structure"> <span>Topography &amp; Bathymetry (NOAA ETOPO + offshore feature names)</span></label></div></details><details class="map-overlay-group"><summary>Marine Places</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marinas"> <span>Marinas <small id="map-marine-count-marinas"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="boatyards"> <span>Boatyards &amp; Repair <small id="map-marine-count-boatyards"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="fuel_docks"> <span>Fuel Docks <small id="map-marine-count-fuel_docks"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="launch_ramps"> <span>Launch Ramps <small id="map-marine-count-launch_ramps"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="ferry_terminals"> <span>Ferry Terminals <small id="map-marine-count-ferry_terminals"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marine_supply"> <span>Marine Supply <small id="map-marine-count-marine_supply"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="yacht_clubs"> <span>Yacht Clubs <small id="map-marine-count-yacht_clubs"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="waterfront_restaurants"> <span>Waterfront Restaurants <small id="map-marine-count-waterfront_restaurants"></small></span></label></div></details><details class="map-overlay-group"><summary>Observations</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-saildrone"> <span>Saildrone Observations (NOAA PMEL)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-alertcalifornia"> <span>ALERTCalifornia Cameras (UC San Diego)</span></label></div></details></div></details><details id="map-center-menu" class="map-overlays-menu"><summary>Center Map</summary><div class="map-overlays-panel map-center-panel"><button type="button" class="map-menu-close" aria-label="Close Center Map" title="Close">×</button><button type="button" id="map-geolocate" class="map-center-action" title="Center the map on your device location without changing the selected location">My location</button><button type="button" id="map-nav-coordinates" class="map-center-action" title="Center the map on the latitude and longitude shown below">Latitude &amp; Longitude</button><button type="button" id="map-nav-selected" class="map-center-action" {{if not .MapHasRequest}}disabled{{end}}>Selected location</button><button type="button" id="map-nav-wind" class="map-center-action" {{if not .MapHasWind}}disabled{{end}}>Selected wind station</button><button type="button" id="map-nav-current" class="map-center-action" {{if not .MapHasCurrent}}disabled{{end}}>Selected currents station</button></div></details></div><div class="map-primary-actions" aria-label="Location and station actions"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Find nearby stations</span><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates}}false{{else}}true{{end}}" {{if not (or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates)}}disabled{{end}}>Clear location &amp; stations</button></div><div class="map-location-info-grid"><div class="map-coordinate-entry" aria-label="Map center coordinates"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLat}}" aria-label="Map center latitude"></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLon}}" aria-label="Map center longitude"></div><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div id="selected-location-weather" class="selected-location-weather" aria-live="polite"><div id="selected-location-weather-empty" class="selected-location-weather-empty" {{if .MapHasRequest}}hidden{{end}}><strong>Selected Location Weather</strong><span>Select a location on the map to view current weather and forecast information.</span></div><div id="selected-location-weather-content" {{if not .MapHasRequest}}hidden{{end}}><div class="selected-location-weather-columns"><div class="selected-location-weather-point-column"><div class="selected-location-weather-head"><strong>Selected Location Weather</strong></div><div id="selected-location-weather-place" class="selected-location-weather-place">{{if .MapHasRequest}}{{if .SelectedWeatherLocation}}Near {{.SelectedWeatherLocation}}{{else}}Selected location{{end}}{{else}}Select a location for weather{{end}}</div><div id="selected-location-point-forecast" {{if and .MarineForecastPeriods .SelectedWeatherError}}hidden{{end}}><div class="selected-location-point-head"><strong>NWS Point Forecast</strong><span id="selected-location-weather-updated" class="selected-location-weather-updated">{{if .SelectedWeatherUpdated}}Updated {{.SelectedWeatherUpdated}}{{end}}</span></div><div class="selected-location-weather-metrics"><span class="selected-location-weather-metric"><b>Forecast temp:</b> <span id="selected-location-weather-air">{{if .SelectedWeatherAirTemp}}{{.SelectedWeatherAirTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>High:</b> <span id="selected-location-weather-high">{{if .SelectedWeatherHighTemp}}{{.SelectedWeatherHighTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>Low:</b> <span id="selected-location-weather-low">{{if .SelectedWeatherLowTemp}}{{.SelectedWeatherLowTemp}}{{else}}—{{end}}</span></span></div><p id="selected-location-weather-forecast" class="selected-location-weather-forecast" {{if not .SelectedWeatherShortForecast}}hidden{{end}}>{{.SelectedWeatherShortForecast}}</p><p id="selected-location-weather-error" class="selected-location-weather-error" {{if or (not .SelectedWeatherError) .MarineForecastPeriods}}hidden{{end}}>{{.SelectedWeatherError}}</p><p class="selected-location-weather-note">NWS point forecast for the selected map point. Forecast temperature is the current-hour forecast, not a direct observation.</p></div><p id="selected-location-weather-context" class="selected-location-weather-context" {{if not (and .MarineForecastPeriods .SelectedWeatherError)}}hidden{{end}}>NWS point-forecast temperature data is unavailable here; the applicable marine-zone forecast is shown in the Marine Forecast section.</p></div><div id="selected-location-weather-detail" class="selected-location-weather-detail" {{if not (or .MarineForecastPeriods .MarineForecastAlerts .MarineForecastError)}}hidden{{end}}><div class="selected-location-weather-detail-head"><strong id="marine-forecast-heading">{{if .MarineForecastPeriods}}NWS Marine Forecast{{else}}NWS Forecast Zone / Alerts{{end}}</strong><span id="marine-forecast-zone" class="marine-forecast-zone" {{if not .MarineForecastZone}}hidden{{end}}>{{if .MarineForecastPeriods}}Marine zone{{else}}NWS forecast zone{{end}} {{.MarineForecastZone}}{{if .MarineForecastUpdated}} · Updated {{.MarineForecastUpdated}}{{end}}</span></div><div id="marine-forecast-alerts" class="marine-alerts" aria-label="Active National Weather Service alerts" {{if not .MarineForecastAlerts}}hidden{{end}}>{{range .MarineForecastAlerts}}<span class="marine-alert">⚠ NWS alert — {{.}}</span>{{end}}</div><div id="marine-forecast-periods" class="marine-periods" {{if not .MarineForecastPeriods}}hidden{{end}}>{{range .MarineForecastPeriods}}<div class="marine-period">{{if .Name}}<strong>{{.Name}}</strong>{{end}}{{if .Forecast}}<p>{{.Forecast}}</p>{{end}}</div>{{end}}</div><p id="marine-forecast-note" class="marine-forecast-note" {{if not .MarineForecastPeriods}}hidden{{end}}>Official NWS coastal marine-zone forecast for the zone containing the selected point. It applies to the broader marine zone, not specifically to the selected point.</p><p id="marine-forecast-error" class="marine-forecast-error" {{if not .MarineForecastError}}hidden{{end}}>{{if .MarineForecastError}}{{.MarineForecastError}}{{end}}</p></div></div></div></div><div class="map-controls"><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><details class="map-overlay-help"><summary>Map overlay details</summary><div class="map-overlay-help-body">Topography & Bathymetry combines NOAA/NCEI ETOPO land topography and seafloor bathymetry with NOAA Marine Cadastre official named offshore features. Fishing-relevant features such as seamounts, banks, ridges, hills, knolls, shoals, reefs, rises, plateaus, pinnacles, and escarpments are labeled locally for better contrast. It is intended for fishing-planning context, not navigation; smaller pinnacles may not appear in the global relief model. Marine / Bay Wind Barbs uses live NOAA/NDBC station observations from all active stations with usable wind inside the buffered map viewport; standard meteorological barbs show wind-from direction and speed, and stale observations are faded. Land / Inland Wind Barbs is a separate optional layer sourced from Aviation Weather Center’s complete current-METAR cache and filtered locally to the buffered viewport, including many ASOS/AWOS airport sites. Both controls are display-only and do not change the selected wind station or selected location. Wind-barb tooltips follow the shared page Wind units preference; barb geometry remains based on standard knot increments. Saildrone Observations uses NOAA PMEL public ERDDAP mission data and plots the latest reported position and met-ocean readings from configured 2026 NOAA Saildrone missions; availability is mission-dependent and these moving platforms are not a fixed station network. ALERTCalifornia Cameras uses the official UC San Diego/ALERTCalifornia ArcGIS camera layer, requests only cameras in the current map viewport, and shows the current camera image plus a link to the official live camera page. Camera imagery is displayed unmodified with ALERTCalifornia | UC San Diego attribution. Exact positions are plotted only when the source provides them; fisherman shorthand such as “20×20” is shown as a derived approximate position with an uncertainty circle, and broad reports such as “Cordell to Monterey” are shown as regional zones rather than fake point coordinates. Satellite Cloud Cover uses NOAA/NESDIS GOES imagery rendered for the current map view; daylight areas appear natural-color-like and nighttime areas use infrared imagery. Radar uses Iowa State IEM's Web-Mercator CONUS NEXRAD N0Q WMS layer; a clear/transparent radar layer can simply mean no precipitation echoes are present. Surface Pressure / Isobars uses current NOAA/NWS Aviation Weather Center METAR mean sea-level-pressure observations. The browser interpolates those point observations into contour lines at a zoom-appropriate interval; it is useful pressure-gradient context but is not an official analyzed surface chart. Global Swell Forecast uses the public PacIOOS WaveWatch III global model for basin-scale swell tracking. The browser renders a padded, geographically anchored forecast field and reuses that loaded buffer during short pans; replacement buffers are swapped in only after enough new data are available. Wide-area views use a globally aligned coarser WW3 sampling stride for responsiveness, while closer views retain finer model sampling. The display uses interpolation and periodic dateline handling to present the gridded model smoothly; these display techniques do not increase the underlying model resolution. Sparse clickable arrows show swell travel direction, and the colored swell field or an arrow can be tapped for height, peak period, swell-from direction, travel direction, and forecast-valid time. It is intended for ocean-basin swell tracking and travel planning, not break-specific surf height.</div></details><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-weather-overlay-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-pressure-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div id="map-structure-status" class="map-structure-status" hidden></div><div id="map-windbarb-status" class="map-windbarb-status" hidden></div><div id="map-saildrone-status" class="map-saildrone-status" hidden></div><div id="map-alertcalifornia-status" class="map-alertcalifornia-status" hidden aria-live="polite"></div><div id="map-swell-status" class="map-swell-status" hidden aria-live="polite"></div><div id="map-swell-legend" class="map-swell-legend" hidden><strong>Swell height</strong><span>0</span><span class="map-swell-gradient" aria-hidden="true"></span><span>20+ ft</span><span>· arrows: swell travel direction</span></div><div class="map-layer-note">Drag the handle directly below the map to make the map taller or shorter. Keyboard users can focus the handle and use ↑/↓ (Shift for larger steps).</div><div class="info-popup-row map-info-popup-row"><button id="map-legend-open" class="info-popup-open" type="button" aria-haspopup="dialog" aria-controls="map-legend-modal">ⓘ Map legend</button><button id="map-sources-open" class="info-popup-open" type="button" aria-haspopup="dialog" aria-controls="map-sources-modal">ⓘ Map &amp; data sources</button></div><div id="map-legend-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-legend-title"><div class="info-popup-dialog-head"><h2 id="map-legend-title">Map Legend</h2><button id="map-legend-close" class="info-popup-close" type="button" aria-label="Close map legend" title="Close">×</button></div><div class="info-popup-body"><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span><span class="map-key"><span class="map-dot saildrone" aria-hidden="true"></span>Saildrone latest position</span><span class="map-key"><span class="map-dot alertcalifornia" aria-hidden="true"></span>ALERTCalifornia camera</span></div><div class="map-legend"><span class="map-key"><span class="map-dot marine marina" aria-hidden="true"></span>Marina</span><span class="map-key"><span class="map-dot marine boatyard" aria-hidden="true"></span>Boatyard &amp; repair</span><span class="map-key"><span class="map-dot marine fuel" aria-hidden="true"></span>Fuel dock</span><span class="map-key"><span class="map-dot marine ramp" aria-hidden="true"></span>Launch ramp</span><span class="map-key"><span class="map-dot marine ferry" aria-hidden="true"></span>Ferry terminal</span><span class="map-key"><span class="map-dot marine supply" aria-hidden="true"></span>Marine supply</span><span class="map-key"><span class="map-dot marine club" aria-hidden="true"></span>Yacht club</span><span class="map-key"><span class="map-dot marine restaurant" aria-hidden="true"></span>Waterfront restaurant</span></div></div></div></div><div id="map-sources-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-sources-title"><div class="info-popup-dialog-head"><h2 id="map-sources-title">Map &amp; Data Sources</h2><button id="map-sources-close" class="info-popup-close" type="button" aria-label="Close map and data sources" title="Close">×</button></div><div class="info-popup-body"><p class="map-sources-note">Base maps: <strong>Street Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service and is available at Zoom 9 or closer; <strong>Satellite</strong> uses Esri World Imagery; <strong>Hybrid</strong> combines Esri imagery with place/boundary labels. NWS forecast-zone, NOAA smoke, <strong>Sea Surface Temp</strong>, <strong>Global Swell Forecast</strong>, <strong>Satellite Cloud Cover</strong>, radar, and <strong>ALERTCalifornia Cameras</strong> remain independent overlays. Global Swell Forecast uses PacIOOS public ERDDAP access to the NOAA/NCEP WaveWatch III global model. ALERTCalifornia camera locations and current imagery come from the official UC San Diego/ALERTCalifornia ArcGIS feed. The nautical chart layer is for planning/reference and does not replace official navigation products.</p></div></div></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
 {{if .WindError}}<section class="card full error-card"><h2>Wind station selection unavailable</h2><p class="error-message">{{.WindError}}</p><p class="error-help">The page is still available so you can inspect the request and nearby station diagnostics. Try nearby coordinates or an explicit NDBC station ID.</p></section>{{end}}
 <section class="card full wind-card"><div class="wind-card-head"><h2>Wind</h2></div>
 <div class="metrics">
@@ -6573,7 +6865,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 
 <section id="full-report-card" class="card full details-link-card"><div><h2>Need the details?</h2><p class="details-note">Open the complete text-style report, including diagnostic and supporting information.</p></div><a class="details-link" href="{{.FullDetailsURL}}">View full report details →</a></section>
 {{end}}</div>
-<div class="footer"><strong>Mauri's Weather & Water Conditions</strong><br>NOAA/NDBC observations + NWS forecast context + NOAA CO-OPS current predictions + curated marine-place overlays · Conditions-planning aid, not a navigation system<br>Version {{.AppVersion}} · Build {{.BuildVersion}}</div></main><div id="planning-loading-overlay" class="page-loading-overlay" aria-hidden="true"><div class="page-loading-box" role="status" aria-live="polite"><span class="page-loading-spinner" aria-hidden="true"></span><span id="page-loading-message">Loading…</span></div></div><script>
+<div class="footer"><strong>Mauri's Weather & Water Conditions</strong><br>NOAA/NDBC observations + NWS forecast context + NOAA CO-OPS currents + PacIOOS/NOAA WW3 swell + curated marine-place overlays · Conditions-planning aid, not a navigation system<br>Version {{.AppVersion}} · Build {{.BuildVersion}}</div></main><div id="planning-loading-overlay" class="page-loading-overlay" aria-hidden="true"><div class="page-loading-box" role="status" aria-live="polite"><span class="page-loading-spinner" aria-hidden="true"></span><span id="page-loading-message">Loading…</span></div></div><script>
 (function(){
   var el = document.getElementById("sailing-location-map");
   if (!el || typeof L === "undefined") return;
@@ -6760,6 +7052,14 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   map.getPane("bathymetryOverlayPane").style.zIndex = 410;
   map.getPane("bathymetryOverlayPane").style.pointerEvents = "none";
 
+  map.createPane("swellHeatPane");
+  map.getPane("swellHeatPane").style.zIndex = 420;
+  map.getPane("swellHeatPane").style.pointerEvents = "none";
+
+  map.createPane("swellVectorPane");
+  map.getPane("swellVectorPane").style.zIndex = 424;
+  map.getPane("swellVectorPane").style.pointerEvents = "none";
+
   map.createPane("underseaNamesPane");
   map.getPane("underseaNamesPane").style.zIndex = 425;
   map.getPane("underseaNamesPane").style.pointerEvents = "none";
@@ -6933,122 +7233,8 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   var mobileMapMenuQuery = window.matchMedia("(max-width: 700px)");
 
 
-function positionMapOverlaysPanel() {
-  var overlayMenu = document.getElementById("map-overlays-menu");
-  if (!overlayMenu) return;
-  var panel = overlayMenu.querySelector(":scope > .map-overlays-panel");
-  if (!panel) return;
-
-  var bodies = overlayMenu.querySelectorAll(".map-overlay-group-body");
-  bodies.forEach(function(body) {
-    body.style.maxHeight = "";
-    body.style.overflowY = "";
-  });
-
-  // Mobile retains the dedicated fixed bottom-sheet CSS. Desktop positioning
-  // is owned entirely by this function so no absolute/bottom anchor can push
-  // the popup above the viewport.
-  if (!overlayMenu.open || mobileMapMenuQuery.matches) {
-    panel.style.top = "";
-    panel.style.left = "";
-    panel.style.right = "";
-    panel.style.bottom = "";
-    panel.style.width = "";
-    panel.style.maxHeight = "";
-    panel.style.overflowY = "";
-    return;
-  }
-
-  var summary = overlayMenu.querySelector(":scope > summary");
-  if (!summary) return;
-
-  var margin = 12;
-  var gap = 6;
-  var viewportWidth = window.innerWidth || document.documentElement.clientWidth || 1024;
-  var viewportHeight = window.innerHeight || document.documentElement.clientHeight || 768;
-  var triggerRect = summary.getBoundingClientRect();
-  var desiredWidth = Math.min(380, Math.max(270, viewportWidth - margin * 2));
-
-  panel.style.position = "fixed";
-  panel.style.bottom = "auto";
-  panel.style.right = "auto";
-  panel.style.width = desiredWidth + "px";
-  panel.style.maxHeight = "none";
-  panel.style.overflowY = "hidden";
-
-  var left = triggerRect.left;
-  if (left + desiredWidth > viewportWidth - margin) {
-    left = viewportWidth - margin - desiredWidth;
-  }
-  if (left < margin) left = margin;
-  panel.style.left = Math.round(left) + "px";
-
-  // Put the panel temporarily inside the viewport while measuring its natural
-  // height. The final top coordinate is calculated after any open body is
-  // constrained.
-  panel.style.top = margin + "px";
-
-  var openGroup = overlayMenu.querySelector("details.map-overlay-group[open]");
-  var openBody = openGroup ? openGroup.querySelector(".map-overlay-group-body") : null;
-  var naturalHeight = panel.scrollHeight;
-  var spaceAbove = Math.max(0, triggerRect.top - gap - margin);
-  var spaceBelow = Math.max(0, viewportHeight - triggerRect.bottom - gap - margin);
-  var openUpward;
-
-  if (naturalHeight <= spaceBelow) {
-    openUpward = false;
-  } else if (naturalHeight <= spaceAbove) {
-    openUpward = true;
-  } else {
-    openUpward = spaceAbove >= spaceBelow;
-  }
-
-  var available = Math.max(0, openUpward ? spaceAbove : spaceBelow);
-  available = Math.min(available, Math.max(0, viewportHeight - margin * 2));
-
-  if (openBody && naturalHeight > available) {
-    var bodyNaturalHeight = openBody.scrollHeight;
-    var fixedChromeHeight = Math.max(0, naturalHeight - bodyNaturalHeight);
-    var bodyHeight = Math.max(72, Math.floor(available - fixedChromeHeight));
-    bodyHeight = Math.min(bodyHeight, bodyNaturalHeight);
-    openBody.style.maxHeight = bodyHeight + "px";
-    openBody.style.overflowY = "auto";
-  }
-
-  var actualHeight = panel.getBoundingClientRect().height;
-  if (actualHeight > available && available > 0) {
-    // Defensive fallback for unusually short desktop viewports. The toolbar is
-    // kept at the top of the panel by normal flex order, so Close/Clear remain
-    // reachable even if the complete accordion chrome cannot fit.
-    panel.style.maxHeight = available + "px";
-    panel.style.overflowY = "auto";
-    actualHeight = Math.min(panel.getBoundingClientRect().height, available);
-  }
-
-  var top = openUpward
-    ? triggerRect.top - gap - actualHeight
-    : triggerRect.bottom + gap;
-  top = Math.max(margin, Math.min(top, viewportHeight - margin - actualHeight));
-  panel.style.top = Math.round(top) + "px";
-}
 
   var mapOverlaysMenu = document.getElementById("map-overlays-menu");
-  if (mapOverlaysMenu) {
-    mapOverlaysMenu.addEventListener("toggle", function() {
-      window.requestAnimationFrame(positionMapOverlaysPanel);
-    });
-    mapOverlaysMenu.querySelectorAll("details.map-overlay-group").forEach(function(group) {
-      group.addEventListener("toggle", function() {
-        window.requestAnimationFrame(positionMapOverlaysPanel);
-      });
-    });
-    window.addEventListener("resize", function() {
-      if (mapOverlaysMenu.open) positionMapOverlaysPanel();
-    });
-    window.addEventListener("scroll", function() {
-      if (mapOverlaysMenu.open) window.requestAnimationFrame(positionMapOverlaysPanel);
-    }, true);
-  }
 
   function getOpenMapMenu() {
     for (var i = 0; i < mapMenuIDs.length; i++) {
@@ -7087,7 +7273,6 @@ function positionMapOverlaysPanel() {
       overlayMenu.querySelectorAll("details.map-overlay-group").forEach(function(group) {
         if (group.open) group.removeAttribute("open");
       });
-      window.requestAnimationFrame(positionMapOverlaysPanel);
     });
   }
 
@@ -8759,6 +8944,8 @@ function positionMapOverlaysPanel() {
     inlandWindBarbsVisible: false,
     saildroneVisible: false,
     alertCaliforniaVisible: false,
+    swellOverlayVisible: false,
+    swellForecastHours: 0,
     cloudOverlayVisible: false,
     radarOverlayVisible: false,
     pressureOverlayVisible: false
@@ -8779,8 +8966,819 @@ function positionMapOverlaysPanel() {
   var marineZoneHaloLayer = null;
   var smokeLayer = null;
   var smokeOutlineLayer = null;
+  var swellHeatLayer = L.layerGroup();
+  var swellVectorLayer = L.layerGroup();
+  var swellRequestSerial = 0;
+  var swellRefreshTimer = null;
+  var swellSampleAtLatLng = null;
+  var swellRenderedForecastTime = "";
+  var swellLoadedSegments = [];
+  var swellCachedResults = null;
+  var swellCachedHours = null;
   var radarTilesLoaded = 0;
   var radarTileErrors = 0;
+
+  function setSwellStatus(message, isError) {
+    var status = document.getElementById("map-swell-status");
+    if (!status) return;
+    status.hidden = !message;
+    status.textContent = message || "";
+    status.style.color = isError ? "#8b2c2c" : "";
+  }
+
+  function setSwellLegendVisible(visible) {
+    var legend = document.getElementById("map-swell-legend");
+    if (legend) legend.hidden = !visible;
+  }
+
+  function swellHeightRGBA(meters, alpha) {
+    var feet = Math.max(0, Math.min(20, (Number(meters) || 0) * 3.28084));
+    var stops = [
+      [0, 18, 58, 140],
+      [2, 0, 111, 196],
+      [4, 0, 168, 181],
+      [6, 52, 179, 74],
+      [8, 240, 207, 34],
+      [10, 240, 120, 24],
+      [14, 201, 21, 21],
+      [20, 120, 0, 55]
+    ];
+    var lo = stops[0];
+    var hi = stops[stops.length - 1];
+    for (var i = 1; i < stops.length; i++) {
+      if (feet <= stops[i][0]) {
+        lo = stops[i - 1];
+        hi = stops[i];
+        break;
+      }
+    }
+    var span = Math.max(.001, hi[0] - lo[0]);
+    var t = Math.max(0, Math.min(1, (feet - lo[0]) / span));
+    return [
+      Math.round(lo[1] + (hi[1] - lo[1]) * t),
+      Math.round(lo[2] + (hi[2] - lo[2]) * t),
+      Math.round(lo[3] + (hi[3] - lo[3]) * t),
+      Math.round(255 * (Number.isFinite(alpha) ? alpha : .74))
+    ];
+  }
+
+  function swellViewportSegments(paddingFraction) {
+    var bounds = map.getBounds();
+    var west = Number(bounds.getWest());
+    var east = Number(bounds.getEast());
+    var south = Number(bounds.getSouth());
+    var north = Number(bounds.getNorth());
+    if (!Number.isFinite(west) || !Number.isFinite(east) ||
+        !Number.isFinite(south) || !Number.isFinite(north) ||
+        south >= north) return [];
+
+    var pad = Math.max(0, Number(paddingFraction) || 0);
+    if (pad > 0) {
+      var lonPad = Math.max(.5, (east - west) * pad);
+      var latPad = Math.max(.5, (north - south) * pad);
+      west -= lonPad;
+      east += lonPad;
+      south -= latPad;
+      north += latPad;
+    }
+
+    south = Math.max(-77.5, south);
+    north = Math.min(77.5, north);
+    if (south >= north) return [];
+
+    var segments = [];
+    var firstWorld = Math.floor((west + 180) / 360);
+    var lastWorld = Math.floor((east + 179.999999) / 360);
+    for (var world = firstWorld; world <= lastWorld; world++) {
+      var worldWest = -180 + 360 * world;
+      var worldEast = 180 + 360 * world;
+      var displayWest = Math.max(west, worldWest);
+      var displayEast = Math.min(east, worldEast);
+      if (displayWest >= displayEast) continue;
+      var shift = 360 * world;
+      var canonicalDisplayWest = displayWest - shift;
+      var canonicalDisplayEast = displayEast - shift;
+      var queryWest = Math.max(-179.5, canonicalDisplayWest);
+      var queryEast = Math.min(179.5, canonicalDisplayEast);
+      segments.push({
+        west:queryWest,
+        east:queryEast,
+        displayWest:displayWest,
+        displayEast:displayEast,
+        extendWest:canonicalDisplayWest < queryWest,
+        extendEast:canonicalDisplayEast > queryEast,
+        south:south,
+        north:north,
+        shift:shift
+      });
+    }
+    return segments.filter(function(segment) {
+      return segment.west < segment.east;
+    });
+  }
+
+  function swellSegmentsContainVisibleViewport(loadedSegments) {
+    if (!Array.isArray(loadedSegments) || !loadedSegments.length) return false;
+    var visibleSegments = swellViewportSegments(0);
+    if (!visibleSegments.length) return false;
+
+    return visibleSegments.every(function(visible) {
+      return loadedSegments.some(function(loaded) {
+        if (Number(loaded.shift) !== Number(visible.shift)) return false;
+        var visibleWest = Number.isFinite(Number(visible.displayWest))
+          ? Number(visible.displayWest)
+          : Number(visible.west) + Number(visible.shift || 0);
+        var visibleEast = Number.isFinite(Number(visible.displayEast))
+          ? Number(visible.displayEast)
+          : Number(visible.east) + Number(visible.shift || 0);
+        var loadedWest = Number.isFinite(Number(loaded.displayWest))
+          ? Number(loaded.displayWest)
+          : Number(loaded.west) + Number(loaded.shift || 0);
+        var loadedEast = Number.isFinite(Number(loaded.displayEast))
+          ? Number(loaded.displayEast)
+          : Number(loaded.east) + Number(loaded.shift || 0);
+        return visibleWest >= loadedWest &&
+          visibleEast <= loadedEast &&
+          visible.south >= loaded.south &&
+          visible.north <= loaded.north;
+      });
+    });
+  }
+
+  function successfulSwellSegmentsCoverViewport(successfulSegments) {
+    return swellSegmentsContainVisibleViewport(successfulSegments);
+  }
+
+  function swellStrideForSegments(segments) {
+    if (!Array.isArray(segments) || !segments.length) return 1;
+    var longitudeSpan = 0;
+    var latitudeSpan = 0;
+    segments.forEach(function(segment) {
+      var displayWest = Number.isFinite(Number(segment.displayWest))
+        ? Number(segment.displayWest)
+        : Number(segment.west) + Number(segment.shift || 0);
+      var displayEast = Number.isFinite(Number(segment.displayEast))
+        ? Number(segment.displayEast)
+        : Number(segment.east) + Number(segment.shift || 0);
+      if (Number.isFinite(displayWest) && Number.isFinite(displayEast)) {
+        longitudeSpan += Math.max(0, displayEast - displayWest);
+      }
+      var south = Number(segment.south);
+      var north = Number(segment.north);
+      if (Number.isFinite(south) && Number.isFinite(north)) {
+        latitudeSpan = Math.max(latitudeSpan, Math.max(0, north - south));
+      }
+    });
+
+    var nativeStep = .5;
+    var lonCells = Math.max(1, longitudeSpan / nativeStep);
+    var latCells = Math.max(1, latitudeSpan / nativeStep);
+    var stride = Math.ceil(Math.max(lonCells / 48, latCells / 32));
+    return Math.max(1, Math.min(20, stride));
+  }
+
+
+  function clearSwellLayers() {
+    swellRequestSerial++;
+    if (swellRefreshTimer) {
+      window.clearTimeout(swellRefreshTimer);
+      swellRefreshTimer = null;
+    }
+    swellHeatLayer.clearLayers();
+    swellVectorLayer.clearLayers();
+    if (map.hasLayer(swellHeatLayer)) map.removeLayer(swellHeatLayer);
+    if (map.hasLayer(swellVectorLayer)) map.removeLayer(swellVectorLayer);
+    setSwellStatus("", false);
+    setSwellLegendVisible(false);
+    swellSampleAtLatLng = null;
+    swellRenderedForecastTime = "";
+    swellLoadedSegments = [];
+    swellCachedResults = null;
+    swellCachedHours = null;
+    closeSwellInfoPanel();
+  }
+
+  function formatSwellForecastTime(value) {
+    if (!value) return "";
+    var date = new Date(value);
+    if (!Number.isFinite(date.getTime())) return String(value);
+    return date.toLocaleString([], {
+      month:"short", day:"numeric", hour:"numeric", minute:"2-digit",
+      timeZoneName:"short"
+    });
+  }
+
+  function buildSwellBufferedLayer(results, loadedSegments) {
+    if (!Array.isArray(results) || !results.length ||
+        !Array.isArray(loadedSegments) || !loadedSegments.length) return null;
+
+    function gridKey(lat, lon) {
+      return Number(lat).toFixed(4) + "," + Number(lon).toFixed(4);
+    }
+
+    function uniqueSorted(values) {
+      return Array.from(new Set(values.map(function(value) {
+        return Number(value).toFixed(4);
+      }))).map(Number).sort(function(a, b) { return a - b; });
+    }
+
+    function bracket(sorted, value) {
+      if (sorted.length < 2 || value < sorted[0] || value > sorted[sorted.length - 1]) return null;
+      if (value === sorted[sorted.length - 1]) return [sorted.length - 2, sorted.length - 1, 1];
+      var low = 0, high = sorted.length - 1;
+      while (high - low > 1) {
+        var mid = Math.floor((low + high) / 2);
+        if (sorted[mid] <= value) low = mid; else high = mid;
+      }
+      var a = sorted[low], b = sorted[high];
+      return [low, high, (value - a) / Math.max(.000001, b - a)];
+    }
+
+    var grids = [];
+    results.forEach(function(result, index) {
+      var payload = result && result.payload ? result.payload : {};
+      var shift = Number(result && result.shift) || 0;
+      var points = Array.isArray(payload.points) ? payload.points : [];
+      var latValues = [], lonValues = [], values = Object.create(null);
+
+      points.forEach(function(point) {
+        var lat = Number(point.lat), lon = Number(point.lon) + shift;
+        var height = Number(point.height_m), period = Number(point.period_s), direction = Number(point.direction_deg);
+        if (![lat, lon, height, period, direction].every(Number.isFinite)) return;
+        latValues.push(lat);
+        lonValues.push(lon);
+        values[gridKey(lat, lon)] = {
+          height:height,
+          period:period,
+          direction:((direction % 360) + 360) % 360
+        };
+      });
+
+      var lats = uniqueSorted(latValues), lons = uniqueSorted(lonValues);
+      if (lats.length < 2 || lons.length < 2) return;
+
+      grids.push({
+        index:index,
+        lats:lats,
+        lons:lons,
+        values:values,
+        south:lats[0],
+        north:lats[lats.length - 1],
+        west:lons[0],
+        east:lons[lons.length - 1],
+        lonStep:lons.length > 1 ? Math.abs(lons[1] - lons[0]) : Number(payload.grid_step_deg) || .5
+      });
+    });
+
+    if (!grids.length) return null;
+    grids.sort(function(a, b) { return a.west - b.west; });
+
+    function sampleGrid(grid, lat, lon) {
+      if (lat < grid.south || lat > grid.north || lon < grid.west || lon > grid.east) return null;
+      var lb = bracket(grid.lats, lat), xb = bracket(grid.lons, lon);
+      if (!lb || !xb) return null;
+
+      var y0 = grid.lats[lb[0]], y1 = grid.lats[lb[1]], ty = lb[2];
+      var x0 = grid.lons[xb[0]], x1 = grid.lons[xb[1]], tx = xb[2];
+
+      var corners = [
+        {v:grid.values[gridKey(y0,x0)], w:(1-tx)*(1-ty)},
+        {v:grid.values[gridKey(y0,x1)], w:tx*(1-ty)},
+        {v:grid.values[gridKey(y1,x0)], w:(1-tx)*ty},
+        {v:grid.values[gridKey(y1,x1)], w:tx*ty}
+      ];
+
+      var h=0,p=0,sn=0,cs=0,w=0,count=0;
+      corners.forEach(function(c) {
+        if (!c.v) return;
+        var rad = c.v.direction * Math.PI / 180;
+        h += c.v.height*c.w;
+        p += c.v.period*c.w;
+        sn += Math.sin(rad)*c.w;
+        cs += Math.cos(rad)*c.w;
+        w += c.w;
+        count++;
+      });
+      if (!count || w <= .001) return null;
+
+      var direction = Math.atan2(sn/w, cs/w) * 180 / Math.PI;
+      direction = ((direction % 360) + 360) % 360;
+
+      var validity = Math.max(0, Math.min(1, w));
+      var alphaFactor = validity*validity*(3-2*validity);
+      if (count === 1) alphaFactor *= .48;
+      else if (count === 2) alphaFactor *= .72;
+      else if (count === 3) alphaFactor *= .88;
+      if (alphaFactor < .06) return null;
+
+      return {
+        heightM:h/w,
+        periodS:p/w,
+        direction:direction,
+        alpha:.74*alphaFactor
+      };
+    }
+
+    function blendDirectionalSamples(left, right, t) {
+      if (!left || !right) return left || right || null;
+      t = Math.max(0, Math.min(1, Number(t) || 0));
+      var leftRad = left.direction * Math.PI / 180;
+      var rightRad = right.direction * Math.PI / 180;
+      var sinValue = Math.sin(leftRad) * (1 - t) + Math.sin(rightRad) * t;
+      var cosValue = Math.cos(leftRad) * (1 - t) + Math.cos(rightRad) * t;
+      var direction = Math.atan2(sinValue, cosValue) * 180 / Math.PI;
+      direction = ((direction % 360) + 360) % 360;
+      return {
+        heightM:left.heightM * (1 - t) + right.heightM * t,
+        periodS:left.periodS * (1 - t) + right.periodS * t,
+        direction:direction,
+        alpha:Math.min(left.alpha, right.alpha)
+      };
+    }
+
+    function periodicNeighborSample(grid, lat, lon) {
+      var direct = sampleGrid(grid, lat, lon);
+      if (direct) return direct;
+
+      var gridIndex = grids.indexOf(grid);
+      if (gridIndex < 0) return null;
+
+      if (lon > grid.east && gridIndex + 1 < grids.length) {
+        var nextGrid = grids[gridIndex + 1];
+        var gap = nextGrid.west - grid.east;
+        var expected = Math.max(grid.lonStep || .5, nextGrid.lonStep || .5);
+        if (gap > 0 && gap <= expected * 1.05 &&
+            lon >= grid.east && lon <= nextGrid.west) {
+          var left = sampleGrid(grid, lat, grid.east);
+          var right = sampleGrid(nextGrid, lat, nextGrid.west);
+          return blendDirectionalSamples(left, right, (lon - grid.east) / gap);
+        }
+      }
+
+      if (lon < grid.west && gridIndex > 0) {
+        var previousGrid = grids[gridIndex - 1];
+        var previousGap = grid.west - previousGrid.east;
+        var previousExpected = Math.max(grid.lonStep || .5, previousGrid.lonStep || .5);
+        if (previousGap > 0 && previousGap <= previousExpected * 1.05 &&
+            lon >= previousGrid.east && lon <= grid.west) {
+          var previous = sampleGrid(previousGrid, lat, previousGrid.east);
+          var current = sampleGrid(grid, lat, grid.west);
+          return blendDirectionalSamples(previous, current, (lon - previousGrid.east) / previousGap);
+        }
+      }
+
+      return null;
+    }
+
+    function sampleAtLatLng(lat, lon) {
+      lat = Number(lat);
+      lon = Number(lon);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+      for (var i=0; i<grids.length; i++) {
+        var sample = periodicNeighborSample(grids[i], lat, lon);
+        if (sample) return sample;
+      }
+      return null;
+    }
+
+    var group = L.layerGroup();
+    var overlaysBuilt = 0;
+    var renderZoom = map.getZoom();
+
+    loadedSegments.forEach(function(segment, index) {
+      var grid = grids.find(function(candidate) {
+        return candidate.index === index;
+      });
+      if (!grid) return;
+
+      var displayWest = Number.isFinite(Number(segment.displayWest))
+        ? Number(segment.displayWest)
+        : Number(segment.west) + Number(segment.shift || 0);
+      var displayEast = Number.isFinite(Number(segment.displayEast))
+        ? Number(segment.displayEast)
+        : Number(segment.east) + Number(segment.shift || 0);
+      var south = Number(segment.south);
+      var north = Number(segment.north);
+      if (![displayWest, displayEast, south, north].every(Number.isFinite) ||
+          displayWest >= displayEast || south >= north) return;
+
+      var lonSpan = Math.max(.5, displayEast - displayWest);
+      var latSpan = Math.max(.5, north - south);
+      var canvasWidth = Math.max(260, Math.min(1100, Math.round(lonSpan * 9)));
+      var canvasHeight = Math.max(180, Math.min(760, Math.round(latSpan * 11)));
+
+      var canvas = document.createElement("canvas");
+      canvas.width = canvasWidth;
+      canvas.height = canvasHeight;
+      var ctx = canvas.getContext("2d");
+      var image = ctx.createImageData(canvasWidth, canvasHeight);
+
+      // Leaflet displays image overlays in Web Mercator. Sample the canvas in
+      // projected pixel space so the anchored raster remains geographically
+      // aligned at every subsequent pan/zoom.
+      var nw = map.project([north, displayWest], renderZoom);
+      var se = map.project([south, displayEast], renderZoom);
+
+      for (var py=0; py<canvasHeight; py++) {
+        var projectedY = nw.y + (py + .5) / canvasHeight * (se.y - nw.y);
+        for (var px=0; px<canvasWidth; px++) {
+          var projectedX = nw.x + (px + .5) / canvasWidth * (se.x - nw.x);
+          var ll = map.unproject([projectedX, projectedY], renderZoom);
+          var sample = periodicNeighborSample(grid, ll.lat, ll.lng);
+          if (!sample) continue;
+
+          var rgba = swellHeightRGBA(sample.heightM, sample.alpha);
+          var off = (py*canvasWidth+px)*4;
+          image.data[off]=rgba[0];
+          image.data[off+1]=rgba[1];
+          image.data[off+2]=rgba[2];
+          image.data[off+3]=rgba[3];
+        }
+      }
+
+      ctx.putImageData(image,0,0);
+      L.imageOverlay(
+        canvas.toDataURL("image/png"),
+        [[south, displayWest], [north, displayEast]],
+        {pane:"swellHeatPane", opacity:1, interactive:false}
+      ).addTo(group);
+      overlaysBuilt++;
+    });
+
+    if (!overlaysBuilt) return null;
+    return {layer:group, sampleAtLatLng:sampleAtLatLng};
+  }
+
+
+  function swellDirectionLabel(degrees) {
+    var value = ((Number(degrees) % 360) + 360) % 360;
+    var labels = ["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"];
+    return labels[Math.round(value / 22.5) % 16];
+  }
+
+  function closeSwellInfoPanel() {
+    var panel = document.getElementById("map-swell-info-panel");
+    var body = document.getElementById("map-swell-info-panel-body");
+    if (panel) panel.hidden = true;
+    if (body) body.innerHTML = "";
+  }
+
+  function openSwellInfoPanel(entry, forecastTime) {
+    entry = entry || {};
+    var panel = document.getElementById("map-swell-info-panel");
+    var body = document.getElementById("map-swell-info-panel-body");
+    if (!panel || !body) return;
+
+    var heightFT = Number(entry.heightM) * 3.28084;
+    var fromDirection = ((Number(entry.direction) % 360) + 360) % 360;
+    var travelDirection = (fromDirection + 180) % 360;
+    var forecastHours = Number(mapState.swellForecastHours) || 0;
+    var validText = forecastTime ? formatSwellForecastTime(forecastTime) : "";
+
+    body.innerHTML =
+      '<div class="swell-info-row"><span class="swell-info-label">Height</span><strong>' +
+      escapeHTML(heightFT.toFixed(1) + " ft") + '</strong></div>' +
+      '<div class="swell-info-row"><span class="swell-info-label">Peak period</span><span>' +
+      escapeHTML(Number(entry.periodS).toFixed(1) + " s") + '</span></div>' +
+      '<div class="swell-info-row"><span class="swell-info-label">Swell from</span><span>' +
+      escapeHTML(swellDirectionLabel(fromDirection) + " " + Math.round(fromDirection) + "°") + '</span></div>' +
+      '<div class="swell-info-row"><span class="swell-info-label">Travel toward</span><span>' +
+      escapeHTML(swellDirectionLabel(travelDirection) + " " + Math.round(travelDirection) + "°") + '</span></div>' +
+      (validText
+        ? '<div class="swell-info-row"><span class="swell-info-label">Valid</span><span>' +
+          escapeHTML(validText) + '</span></div>'
+        : "") +
+      '<div class="swell-info-row"><span class="swell-info-label">Forecast</span><span>' +
+      escapeHTML(forecastHours === 0 ? "Now" : "+" + forecastHours + "h") + '</span></div>' +
+      '<div class="swell-info-row"><span class="swell-info-label">Source</span><span>PacIOOS / NOAA WW3</span></div>';
+
+    panel.hidden = false;
+  }
+
+  function renderSwellForecast(results, loadedSegments, replaceHeatLayer) {
+    if (!Array.isArray(results) || !results.length) return false;
+
+    var totalPoints = 0;
+    var forecastTime = "";
+    var finestStep = Infinity;
+    var allEntries = [];
+
+    results.forEach(function(result) {
+      var payload = result && result.payload ? result.payload : {};
+      var shift = Number(result && result.shift) || 0;
+      var points = Array.isArray(payload.points) ? payload.points : [];
+      var step = Number(payload.grid_step_deg);
+      if (!Number.isFinite(step) || step <= 0) step = .5;
+      if (step < finestStep) finestStep = step;
+      if (!forecastTime && payload.forecast_time) forecastTime = String(payload.forecast_time);
+
+      points.forEach(function(point) {
+        var lat = Number(point.lat);
+        var lon = Number(point.lon) + shift;
+        var heightM = Number(point.height_m);
+        var periodS = Number(point.period_s);
+        var direction = Number(point.direction_deg);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon) ||
+            !Number.isFinite(heightM) || !Number.isFinite(periodS) ||
+            !Number.isFinite(direction)) return;
+
+        allEntries.push({
+          lat:lat, lon:lon, heightM:heightM, periodS:periodS, direction:direction
+        });
+        totalPoints++;
+      });
+    });
+
+    if (!totalPoints) return false;
+
+    if (replaceHeatLayer) {
+      var built = buildSwellBufferedLayer(results, loadedSegments);
+      if (!built || !built.layer) return false;
+
+      // Atomic-style swap: fully build the new padded geographic raster first,
+      // add it, then remove the old one. A failed build never destroys the
+      // last successfully displayed swell image.
+      var oldHeatLayer = swellHeatLayer;
+      var newHeatLayer = built.layer;
+      newHeatLayer.addTo(map);
+      swellHeatLayer = newHeatLayer;
+      swellSampleAtLatLng = built.sampleAtLatLng;
+
+      if (oldHeatLayer && oldHeatLayer !== newHeatLayer && map.hasLayer(oldHeatLayer)) {
+        map.removeLayer(oldHeatLayer);
+      }
+    }
+
+    swellRenderedForecastTime = forecastTime;
+    updateSwellTimeLabel();
+
+    // Rebuild only the lightweight vector layer for the current viewport.
+    // The geographically anchored heat raster itself is left untouched.
+    var newVectorLayer = L.layerGroup();
+    var zoom = map.getZoom();
+    var cellSize = zoom <= 5 ? 190 : (zoom <= 7 ? 180 : 170);
+    var size = map.getSize();
+    var buckets = Object.create(null);
+
+    allEntries.forEach(function(entry) {
+      var point = map.latLngToContainerPoint([entry.lat, entry.lon]);
+      if (point.x < 0 || point.y < 0 || point.x > size.x || point.y > size.y) return;
+
+      var col = Math.floor(point.x / cellSize);
+      var row = Math.floor(point.y / cellSize);
+      var key = col + ":" + row;
+      var centerX = (col + .5) * cellSize;
+      var centerY = (row + .5) * cellSize;
+      var dx = point.x - centerX;
+      var dy = point.y - centerY;
+      var distance2 = dx*dx + dy*dy;
+
+      if (!buckets[key] || distance2 < buckets[key].distance2) {
+        buckets[key] = {entry:entry, distance2:distance2};
+      }
+    });
+
+    Object.keys(buckets).forEach(function(key) {
+      var entry = buckets[key].entry;
+      var travel = (entry.direction + 180) % 360;
+      var rotate = travel - 90;
+
+      var icon = L.divIcon({
+        className:"swell-arrow-icon",
+        iconSize:[28,24],
+        iconAnchor:[14,12],
+        html:
+          '<div class="swell-arrow-wrap" style="transform:rotate(' +
+          rotate.toFixed(1) + 'deg)">' +
+          '<span class="swell-arrow-glyph">➤</span>' +
+          '</div>'
+      });
+
+      var marker = L.marker([entry.lat, entry.lon], {
+        icon:icon,
+        pane:"swellVectorPane",
+        interactive:true,
+        keyboard:true,
+        bubblingMouseEvents:false
+      });
+      marker.on("click", function(event) {
+        if (event && event.originalEvent) L.DomEvent.stopPropagation(event.originalEvent);
+        openSwellInfoPanel(entry, forecastTime);
+      });
+      marker.addTo(newVectorLayer);
+    });
+
+    newVectorLayer.addTo(map);
+    var oldVectorLayer = swellVectorLayer;
+    swellVectorLayer = newVectorLayer;
+    if (oldVectorLayer && oldVectorLayer !== newVectorLayer && map.hasLayer(oldVectorLayer)) {
+      map.removeLayer(oldVectorLayer);
+    }
+
+    var hours = Number(mapState.swellForecastHours) || 0;
+    var when = forecastTime ? formatSwellForecastTime(forecastTime) : (hours ? "+" + hours + "h" : "current");
+    var stepText = Number.isFinite(finestStep) ? finestStep.toFixed(finestStep < 1 ? 1 : 0) + "° source grid" : "";
+    setSwellStatus(
+      "PacIOOS / NOAA WW3 swell · " + when +
+      " · " + totalPoints + " modeled samples" +
+      (stepText ? " · " + stepText : "") +
+      " · globally aligned WW3 lattice · click/tap colored swell for details",
+      false
+    );
+    setSwellLegendVisible(true);
+    return true;
+  }
+
+
+  function loadSwellForecast(forceRefresh) {
+    if (!mapState.swellOverlayVisible) return;
+
+    var hours = Math.max(0, Math.min(120, Number(mapState.swellForecastHours) || 0));
+    var cacheMatchesTime = swellCachedResults && swellCachedHours === hours;
+
+    if (!forceRefresh && cacheMatchesTime &&
+        swellSegmentsContainVisibleViewport(swellLoadedSegments)) {
+      // Existing anchored raster already covers the visible map. Leave the
+      // heat image untouched and only redistribute lightweight direction arrows.
+      renderSwellForecast(swellCachedResults, swellLoadedSegments, false);
+      return;
+    }
+
+    var segments = swellViewportSegments(.38);
+    if (!segments.length) {
+      setSwellStatus("WaveWatch III swell data are unavailable for this latitude.", true);
+      return;
+    }
+
+    var commonStride = swellStrideForSegments(segments);
+    var serial = ++swellRequestSerial;
+    if (cacheMatchesTime && swellCachedResults) {
+      setSwellStatus(
+        "Loading expanded swell area… showing previous coverage temporarily.",
+        false
+      );
+    } else {
+      setSwellStatus("Loading PacIOOS / NOAA WaveWatch III swell forecast…", false);
+    }
+
+    var requests = segments.map(function(segment) {
+      var params = new URLSearchParams({
+        west:segment.west.toFixed(2),
+        south:segment.south.toFixed(2),
+        east:segment.east.toFixed(2),
+        north:segment.north.toFixed(2),
+        hours:String(Math.round(hours)),
+        stride:String(commonStride)
+      });
+
+      return fetch("/swell-forecast?" + params.toString(), {
+        headers:{"Accept":"application/json"},
+        cache:"no-store"
+      }).then(function(response) {
+        if (!response.ok) {
+          return response.text().then(function(detail) {
+            throw new Error(String(detail || "HTTP " + response.status).trim());
+          });
+        }
+        return response.json();
+      }).then(function(payload) {
+        return {
+          ok:true,
+          result:{payload:payload, shift:segment.shift},
+          segment:segment
+        };
+      }).catch(function(err) {
+        // A padded request can cross a world boundary and create an extra
+        // segment that is not required for the currently visible map. Record
+        // that failure instead of rejecting the entire replacement.
+        return {
+          ok:false,
+          error:err,
+          segment:segment
+        };
+      });
+    });
+
+    Promise.all(requests).then(function(outcomes) {
+      if (serial !== swellRequestSerial || !mapState.swellOverlayVisible) return;
+
+      var successfulResults = [];
+      var successfulSegments = [];
+      var failures = [];
+
+      outcomes.forEach(function(outcome) {
+        if (outcome && outcome.ok) {
+          successfulResults.push(outcome.result);
+          successfulSegments.push({
+            west:outcome.segment.west,
+            east:outcome.segment.east,
+            displayWest:outcome.segment.displayWest,
+            displayEast:outcome.segment.displayEast,
+            extendWest:!!outcome.segment.extendWest,
+            extendEast:!!outcome.segment.extendEast,
+            south:outcome.segment.south,
+            north:outcome.segment.north,
+            shift:outcome.segment.shift
+          });
+        } else if (outcome) {
+          failures.push(outcome);
+        }
+      });
+
+      if (!successfulResults.length ||
+          !successfulSwellSegmentsCoverViewport(successfulSegments)) {
+        if (cacheMatchesTime && swellCachedResults) {
+          var failureDetail = failures.length && failures[0].error &&
+            failures[0].error.message ? " " + failures[0].error.message : "";
+          setSwellStatus(
+            "Expanded swell request failed — previous coverage shown." + failureDetail,
+            true
+          );
+          return;
+        }
+
+        setSwellLegendVisible(false);
+        setSwellStatus(
+          "Global swell forecast did not return enough data to cover the visible map.",
+          true
+        );
+        return;
+      }
+
+      // Build and swap only after the successful segments are proven to cover
+      // the visible viewport. Optional padding segments may fail without
+      // blocking a valid visible-map replacement.
+      var rendered = renderSwellForecast(
+        successfulResults,
+        successfulSegments,
+        true
+      );
+      if (!rendered) {
+        if (cacheMatchesTime && swellCachedResults) {
+          setSwellStatus(
+            "Expanded swell raster could not be rendered — previous coverage shown.",
+            true
+          );
+        } else {
+          setSwellStatus("Swell forecast returned no usable raster.", true);
+        }
+        return;
+      }
+
+      swellCachedResults = successfulResults;
+      swellCachedHours = hours;
+      swellLoadedSegments = successfulSegments;
+
+      if (failures.length) {
+        setSwellStatus(
+          "Swell forecast loaded for the visible map; " +
+          failures.length + " optional padded segment" +
+          (failures.length === 1 ? "" : "s") +
+          " could not be loaded.",
+          false
+        );
+      }
+    }).catch(function(err) {
+      if (serial !== swellRequestSerial || !mapState.swellOverlayVisible) return;
+
+      if (cacheMatchesTime && swellCachedResults) {
+        setSwellStatus(
+          "Expanded swell request failed — previous coverage shown. " +
+          (err && err.message ? err.message : "Unknown error."),
+          true
+        );
+        return;
+      }
+
+      setSwellLegendVisible(false);
+      setSwellStatus(
+        "Global swell forecast failed: " +
+        (err && err.message ? err.message : "unknown error"),
+        true
+      );
+    });
+  }
+
+
+  function scheduleSwellRefresh() {
+    if (!mapState.swellOverlayVisible) return;
+    if (swellRefreshTimer) window.clearTimeout(swellRefreshTimer);
+    swellRefreshTimer = window.setTimeout(function() {
+      swellRefreshTimer = null;
+      loadSwellForecast();
+    }, 280);
+  }
+
+  function setSwellVisible(visible) {
+    mapState.swellOverlayVisible = !!visible;
+    var controls = document.getElementById("map-swell-controls");
+    if (controls) controls.hidden = !mapState.swellOverlayVisible;
+    if (!mapState.swellOverlayVisible) {
+      clearSwellLayers();
+      return;
+    }
+    loadSwellForecast();
+  }
 
   function marineZoneStyle() {
     var imageryBase = activeMapLayerName === "satellite" || activeMapLayerName === "hybrid";
@@ -9761,6 +10759,81 @@ function positionMapOverlaysPanel() {
     });
   }
 
+  var swellCheckbox = document.getElementById("map-show-swell");
+  var swellHours = document.getElementById("map-swell-hours");
+  var swellTime = document.getElementById("map-swell-time");
+
+  var swellInfoClose = document.getElementById("map-swell-info-panel-close");
+  if (swellInfoClose) {
+    swellInfoClose.addEventListener("click", function(event) {
+      if (event) event.stopPropagation();
+      closeSwellInfoPanel();
+    });
+  }
+
+  function updateSwellTimeLabel(previewHours) {
+    if (!swellTime || !swellHours) return;
+
+    var committedHours = Number(mapState.swellForecastHours) || 0;
+    var hours = Number.isFinite(Number(previewHours))
+      ? Number(previewHours)
+      : Number(swellHours.value) || 0;
+    var offsetText = hours === 0 ? "Now" : "+" + hours + "h";
+    var validDate = null;
+
+    if (swellRenderedForecastTime) {
+      var rendered = new Date(swellRenderedForecastTime);
+      if (Number.isFinite(rendered.getTime())) {
+        validDate = new Date(
+          rendered.getTime() + (hours - committedHours) * 60 * 60 * 1000
+        );
+      }
+    }
+
+    if (!validDate) {
+      validDate = new Date(Date.now() + hours * 60 * 60 * 1000);
+    }
+
+    var validText = validDate.toLocaleString([], {
+      weekday:"short",
+      month:"short",
+      day:"numeric",
+      hour:"numeric",
+      minute:"2-digit",
+      timeZoneName:"short"
+    });
+
+    swellTime.textContent = hours === 0
+      ? "Selected: Now · " + validText
+      : "Selected: " + offsetText + " · " + validText;
+  }
+
+  if (swellHours) {
+    swellHours.value = String(mapState.swellForecastHours || 0);
+    updateSwellTimeLabel();
+
+    swellHours.addEventListener("input", function() {
+      // Preview only while dragging. Do not mutate active swell forecast state
+      // and do not initiate data work until the user commits the slider value.
+      updateSwellTimeLabel(Number(swellHours.value) || 0);
+    });
+
+    swellHours.addEventListener("change", function() {
+      var nextHours = Number(swellHours.value) || 0;
+      var changed = nextHours !== Number(mapState.swellForecastHours || 0);
+      mapState.swellForecastHours = nextHours;
+      updateSwellTimeLabel(nextHours);
+      if (changed && mapState.swellOverlayVisible) loadSwellForecast(true);
+    });
+  }
+
+  if (swellCheckbox) {
+    swellCheckbox.checked = !!mapState.swellOverlayVisible;
+    swellCheckbox.addEventListener("change", function() {
+      setSwellVisible(!!swellCheckbox.checked);
+    });
+  }
+
   var cloudCheckbox = document.getElementById("map-show-clouds");
   if (cloudCheckbox) {
     cloudCheckbox.checked = !!mapState.cloudOverlayVisible;
@@ -9796,6 +10869,7 @@ function positionMapOverlaysPanel() {
     syncCoordinateInputsToMapCenter();
     updateMapScaleStatus();
     if (mapState.structureOverlayVisible) scheduleStructureRefresh();
+    if (mapState.swellOverlayVisible) scheduleSwellRefresh();
     if (mapState.cloudOverlayVisible) scheduleCloudRefresh();
     if (mapState.pressureOverlayVisible) schedulePressureRefresh();
     if (mapState.windBarbsVisible || mapState.inlandWindBarbsVisible) scheduleWindBarbRefresh();
@@ -9925,6 +10999,7 @@ function positionMapOverlaysPanel() {
     weather = weather || {};
 
     var box = document.getElementById("selected-location-weather");
+    var empty = document.getElementById("selected-location-weather-empty");
     var place = document.getElementById("selected-location-weather-place");
     var content = document.getElementById("selected-location-weather-content");
     var air = document.getElementById("selected-location-weather-air");
@@ -9953,6 +11028,7 @@ function positionMapOverlaysPanel() {
         ? (locationText ? "Near " + locationText : "Selected location")
         : "Select a location for weather";
     }
+    if (empty) empty.hidden = !!mapState.selectedLocation;
     if (content) content.hidden = !mapState.selectedLocation;
     if (air) air.textContent = airText || "—";
     if (high) high.textContent = highText || "—";
@@ -10828,9 +11904,20 @@ function positionMapOverlaysPanel() {
 
     if (originalTarget && originalTarget.closest &&
         (originalTarget.closest(".map-wind-candidate") ||
-         originalTarget.closest(".alertcalifornia-marker"))) {
-      // Selecting a wind source or opening a camera must never move the ★ sailing location.
+         originalTarget.closest(".alertcalifornia-marker") ||
+         originalTarget.closest(".swell-arrow-icon") ||
+         originalTarget.closest(".swell-info-panel"))) {
+      // Overlay interactions must never move the ★ sailing location.
       return;
+    }
+
+    if (mapState.swellOverlayVisible && swellSampleAtLatLng) {
+      var swellSample = swellSampleAtLatLng(e.latlng.lat, e.latlng.lng);
+      if (swellSample && Number(swellSample.alpha) >= .08) {
+        if (e && e.originalEvent) L.DomEvent.stopPropagation(e.originalEvent);
+        openSwellInfoPanel(swellSample, swellRenderedForecastTime);
+        return;
+      }
     }
 
     if (selectSailingLocation(e.latlng.lat, e.latlng.lng, false)) {
