@@ -6,8 +6,8 @@ The default wind station is **PSBC1**.
 
 ## Current release
 
-**Public version: 1.12.8**  
-**Generated source lineage: v293**
+**Public version: 1.10.0**  
+**Generated source lineage: v263**
 
 **Current SST status:** deferred/disabled in v195; see **Deferred SST — future approach** below.
 **Current chlorophyll status:** both Chlorophyll Field and Chlorophyll Contours are deferred/disabled in v198.
@@ -17,369 +17,6 @@ Version 1.9.2 builds on the streamlined browser workflow with clearer observatio
 
 
 
-
-## v293 / 1.12.8 release candidate
-
-- Finalizes the accumulated post-1.12.7 swell, selected-location weather, and Map Overlays interaction work as public/application version **1.12.8**.
-- Advances generated source lineage to **v293** with no functional change from the validated v292 code path other than release identity.
-- Carries forward the simplified fixed **Map Overlays** viewport panel with one outer vertical scrollbar, no category-body scrollbars, no trigger-relative geometry calculations, and no runtime popup repositioning while scrolling.
-- Carries forward the shortened **Surf & Swell** menu explanation, clickable/global WW3 swell behavior, forecast-time controls, selected-location weather empty state, and the prior dateline/grid/interpolation fixes.
-- Marks this build as the pre-push release candidate. After copying it to repository `main.go`, run the project-state checker, `gofmt`, `go build ./...`, `go test ./...`, and inspect the Git diff before committing and pushing.
-
-## v292 / 1.12.7 simplified Map Overlays viewport panel
-
-- Advances the generated development build to **v292** while intentionally retaining public/application version **1.12.7** during iterative development.
-- Deletes the legacy desktop `positionMapOverlaysPanel()` geometry system entirely, including trigger-relative above/below calculations, dynamic height fitting, and scroll/resize reposition callbacks.
-- Makes **Map Overlays** a straightforward fixed viewport panel: centered horizontally on desktop with a 24 px top/bottom safety margin and constrained to `100dvh`.
-- Uses exactly one vertical scroll container: the outer Map Overlays panel. If the available screen height is insufficient, the whole panel scrolls normally.
-- Individual category bodies, including **Surf & Swell** and **Marine Places**, are never height-clamped and never receive their own vertical scrollbar.
-- On narrow/mobile layouts the same principle applies with safe-area-aware viewport insets and one outer panel scrollbar.
-- Keeps the Clear/Close toolbar sticky at the top of the panel while the category list scrolls underneath it.
-- Removes the runtime scroll-position recalculation path entirely, so dragging the panel scrollbar does not trigger popup geometry work or overlay/API activity.
-- Leaves all overlay checkbox handlers, data APIs, map rendering, swell forecast behavior, Marine Places content, and the v289 Selected Location Weather empty state unchanged.
-- Keeps `appVersion` at **1.12.7** until the pre-push semantic-version review.
-
-## v291 / 1.12.7 category-body scrollbar removal
-
-- Advances the generated development build to **v291** while intentionally retaining public/application version **1.12.7** during iterative development.
-- Fixes the remaining sluggish **category-body vertical scrollbar** behavior in expanded Map Overlays categories such as **Surf & Swell** and **Marine Places**.
-- Removes the desktop JavaScript that dynamically assigned `max-height` and `overflow-y:auto` to the currently open category body when the popup exceeded available viewport space.
-- Makes the outer **Map Overlays panel** the only vertical scroll container on desktop and mobile; category bodies are explicitly forced to `max-height:none` and `overflow:visible`.
-- Retains viewport containment by sizing the outer popup to the available space above or below the Map Overlays button.
-- Stops the global captured scroll handler from reacting to descendant/internal popup scrolling, avoiding repeated `positionMapOverlaysPanel()` layout work while the overlay list is being scrolled.
-- Keeps window/page scroll and resize repositioning, accordion behavior, sticky Clear/Close toolbar, Marine Places visibility, and all overlay data/API behavior unchanged.
-- Keeps the v289 weather empty state and shortened Surf & Swell copy unchanged.
-- Keeps `appVersion` at **1.12.7** until the pre-push semantic-version review.
-
-## v290 / 1.12.7 single-scroll Map Overlays panel
-
-- Advances the generated development build to **v290** while intentionally retaining public/application version **1.12.7** during iterative development.
-- Reworks **Map Overlays** to use one vertical scroll container: the outer fixed overlay panel.
-- Removes group-level scrolling/max-height constraints from accordion bodies, including **Surf & Swell** and **Marine Places**, eliminating the sluggish nested scrollbar interaction.
-- Expanded groups now grow naturally; when their combined content exceeds the available viewport height, the whole Map Overlays panel scrolls.
-- Keeps the overlay popup constrained to the viewport on desktop and narrow/mobile layouts so large groups cannot be clipped off-screen.
-- Makes the **Clear all overlays / close** toolbar sticky at the top of the scrolling panel so those controls remain accessible while browsing long category lists.
-- Retains momentum scrolling and overscroll containment on the outer panel for Safari/iOS.
-- Keeps the v289 shortened Surf & Swell copy and Selected Location Weather empty state, plus all v288/v287 swell behavior, unchanged.
-- Keeps `appVersion` at **1.12.7** until the pre-push semantic-version review.
-
-## v289 / 1.12.7 Surf & Swell menu cleanup + weather empty state
-
-- Advances the generated development build to **v289** while intentionally retaining public/application version **1.12.7** during iterative development.
-- Shortens the scrollable **Surf & Swell** overlay-menu explanation to three concise points: swell-height color, travel-direction arrows, and the Now-to-+120h forecast range.
-- Moves the implementation-oriented swell details—buffered geographic loading, wide-view sampling, interpolation, and dateline handling—into **Map overlay details** instead of keeping them in the overlay menu.
-- Adds a deliberate **Selected Location Weather** empty state rather than leaving a large blank panel when no map location is selected.
-- The empty state displays **Selected Location Weather** and **Select a location on the map to view current weather and forecast information.**
-- Selecting a location hides the empty state and reveals the existing point/marine forecast layout; clearing the location restores the empty-state message.
-- Keeps the v288 slider behavior, v287 globally aligned WW3 lattice, periodic dateline interpolation, anchored-buffer lifecycle, clickable swell field, and vector markers unchanged.
-- Keeps `appVersion` at **1.12.7** until the pre-push semantic-version review.
-
-## v288 / 1.12.7 responsive swell forecast slider
-
-- Advances the generated development build to **v288** while intentionally retaining public/application version **1.12.7** during iterative development.
-- Decouples forecast-slider **drag preview** from the active swell forecast state.
-- During the slider `input` event, only the selected-time text is updated; `mapState.swellForecastHours` is not changed and no swell fetch/render work is started.
-- Commits the selected hour only on the slider `change` event (release/commit) and triggers at most one forced swell reload when the value actually changed.
-- Keeps forecast-valid time previews meaningful while dragging by offsetting from the currently rendered WW3 valid time when available.
-- Increases the range control's vertical touch target to **34 px** and preserves vertical page scrolling with `touch-action: pan-y`, improving Safari/iOS pointer handling inside the overlay sheet.
-- Updates the Surf & Swell help text to explain that dragging previews immediately and forecast data reload once on release.
-- Keeps the v287 globally aligned WW3 lattice, periodic dateline interpolation, anchored-buffer lifecycle, clickable swell field, vector markers, and all forecast data behavior unchanged.
-- Keeps `appVersion` at **1.12.7** until the pre-push semantic-version review.
-
-## v287 / 1.12.7 globally aligned WW3 lattice + periodic dateline interpolation
-
-- Advances the generated development build to **v287** while intentionally retaining public/application version **1.12.7** during iterative development.
-- Replaces the v286 fixed 0.5-degree dateline edge extension with a root-level sampling correction.
-- Computes **one common WW3 stride for all wrapped request segments in the same map view** and sends that stride to `/swell-forecast`.
-- The server now builds latitude/longitude ERDDAP subsets with **globally aligned integer axis indices** instead of independent coordinate-valued starts. Because ERDDAP stride is index-based, wrapped segments now share the same coarse sampling lattice even at wide zooms.
-- Retains the valid PacIOOS longitude axis clamp at **-179.5° through +179.5°** while avoiding segment-specific stride phase drift.
-- Returns `grid_stride` alongside `grid_step_deg` for explicit lattice diagnostics.
-- Sorts returned wrapped grids by display longitude and performs **periodic interpolation across adjacent dateline grids** when the gap is no larger than one effective model step.
-- Periodic interpolation blends height, period, and direction; direction uses circular/vector interpolation so bearings do not jump through 180/360-degree wrap.
-- Removes the fixed half-cell reuse behavior from v286.
-- Keeps the v284/v285 resilient replacement lifecycle, v283 anchored padded raster, clickable swell field, vector markers, and forecast-time controls unchanged.
-- Keeps `appVersion` at **1.12.7** until the pre-push semantic-version review.
-
-## v286 / 1.12.7 WW3 dateline half-cell display fix
-
-- Advances the generated development build to **v286** while intentionally retaining public/application version **1.12.7** during iterative development.
-- Fixes the pale vertical seam at the international dateline introduced when v285 correctly clamped ERDDAP query coordinates to the dataset's **-179.5° through +179.5°** longitude-center axis.
-- Separates **query bounds** from **display bounds** for swell segments: ERDDAP requests remain limited to valid sample centers at ±179.5°, while the rendered outer grid cells may extend visually to the true world edge at ±180°.
-- Marks only dateline-edge segments for half-cell extension; ordinary request boundaries are not expanded.
-- During raster construction, pixels in the outer 0.5° dateline half-cell reuse the outermost valid WW3 sample rather than requesting or interpolating a nonexistent 180.0° sample.
-- Geographic cache/viewport coverage checks now use the rendered display bounds rather than the clamped query-center bounds.
-- Preserves display-bound metadata through successful segment loading and caching.
-- Keeps the v285 server-side longitude clamp, v284 resilient expanded-coverage handling, v283 anchored raster lifecycle, clickable swell field, vectors, and forecast-time UI unchanged.
-- Keeps `appVersion` at **1.12.7** until the pre-push semantic-version review.
-
-## v285 / 1.12.7 WW3 longitude-axis clamp
-
-- Advances the generated development build to **v285** while intentionally retaining public/application version **1.12.7** during iterative development.
-- Fixes the ERDDAP 404 seen during expanded/wide swell requests where the browser could request longitude **180.00°** even though the `ww3_global_lon180` dataset's actual longitude axis ends at **179.5°**.
-- Clamps browser-generated canonical swell request segments to **-179.5° through +179.5°**.
-- Adds the same clamp defensively in the `/swell-forecast` server endpoint before constructing the ERDDAP griddap constraint.
-- Rejects any bounds that collapse after clamping instead of forwarding an invalid query upstream.
-- Keeps the v284 resilient expanded-coverage logic, v283 anchored raster lifecycle, interpolation, vectors, clickable field, detail panel, and forecast-time controls unchanged.
-- Keeps `appVersion` at **1.12.7** until the pre-push semantic-version review.
-
-## v284 / 1.12.7 resilient expanded swell coverage
-
-- Advances the generated development build to **v284** while intentionally retaining public/application version **1.12.7** during iterative development.
-- Targets the zoom-out/expanded-coverage transition only; the v283 anchored raster renderer, interpolation, colors, vectors, clickable field, detail panel, and forecast slider are otherwise unchanged.
-- Changes buffered WW3 loading so each world-wrap/padded request segment succeeds or fails independently instead of one failed padding segment rejecting the entire replacement.
-- Validates the **successful geographic segments against the current visible viewport** before replacing the existing swell raster.
-- Optional off-screen padding segments may fail without preventing a new raster from being displayed when the successful segments still cover the visible map.
-- While expanded coverage is loading, the status explicitly reports **"Loading expanded swell area… showing previous coverage temporarily."**
-- If the expanded request cannot cover the current viewport, the previous anchored raster remains in place and the status reports **"Expanded swell request failed — previous coverage shown."**
-- Only after sufficient successful data cover the visible map does v284 build and atomically swap the replacement raster/cache.
-- Keeps `appVersion` at **1.12.7** until the pre-push semantic-version review.
-
-## v283 / 1.12.7 anchored buffered swell raster
-
-- Advances the generated development build to **v283** while intentionally retaining public/application version **1.12.7** during iterative development.
-- Replaces v282's viewport-sized redraw-from-cache behavior with a simpler **geographically anchored padded raster** lifecycle.
-- Each successful padded WW3 request is rendered over the same full geographic bounds that produced the data, rather than rebuilding the heat raster against the current viewport after every short pan.
-- Short pans inside the loaded buffer leave the existing swell heat image untouched; only the lightweight direction-vector layer is refreshed for the newly visible area.
-- When the visible map leaves the loaded buffer, the existing swell image remains displayed while the next padded WW3 region is fetched and fully rendered.
-- The new buffered raster is swapped in only after it has been built successfully; failed or unusable replacement requests leave the previous geographic raster and cache intact.
-- Uses Web Mercator projected sampling while constructing the anchored image so the raster remains geographically aligned as Leaflet pans and zooms it.
-- Keeps the v282 38% geographic padding, v281 forecast-time UI, v280 clickable swell field/fixed detail panel, bilinear WW3-grid interpolation, and `/swell-forecast` endpoint unchanged.
-
-## v282 / 1.12.7 buffered swell viewport loading
-
-- Advances the generated development build to **v282** while intentionally retaining public/application version **1.12.7** during iterative development.
-- Changes Global Swell Forecast loading from exact-visible-viewport requests to a roughly **38% padded viewport buffer**.
-- Caches the successfully loaded WaveWatch III results and geographic segment bounds.
-- When the user pans within the buffered area, redraws the current viewport from cached WW3 samples without another network request.
-- Fetches a new buffered region only after the visible viewport moves outside the loaded geographic buffer or the selected forecast hour changes.
-- Preserves the last successful swell raster and vectors if a subsequent refresh fails, showing the refresh problem in the swell status text instead of blanking the map.
-- Forecast-time changes still force a new data request so the cached geographic buffer is never reused for the wrong forecast hour.
-- Keeps the v281 forecast-time UI, v280 clickable swell field, fixed detail panel, bilinear WW3-grid interpolation, and underlying `/swell-forecast` endpoint unchanged.
-
-## v281 / 1.12.7 swell forecast-time control clarification
-
-- Advances the generated development build to **v281** while intentionally retaining public/application version **1.12.7** during iterative development.
-- Reworks the swell forecast-time slider so the endpoints are permanently labeled **Now** and **+120h (5 days)**.
-- Moves the active slider value to a separate readout beneath the control, such as **Selected: +48h · Mon Sep 28, 8:00 AM PDT**.
-- Uses the model's actual returned forecast-valid timestamp when available; before the first forecast response arrives, the UI shows an approximate browser-local future time derived from the selected offset.
-- Explicitly states in the Surf & Swell help text that **+120h means 120 hours / 5 days in the future**.
-- Keeps the v280 clickable swell field, bilinear interpolation, fixed swell information panel, vector behavior, forecast endpoint, and underlying WW3 data unchanged.
-
-## v280 / 1.12.7 clickable swell field
-
-- Advances the public application version to **1.12.7** and generated build to **v280** as a swell-interaction patch.
-- Makes the **colored swell raster itself clickable/tappable** wherever valid interpolated WW3 data exist.
-- Reuses the same bilinear grid interpolator for interaction, returning interpolated swell height, peak period, and circularly interpolated swell direction at the clicked map point.
-- Opens the existing fixed-position **Swell Forecast** panel for raster clicks as well as arrow clicks.
-- Intercepts valid swell-field clicks before the normal map selected-location handler, so inspecting swell does not move the sailing-location star.
-- Restores a moderate directional-arrow density so direction remains visually apparent, while arrows are no longer required as the only click targets.
-- Keeps the v279 true WW3-grid bilinear renderer, coastline/model-gap fading, `/swell-forecast` endpoint, PacIOOS / NOAA WaveWatch III source, time slider, and world-wrap handling unchanged.
-
-## v279 / 1.12.6 true WW3-grid interpolation
-
-- Advances the public application version to **1.12.6** and generated build to **v279** as a swell-renderer correction.
-- Replaces v278's radial distance-weighted screen-space interpolation, which produced visible circular bullseyes around individual WW3 samples.
-- Reconstructs each returned WaveWatch III latitude/longitude grid explicitly and performs **bilinear interpolation only between adjacent model grid cells**.
-- Samples the reconstructed grid into the single Leaflet viewport raster using each raster pixel's map latitude/longitude.
-- At land/model-data boundaries, opacity is derived from the bilinear weight contributed by valid adjacent ocean cells; cells with one, two, or three valid corners are progressively faded.
-- Removes the radial influence-radius renderer entirely, so isolated WW3 samples no longer create circular color halos.
-- Further reduces clickable vector density by enlarging the screen-space thinning cells; at Zoom 8 a typical regional view should show only a small handful of representative arrows rather than a dense field.
-- Keeps the fixed in-map **Swell Forecast** detail panel, arrow click isolation, `/swell-forecast` endpoint, PacIOOS / NOAA WaveWatch III source, time slider, world-wrap request handling, and underlying forecast values unchanged.
-
-## v278 / 1.12.5 unified swell viewport renderer + fixed info panel
-
-- Advances the public application version to **1.12.5** and generated build to **v278** as a swell visualization/usability patch.
-- Replaces the multiple per-request swell image overlays with **one viewport-wide raster** assembled from all currently loaded WaveWatch III samples.
-- Interpolates in Leaflet screen space so ERDDAP request segmentation is no longer exposed as rectangular internal seams or clipping.
-- Uses a smooth distance-weighted validity fade plus a small alpha-only feather pass near the WW3 data boundary; this remains presentation-only and does not imply finer shoreline resolution.
-- Replaces Leaflet swell popups with a fixed-position **Swell Forecast** panel inside the map so swell details cannot be clipped at map edges.
-- The fixed panel shows swell height, peak period, swell-from direction, travel direction, forecast-valid time, forecast offset, and source.
-- Replaces index-based arrow thinning with **screen-space grid thinning**: the visible map is divided into cells and at most one vector nearest each cell center is displayed, preventing arrows from stacking into rows or columns because of source-grid ordering.
-- Keeps arrow clicks isolated from the normal selected-location map click.
-- Keeps the existing `/swell-forecast` endpoint, PacIOOS / NOAA WaveWatch III source, 0-to-120-hour forecast slider, world-wrap request handling, and underlying forecast values unchanged.
-
-## v277 / 1.12.4 clickable swell vectors + coastline feathering
-
-- Advances the public application version to **1.12.4** and generated build to **v277** as a swell-overlay usability/visualization patch.
-- Makes the sparse swell-direction arrows **clickable/tappable**.
-- Arrow popups show modeled swell height in feet, peak period in seconds, swell-from compass/bearing, travel-toward compass/bearing, valid forecast time, and forecast offset.
-- Uses `bubblingMouseEvents:false` plus explicit DOM event propagation stopping so clicking a swell arrow does **not** change the application's selected map location.
-- Keeps popup auto-pan disabled so inspecting a swell vector does not unexpectedly move the map.
-- Adds a two-pass feathered alpha mask to the smooth swell raster. Offshore opacity remains strong while valid/invalid model-data boundaries fade progressively, reducing the coarse staircase appearance along coastlines and model gaps.
-- The feathering changes presentation only; it does not add model resolution or imply shoreline-scale forecast precision.
-- Keeps the v273-v276 `/swell-forecast` endpoint, PacIOOS / NOAA WaveWatch III source, forecast-time slider, sparse-vector density, world-wrap handling, and underlying model values unchanged.
-
-## v276 / 1.12.3 smooth swell visualization
-
-- Advances the public application version to **1.12.3** and generated build to **v276** as a visualization-focused patch release.
-- Replaces the visible WaveWatch III grid-cell rectangles with a browser-rendered **smooth interpolated raster** while retaining the same underlying model values and approximately 0.5-degree source resolution.
-- Uses bilinear interpolation between complete neighboring model samples and a softer, lower-opacity nearest-sample edge treatment near missing-data/coastline boundaries.
-- Makes the smoothing explicitly visual only; it does **not** claim additional model resolution or surf-break-scale accuracy.
-- Removes peak-period capsules from the map entirely.
-- Reduces direction arrows further to approximately **12** at basin-scale zooms, **18** at mid zoom, and **30** at closer regional/coastal zooms.
-- Keeps arrows subdued so the swell-height field is the primary visual signal.
-- Keeps the v273-v275 `/swell-forecast` endpoint, PacIOOS / NOAA WaveWatch III source, 0-to-120-hour forecast slider, world-wrap handling, and forecast data unchanged.
-
-## v275 / 1.12.2 swell-overlay visual refinement
-
-- Advances the public application version to **1.12.2** and generated build to **v275** as a presentation-focused patch release.
-- Increases Global Swell Forecast heat-map opacity from roughly **0.48 to 0.68** so modeled swell stands out more clearly against the base map.
-- Replaces the earlier continuous HSL ramp with a stronger discrete **deep blue → blue → cyan → green → yellow → orange → red** swell-height scale to improve visual separation between low, moderate, and large swell.
-- Reduces arrow visual weight with a smaller, more transparent glyph and lighter outline treatment.
-- Makes arrow density zoom-aware: about **24 arrows** at basin-scale zooms, about **48** at mid zoom, and up to about **90** at closer regional/coastal zooms.
-- Hides peak-period labels entirely at **Zoom 5 and below**.
-- At **Zoom 6–7**, labels only long-period swell of approximately **14 seconds or greater**.
-- At **Zoom 8+**, allows the fuller period-label display.
-- Keeps the v273/v274 WaveWatch III data source, forecast-time slider, world-wrap handling, server endpoint, and swell calculations unchanged.
-
-## v274 / 1.12.1 Go compatibility repair
-
-- Advances the public application version to **1.12.1** and generated build to **v274** as a patch release.
-- Fixes the v273 compile regression at the new `/swell-forecast` endpoint by replacing `io.ReadAll` with the project's existing `ioutil.ReadAll` compatibility pattern.
-- Leaves the v273 Global Swell Forecast feature, PacIOOS / NOAA WaveWatch III endpoint behavior, map rendering, time slider, world-wrap handling, and all unrelated application behavior unchanged.
-
-## v273 / 1.12.0 global swell forecast overlay
-
-- Advances the public application version to **1.12.0** and generated build to **v273** because this is a substantial new user-facing map capability.
-- Adds an optional **Surf & Swell → Global Swell Forecast (PacIOOS / NOAA WW3)** map overlay.
-- Uses the public PacIOOS ERDDAP **WaveWatch III global model, lon +/-180** dataset (`ww3_global_lon180`) rather than a proprietary surf service.
-- Adds server endpoint **`/swell-forecast`**. It requests the model's separate swell fields: significant swell height (`shgt`), peak swell period (`sper`), and swell-from direction (`sdir`) for the current map viewport.
-- Renders swell height as a browser-interpolated smooth raster derived from the model grid. Sparse arrows show the swell's **travel direction** (the opposite of the model's swell-from bearing). The smoothing is display-only and does not increase the model's native forecast resolution.
-- Adds a **0 to +120 hour** forecast-time slider in 6-hour steps so a user can visually follow swell propagation and estimate broad arrival windows across ocean basins.
-- Handles Leaflet world wrapping by splitting dateline-crossing viewports into canonical +/-180-degree model requests and reassembling them in the visible map world.
-- Dynamically strides the native 0.5-degree grid at wide zooms to keep global views responsive while preserving native resolution at regional/coastal zooms.
-- Clearly labels the product as approximately **0.5 degree / ~50 km basin-scale guidance**, not a surf-break-specific forecast.
-- Adds swell source/context wording to Map Overlay Details, Map & Data Sources, FAQ map choices, and the footer.
-
-## v272 / 1.11.0 release management + weather-column alignment
-
-- Advances the public application version to **1.11.0** and generated build to **v272**.
-- Treats the ALERTCalifornia camera integration introduced across the v264-v267 work as the feature that begins the **1.11.x** release line.
-- Top-aligns the two desktop weather columns: **Selected Location Weather / NWS Point Forecast** starts at the top of the left column and **NWS Marine Forecast** starts at the same top edge on the right.
-- Keeps the v271 full-width weather panel, desktop two-column split, narrow-screen stacking, and all v270 point-vs-marine behavior unchanged.
-- Adds an explicit README version-management policy requiring every future `regen` to make a deliberate SemVer decision before assigning the next build number.
-- Makes semantic-version carry-forward an explicit decision rather than an automatic default.
-
-## v271 / 1.10.0 Selected Location Weather two-column layout
-
-- Advances the generated application build to **v271** while retaining public version **1.10.0**.
-- Moves the **Selected Location Weather** panel to the full available width below the latitude/longitude controls instead of constraining it to the right half of the Location card.
-- On desktop, lays out **NWS Point Forecast** on the left and the wider **NWS Marine Forecast** section on the right, using approximately a 37/63 split so marine forecast periods have more room.
-- Replaces the vertical divider between point and marine products with a responsive layout boundary; on narrow screens the two forecast sections stack vertically with a horizontal divider.
-- Keeps all v270 point-vs-marine terminology, conditional point-forecast suppression, NWS retrieval behavior, forecast-zone handling, and unrelated map/report behavior unchanged.
-
-## v270 / 1.10.0 NWS point-vs-marine forecast labeling
-
-- Advances the generated application build to **v270** while retaining public version **1.10.0**.
-- Keeps the unified **Selected Location Weather** box but explicitly distinguishes **NWS Point Forecast** from **NWS Marine Forecast**.
-- Labels populated coastal marine products as **NWS Marine Forecast — Zone [zone]** and labels the zone metadata as **Marine zone [zone]**.
-- Treats the nearby city/state returned by NWS as a reference location by displaying **Near [place]**, rather than implying the selected map point is physically inside that city.
-- When NWS point-weather temperature/high/low data is unavailable but a valid marine-zone forecast exists, hides the empty point-temperature row and suppresses the misleading red point-forecast error. A neutral message explains that the marine-zone forecast below is the applicable product.
-- Keeps point-forecast errors visible when there is no valid marine forecast to substitute.
-- Repairs two v269 JavaScript variable-reference regressions in the offshore-trip and marine-forecast error paths discovered during this normalization pass.
-- Leaves NWS retrieval endpoints, forecast-zone geometry, ALERTCalifornia behavior, station selection, and wind/current calculations unchanged.
-
-## v269 / 1.10.0 Selected Location Weather merge
-
-- Advances the generated application build to **v269** while retaining public version **1.10.0**.
-- Replaces the two separate selected-location NWS weather/forecast boxes with one **Selected Location Weather** box in the Location section.
-- Keeps the compact NWS point-forecast summary at the top: selected place, current-hour forecast temperature, high, low, short forecast, and update time.
-- Places the detailed **NWS Forecast** content in the same box below the local summary, including active alerts, forecast-zone metadata, marine forecast periods, explanatory note, and forecast errors.
-- Removes the separate full-width `NWS Forecast — Selected Location` card and the v268 JavaScript summary-copy bridge, eliminating duplicated weather information and duplicate headings.
-- Keeps the existing NWS point-weather and marine-forecast retrieval endpoints, forecast-zone overlay behavior, and all v267 ALERTCalifornia behavior unchanged.
-
-## v268 / 1.10.0 selected-location NWS forecast normalization
-
-- Advances the generated application build to **v268** while retaining public version **1.10.0**.
-- Normalizes the compact selected-location weather panel and the detailed NWS forecast card around the same **NWS Forecast — Selected Location** terminology.
-- Renames **Air temp** to **Forecast temp** so the current-hour NWS forecast value is not mistaken for a direct weather observation.
-- Uses the same selected-place label, forecast temperature, expected high/low, and short-forecast phrase in both forecast surfaces.
-- Adds the compact selected-location forecast summary to the detailed NWS card and keeps it synchronized when the selected point changes or fresh point-forecast data arrives.
-- Standardizes detailed-card metadata to **NWS forecast zone … · Updated …** while preserving official marine-zone forecast periods, alerts, zone geometry, and all existing retrieval logic.
-- Leaves ALERTCalifornia v267 behavior, station selection, map state, wind/current calculations, and all unrelated report behavior unchanged.
-
-## v267 / 1.10.0 ALERTCalifornia camera-key regression repair
-
-- Advances the generated application build to **v267** while retaining public version **1.10.0**.
-- Repairs the v266 ALERTCalifornia rendering regression by defining the missing `alertCaliforniaCameraKey(feature)` helper used by the center-priority selection and hysteresis logic.
-- Uses ArcGIS `OBJECTID` as the primary deterministic camera key, with `siteId`, camera name, and coordinates as a fallback when an object ID is unavailable.
-- Leaves the v266 paging, 75-camera center-priority cap, retention hysteresis, failed-refresh preservation, camera-click isolation, and v265 fixed camera panel behavior unchanged.
-
-## v266 / 1.10.0 ALERTCalifornia complete paging + center-stable density filtering
-
-- Advances the generated application build to **v266** while retaining public version **1.10.0**.
-- Fixes dense ALERTCalifornia views being incomplete or apparently random by paging through the ArcGIS FeatureServer in deterministic `OBJECTID` order instead of accepting only the service's first 50 records.
-- Keeps the geographic request bounded to the current map viewport, but now returns the complete camera set in that viewport before applying any display-density policy.
-- Caps displayed camera markers at **75** only when the complete viewport contains more than 75 cameras. Cameras are ranked by normalized screen distance from the current map center, so the central field remains populated while the outer periphery is thinned first.
-- Adds mild retention hysteresis for cameras already being displayed, reducing marker swapping near the 75-camera cutoff during small pans and recenters while preserving a hard 75-marker cap.
-- Reports dense-view filtering explicitly, for example `75 of 103 cameras shown · center-prioritized`, rather than making omitted peripheral cameras look like missing source data.
-- Replaces the camera layer only after a complete successful response is ready; a failed refresh keeps the previous markers instead of blanking the overlay.
-- Adds Leaflet `bubblingMouseEvents: false` plus an ALERTCalifornia-marker guard in the map click handler so opening a camera cannot move the selected ★ sailing location.
-- Preserves the v265 fixed camera panel, official camera imagery/live links, UC San Diego attribution, and all unrelated map/report behavior.
-
-## v265 / 1.10.0 ALERTCalifornia fixed camera panel
-
-- Advances the generated application build to **v265** while retaining public version **1.10.0**.
-- Replaces ALERTCalifornia's large marker-anchored Leaflet popup with a fixed camera panel inside the map container so camera details are not clipped near map edges and clicking a camera no longer auto-pans or jumps the map.
-- Keeps the camera name in a fixed panel header with an explicit close button and places metadata, current unmodified image, official live-camera link, and **ALERTCalifornia | UC San Diego** attribution in a scrollable panel body.
-- Constrains the panel and image to the current map height, with a smaller responsive image cap on narrow screens.
-- Closes the camera panel when the camera overlay is disabled or refreshed for a new viewport, preventing stale camera details from remaining after the marker set changes.
-- Leaves the v264 ALERTCalifornia server proxy, viewport filtering, marker status colors, source attribution, and all other map behavior unchanged.
-
-## v264 / 1.10.0 ALERTCalifornia camera overlay
-
-- Advances the generated application build to **v264** while retaining public version **1.10.0**.
-- Adds an optional **Map Overlays → Observations → ALERTCalifornia Cameras (UC San Diego)** layer.
-- Adds `/alertcalifornia-cameras`, a bounded server-side proxy to the official ALERTCalifornia ArcGIS FeatureServer. The browser sends the current map viewport and the server requests only intersecting camera records.
-- Camera markers distinguish online and offline status. Each marker popup shows the camera name, county/status context, the current unmodified camera image when available, a link to the official live-camera page, and **ALERTCalifornia | UC San Diego** attribution.
-- Camera image URLs and external camera links are accepted only when they are HTTPS URLs.
-- The layer is off by default, reloads after map movement only while enabled, and participates in **Clear all overlays** without changing the selected sailing location or station state.
-- Adds ALERTCalifornia to the map legend, overlay help, map/data sources information, Welcome-page map description, and map-choice FAQ.
-- Preserves the v263 Ferry Terminals overlay work, the v257 fixed-position Map Overlays popup behavior, and all existing NOAA/NWS/NDBC/Marine Places overlays.
-
-## Marine Places generator v32 route-member endpoint parser + ferry dataset v3
-
-- Keeps the application at **Version 1.10.0 · Build v263** and advances the standalone Marine Places generator to **v32**.
-- Keeps production Ferry Terminals curated-only.
-- Fixes the v31 `route=ferry` audit parser: Overpass relation geometry is carried in relation **members**, not a top-level relation `geometry` array.
-- v32 parses relation members, prefers members whose roles contain `stop`, `platform`, or `terminal`, and otherwise chooses the two farthest member-geometry endpoints as route-endpoint audit candidates.
-- Expands the curated ferry baseline from **17 to 19 terminals** by adding **Alcatraz Ferry Terminal** on Alcatraz Island and **Treasure Island Ferry Terminal**.
-- Replaces address-geocoded positions with reviewed explicit terminal coordinates for **Oracle Park**, **Pier 48.5 / Chase Center**, **Pier 33 / Alcatraz departure**, and **Alameda Seaplane Lagoon**.
-- Because those four records are now explicit-coordinate records, a normal v32 generation should reduce the ferry-related `needs_verification` count by four relative to v31, while the two newly added terminals require no geocoding.
-- `-refresh-ferries` remains audit-only and does not change production Ferry Terminal markers.
-
-## Marine Places generator v31 ferry-route endpoint audit + ferry dataset v2
-
-- Keeps the application at **Version 1.10.0 · Build v263** and advances the standalone Marine Places generator to **v31**.
-- Keeps production Ferry Terminals curated-only. A normal `./placesgen.sh` still does not contact Overpass for ferries.
-- Expands the curated ferry baseline from **13 to 17 terminals** with the San Francisco omissions found during map review: **Oracle Park Ferry Terminal**, **Pier 48 / Chase Center Ferry Terminal**, **Pier 41 Ferry Terminal**, and **Pier 33 Alcatraz Ferry Terminal**.
-- `-refresh-ferries` now audits two OSM sources: explicit ferry-terminal objects and `route=ferry` relations.
-- Ferry-route relations are fetched with geometry. The first and last geometry points are written as **route endpoint** candidates; they are never promoted directly into the production asset.
-- `assets/marine_ferry_candidates.json` now labels each record as either `osm_terminal` or `route_endpoint`, records the nearest curated terminal, and marks candidates within **500 meters** as `matched_curated`.
-- Unmatched route endpoints are intended to expose gaps in the curated terminal list, such as seasonal, event, excursion, or operator-specific landings that do not carry standard terminal tagging.
-- OSM/Overpass audit failures remain isolated from the production Marine Places asset.
-
-## Marine Places generator v30 curated-only production ferries
-
-- Keeps the application at **Version 1.10.0 · Build v263** and advances only the standalone Marine Places generator to **v30**.
-- A plain `./placesgen.sh` run no longer contacts Overpass for ferry terminals. Production Ferry Terminal markers come only from `assets/marine_ferry_terminals.json`, making normal generation fast and deterministic.
-- Existing OSM ferry cache files are not merged into `marine_places.json`, so previously observed 30+ ferry-marker inflation cannot leak into the production map.
-- `-refresh-ferries` is now an explicit audit operation. It refreshes the lightweight OSM ferry-terminal queries and writes `assets/marine_ferry_candidates.json` instead of adding those records to the production asset.
-- The ferry candidate audit compares each OSM ferry-terminal candidate with the nearest curated terminal. Candidates within **500 meters** are marked `matched_curated`; farther candidates are marked `unmatched` for human review.
-- Ferry-audit fetch failures do not mark the production Marine Places asset partial, because the curated ferry baseline remains complete and independent of the supplemental audit.
-- The existing `-refresh` option still refreshes the supplemental ferry audit as part of a full refresh, but the audited OSM ferry records remain non-production.
-- Ferry-route endpoint analysis remains a separate future audit enhancement; v30 deliberately does not infer production terminals from route geometry.
-
-## Marine Places generator v29 curated ferry baseline
-
-- Keeps the application at **Version 1.10.0 · Build v263**; this remains a generator/data-source improvement.
-- Advances the standalone Marine Places generator from **v28** to **v29**.
-- Adds `assets/marine_ferry_terminals.json` as the authoritative curated baseline for Ferry Terminals. OpenStreetMap/Overpass becomes supplemental coverage rather than the primary source for this category.
-- Adds the `-ferries=PATH` option; the default is `assets/marine_ferry_terminals.json`.
-- The supplied `marine_ferry_terminals-v1.json` seeds current Bay Area terminals for San Francisco Bay Ferry/WETA and Golden Gate Ferry, including Downtown San Francisco, Oakland, Alameda Main Street, Alameda Seaplane Lagoon, Harbor Bay, Richmond, South San Francisco, Vallejo, Mare Island, Larkspur, Sausalito, Tiburon, and Ayala Cove/Angel Island.
-- Curated records with explicit coordinates are used directly. Address-only curated terminals are geocoded once through the existing Census/Nominatim cache path and retained in cache for later runs.
-- OSM ferry records within 300 meters of a curated terminal are suppressed so platform/stop-position/gate objects do not create duplicate Ferry Terminal markers. OSM ferry records outside curated terminal areas remain available as supplemental discoveries.
-- The v27 stale-cache fallback and v28 ferry-only cache path remain intact; `-refresh-ferries` now only affects the supplemental OSM ferry layer, not the curated baseline.
 
 ## Marine Places generator v28 ferry-only fetch/cache path
 
@@ -964,7 +601,6 @@ Important endpoints include:
 /wind-readings
 /wind-stations
 /marine-forecast
-/swell-forecast
 /smoke-overlay
 /pressure-observations
 /health
@@ -1064,18 +700,16 @@ The local default port is `8080`. On Render, the `PORT` environment variable is 
 
 The normal development workflow is:
 
-1. Classify the requested change as **major**, **minor**, **patch/micro**, or **no application semantic-version change**.
-2. Set the intended `appVersion` deliberately and increment `buildVersion` for the new generated candidate.
-3. Generate and review a versioned source candidate such as `main-updated-v115.go`.
-4. Run `gofmt` on the generated source.
-5. Record SHA-256 checkpoints.
-6. Manually copy the reviewed generated source to `main.go`.
-7. Copy the reviewed README candidate to `README.md` when applicable.
-8. Run the local project-state checker.
-9. Build and test locally.
-10. Inspect the Git diff.
-11. Commit and push to GitHub `main`.
-12. Allow Render to deploy the new revision.
+1. Generate and review a versioned source candidate such as `main-updated-v115.go`.
+2. Run `gofmt` on the generated source.
+3. Record SHA-256 checkpoints.
+4. Manually copy the reviewed generated source to `main.go`.
+5. Copy the reviewed README candidate to `README.md` when applicable.
+6. Run the local project-state checker.
+7. Build and test locally.
+8. Inspect the Git diff.
+9. Commit and push to GitHub `main`.
+10. Allow Render to deploy the new revision.
 
 Generated source filenames are development lineage identifiers and are not the same thing as the public application version.
 
@@ -1083,28 +717,13 @@ Generated source filenames are development lineage identifiers and are not the s
 
 The public application version is maintained in the `appVersion` constant in `main.go`.
 
-### Active version-management policy
-
-Versioning must be actively managed on **every generated build**. Before generating a new `main-updated-vNN.go`, explicitly classify the requested change and decide whether `appVersion` must change. Never carry the previous semantic version forward merely because the next `buildVersion` is being generated.
-
-Use these rules:
-
-- **`buildVersion`** increments for every generated application-source candidate: `v289` → `v290` → `v291`.
-- **Patch / micro** (`1.12.7` → `1.12.8`) is for bug fixes, regressions, and UI refinements that do not add a substantial user-facing capability.
-- **Minor** (`1.11.0` → `1.12.0`) is for meaningful new user-facing capabilities, overlays, endpoints, workflows, or data products.
-- **Major** is reserved for intentionally incompatible or fundamental application changes.
-- **Generator/data-only changes** may retain the current application semantic version when deployed application behavior is unchanged.
-- Every `regen` must explicitly verify both `appVersion` and `buildVersion`; during iterative development, `buildVersion` advances while `appVersion` normally stays fixed until the pre-push/release candidate is prepared.
-- The README **Current release**, the newest release-note heading, the expected runtime identity, and the managed `main.go` SHA-256 checkpoint must agree with the generated source.
-- Once a semantic release line is started, subsequent build-only candidates may retain that semantic version only when that carry-forward is deliberate.
-
 The project uses three-part versions:
 
 - **major** — finalized release milestone
 - **minor** — new feature or significant behavior change
 - **micro** — small UI polish or minor refinement
 
-The current release candidate is **1.12.7**. Generated source builds also carry a separate `buildVersion` identifier so test clients can distinguish successive candidates.
+The current release candidate is **1.10.0**. Generated source builds also carry a separate `buildVersion` identifier so test clients can distinguish successive candidates.
 
 ### 1.9.1 / v131
 
@@ -1208,7 +827,6 @@ Primary data providers include:
 - NOAA/NESDIS for merged GOES GeoColor cloud imagery
 - NWS NEXRAD data through Iowa State IEM for radar display
 - NOAA/NWS Aviation Weather Center METAR observations for the optional land/inland wind-barb layer
-- Pacific Islands Ocean Observing System (PacIOOS) public ERDDAP / NOAA-NCEP WaveWatch III for global modeled swell height, peak period, and direction
 
 ## Useful Bay and Delta wind stations
 
@@ -1874,18 +1492,18 @@ This section is the authoritative development handoff for this repository. A new
 
 <!-- PROJECT-STATE:BEGIN -->
 
-- Public app version: **1.12.8**
-- Generated source build: **v293**
-- Next generated source build: **v294**
+- Public app version: **1.9.3**
+- Generated source build: **v248**
+- Next generated source build: **v249**
 - Authoritative repository: **https://github.com/richard-mauri/pittsburg-saildata**
 - Authoritative branch: **main**
-- Release status: **v293 / 1.12.8 release candidate**
+- Release status: **v248 / 1.9.3 release candidate**
 
 ### Managed-file checkpoints
 
 | Repository file | SHA-256 |
 | --- | --- |
-| `main.go` | `b2108818b33621576cbd409edc952e71b8a8f0a04e63b2cc9dca3e92efc4fb62` |
+| `main.go` | `f6e3ac34372688442618fe84e27414a1f9048069db294952b795eb49157d469c` |
 | `assets/yogiisms.txt` | `4ebf00217e194ee26a8e8fe38237b298800b36ead0c64accdbb82f623c142371` |
 | `assets/fishing_reports.json` | `02b01de77784153157c6a4a60d6ad21e286f7c191bbe204fed605659ea15ca5e` |
 | `check-project-state.sh` | `85fa5062e2ae4509174b6843ebc0066f4a94e2f2e90001230ca74c07aeb500dc` |
@@ -1902,7 +1520,7 @@ The generated build number is immutable. Any change to generated Go source bytes
 
 The public application version and generated build are separate identities. The current runtime identity is expected to render as:
 
-`Version 1.12.8 · Build v293`
+`Version 1.9.3 · Build v234`
 
 For future public pushes, increment the patch/micro version (`1.9.2` → `1.9.3` → `1.9.4`, and so on). Existing Git release tags are immutable: never reuse or move an existing version tag.
 
@@ -1950,7 +1568,7 @@ Conditions Now displays the active wind/current station context, compact wind me
 
 The shared **Wind units: Knots / MPH** and **Distance units: Nautical Miles / Miles** controls appear immediately below the hero image on both Conditions Now and Planning and Details. They use `wind_unit` and `distance_unit` query state so both preferences remain synchronized during navigation.
 
-Planning and Details includes location selection, nearby wind-station discovery, current-station context, 1/3/7-day current planning, wind history from 1h through 24h, selected-location NWS point and marine forecast context, map types, independent map overlays, and Center Map controls.
+Planning and Details includes location selection, nearby wind-station discovery, current-station context, 1/3/7-day current planning, wind history from 1h through 24h, NWS forecast context, Local Conditions at a selected point, map types, independent map overlays, and Center Map controls.
 
 The **Location** card treats selected location and map viewport center as separate state. Latitude/Longitude display the viewport center and can be edited without side effects; **Center Map → Latitude & Longitude** explicitly applies those values. Candidate wind stations appear only after an actual selected location exists. Detailed behavior is available from the card’s **ⓘ About location selection** popover.
 
@@ -1958,7 +1576,7 @@ The **Center Map** menu uses momentary actions for My location, Latitude & Longi
 
 The selected currents station associated with the active wind station is shown automatically when available. **Clear selected location, station & candidates** removes the selected location, committed wind-station map selection, associated currents-station marker, and derived wind candidates while leaving active wind-barb overlays in place.
 
-The **Selected Location Weather** panel spans the Location card below the Lat/Lon controls. On desktop it presents **NWS Point Forecast** and **NWS Marine Forecast** side by side and top-aligned, with the marine section given more width for forecast periods; on narrow screens the two sections stack. If point-temperature data is unavailable while a valid marine forecast exists, the empty point-weather row is suppressed and the marine forecast is presented as the applicable product.
+The **Local Conditions** panel is permanently reserved beside the Lat/Lon controls on wider screens to avoid layout jumps. For a selected location it uses NWS point metadata/forecast data to show nearby city/state, current-hour forecast temperature, expected high/low, and a short forecast phrase.
 
 Dynamic HTML responses use no-cache headers so Safari/Dock WebView clients pick up new builds without requiring repeated manual website-data clearing. Runtime HTML displays both public version and generated build.
 
@@ -1966,7 +1584,7 @@ Map controls place **Map Types**, **Map Overlays**, and **Center Map** on one ro
 
 NOAA Nautical Chart is considered practical at **Zoom 9+**. If Nautical is the preferred basemap and the user zooms below 9, Street Map is shown temporarily with a notice; Nautical automatically returns at Zoom 9+. Legitimate inland/no-chart blank areas at supported zooms are left unchanged.
 
-Map overlays include NWS forecast zone, NOAA HMS qualitative smoke, NOAA/NDBC Marine / Bay wind barbs, Aviation Weather Center METAR Land / Inland wind barbs, **Surface Pressure / Isobars**, **Global Swell Forecast**, **Sea Surface Temp**, NOAA/NESDIS cloud cover, and NEXRAD radar. Global Swell Forecast uses public PacIOOS/NOAA-NCEP WaveWatch III `shgt`, `sper`, and `sdir` fields for basin-scale swell tracking with a 0-to-120-hour forecast slider; it is not a surf-break forecast. The two wind-barb layers share buffered viewport loading but use independent observation networks; zoom-dependent collision thinning keeps wide-area views readable. Sea Surface Temp is deferred/disabled in v195; the future approach is documented in this README, variable `analysed_sst`, a daily global Level-4 blended SST field at about 5 km resolution. v191 uses the PFEL/ERD host and its matching `nesdis...` dataset identifier for the primary path, with a matching Central-host fallback only for SST imagery. v189 uses the current NOAA NESDIS ERDDAP identifier after the older `noaacwBLENDEDsstDNDaily` path stopped serving the deployed overlay. `/sst-info` resolves the latest available dataset time and `/sst-overlay` renders the current map bounds through ERDDAP `griddap` as a transparent PNG using a fixed **35–95°F** wide-area fishing-oriented scale. Because the ERDDAP source image is linear in latitude while Leaflet is EPSG:3857 Web Mercator, v180 server-side reprojects the SST scanlines into Web Mercator before returning the PNG. The browser displays that reprojected PNG as a normal Leaflet image overlay at 0.50 opacity. CoastWatch's native transparent/no-data edge is preserved and no secondary coastline mask is applied. The wider fixed range avoids painting most warm tropical/subtropical water with one saturated hottest color while preserving cross-view comparability. At low zooms, Leaflet world wrapping can extend the viewport outside -180°/+180°. v183 keeps the reliable single-image path: it clips the visible viewport to the one 360° world copy containing the map center, translates that interval into NOAA's canonical longitude range, and displays the returned SST image over only that clipped interval. The projection fix improves geographic alignment at wide map extents; the approximately 5 km source grid still limits shoreline-scale detail. Saildrone Observations is a separate optional moving-platform layer backed by NOAA PMEL public ERDDAP; it displays the latest available position and met-ocean readings from configured 2026 missions and is not treated as a persistent local station network. v187 discovers each mission's ERDDAP schema before requesting data, requires only time/position for plotting, and treats wind, SST, salinity, currents, and wave measurements as optional enrichments. HMS smoke uses the current warm yellow → amber → burnt-orange light/medium/heavy palette. Smoke is qualitative satellite analysis, not AQI or measured PM2.5.
+Map overlays include NWS forecast zone, NOAA HMS qualitative smoke, NOAA/NDBC Marine / Bay wind barbs, Aviation Weather Center METAR Land / Inland wind barbs, **Surface Pressure / Isobars**, **Sea Surface Temp**, NOAA/NESDIS cloud cover, and NEXRAD radar. The two wind-barb layers share buffered viewport loading but use independent observation networks; zoom-dependent collision thinning keeps wide-area views readable. Sea Surface Temp is deferred/disabled in v195; the future approach is documented in this README, variable `analysed_sst`, a daily global Level-4 blended SST field at about 5 km resolution. v191 uses the PFEL/ERD host and its matching `nesdis...` dataset identifier for the primary path, with a matching Central-host fallback only for SST imagery. v189 uses the current NOAA NESDIS ERDDAP identifier after the older `noaacwBLENDEDsstDNDaily` path stopped serving the deployed overlay. `/sst-info` resolves the latest available dataset time and `/sst-overlay` renders the current map bounds through ERDDAP `griddap` as a transparent PNG using a fixed **35–95°F** wide-area fishing-oriented scale. Because the ERDDAP source image is linear in latitude while Leaflet is EPSG:3857 Web Mercator, v180 server-side reprojects the SST scanlines into Web Mercator before returning the PNG. The browser displays that reprojected PNG as a normal Leaflet image overlay at 0.50 opacity. CoastWatch's native transparent/no-data edge is preserved and no secondary coastline mask is applied. The wider fixed range avoids painting most warm tropical/subtropical water with one saturated hottest color while preserving cross-view comparability. At low zooms, Leaflet world wrapping can extend the viewport outside -180°/+180°. v183 keeps the reliable single-image path: it clips the visible viewport to the one 360° world copy containing the map center, translates that interval into NOAA's canonical longitude range, and displays the returned SST image over only that clipped interval. The projection fix improves geographic alignment at wide map extents; the approximately 5 km source grid still limits shoreline-scale detail. Saildrone Observations is a separate optional moving-platform layer backed by NOAA PMEL public ERDDAP; it displays the latest available position and met-ocean readings from configured 2026 missions and is not treated as a persistent local station network. v187 discovers each mission's ERDDAP schema before requesting data, requires only time/position for plotting, and treats wind, SST, salinity, currents, and wave measurements as optional enrichments. HMS smoke uses the current warm yellow → amber → burnt-orange light/medium/heavy palette. Smoke is qualitative satellite analysis, not AQI or measured PM2.5.
 
 The Welcome page reflects the current Conditions Now / Planning and Details workflow and retains the randomized Yogi Berra quotation. `assets/yogiisms.txt` currently contains the expanded 59-line quote set.
 
