@@ -1218,6 +1218,32 @@ If the LaunchAgent is loaded, `launchctl print` displays its configuration and s
 
 If the plist itself is edited, boot it out and bootstrap it again so `launchd` reloads the updated configuration.
 
+
+### Generated artifact naming
+
+When ChatGPT regenerates downloadable project files, use versioned filenames rather than generic names such as `README.md`.
+
+For README regenerations, use:
+
+```text
+README-updated-v<appVersion>-<buildVersion>.md
+```
+
+Example:
+
+```text
+README-updated-v1.12.9-v297.md
+```
+
+When the generated source lineage advances, advance the filename accordingly, for example:
+
+```text
+README-updated-v1.12.9-v298.md
+```
+
+Do not repeatedly emit downloadable artifacts with the same generic filename. Distinct versioned names make it clear which generated artifact is current and avoid ambiguity from duplicate download names or client/browser caching behavior.
+
+
 ## Program structure
 
 The Go application is built as a package rather than from `main.go` alone.
