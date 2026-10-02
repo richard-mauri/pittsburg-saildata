@@ -1047,6 +1047,177 @@ curl -sS \
 curl -sS "http://localhost:8080/health"
 ```
 
+### macOS daytime keepalive for Render
+
+The deployed Render service can be kept warm during the normal daytime sailing-planning window by having macOS call the existing lightweight `/health` endpoint every 10 minutes. No additional Go endpoint or keepalive mode is required.
+
+The local helper script is:
+
+```text
+cmd/keepalive.sh
+```
+
+A minimal script is:
+
+```bash
+#!/bin/bash
+curl -fsS --max-time 20 \
+  https://pittsburg-saildata.onrender.com/health \
+  >/dev/null 2>&1
+```
+
+Make the script executable:
+
+```bash
+chmod +x cmd/keepalive.sh
+```
+
+The Mac uses a per-user `launchd` LaunchAgent:
+
+```text
+~/Library/LaunchAgents/com.richardmauri.sailing-keepalive.plist
+```
+
+The LaunchAgent schedules 72 one-shot runs per day:
+
+- 05:30, 05:40, and 05:50
+- every 10 minutes from 06:00 through 16:50
+- 17:00, 17:10, and 17:20
+
+This covers the intended **5:30 AM through 5:30 PM** daytime keepalive window while allowing the Render service to idle normally afterward. `launchd` starts the script at each scheduled time; the script performs one health request and exits, so no shell process stays running between pings.
+
+A convenient way to generate the LaunchAgent from the repository root is:
+
+```bash
+python3 - <<'PY'
+import plistlib
+from pathlib import Path
+
+home = Path.home()
+script = Path.cwd() / "cmd" / "keepalive.sh"
+plist_path = home / "Library" / "LaunchAgents" / "com.richardmauri.sailing-keepalive.plist"
+
+schedule = []
+
+for minute in (30, 40, 50):
+    schedule.append({"Hour": 5, "Minute": minute})
+
+for hour in range(6, 17):
+    for minute in range(0, 60, 10):
+        schedule.append({"Hour": hour, "Minute": minute})
+
+for minute in (0, 10, 20):
+    schedule.append({"Hour": 17, "Minute": minute})
+
+plist = {
+    "Label": "com.richardmauri.sailing-keepalive",
+    "ProgramArguments": [
+        "/bin/bash",
+        str(script),
+    ],
+    "StartCalendarInterval": schedule,
+    "StandardOutPath": str(home / "Library" / "Logs" / "sailing-keepalive.log"),
+    "StandardErrorPath": str(home / "Library" / "Logs" / "sailing-keepalive-error.log"),
+}
+
+plist_path.parent.mkdir(parents=True, exist_ok=True)
+
+with plist_path.open("wb") as f:
+    plistlib.dump(plist, f)
+
+print(f"Created: {plist_path}")
+print(f"Script:  {script}")
+print(f"Events:  {len(schedule)} per day")
+PY
+```
+
+The generated schedule should report:
+
+```text
+Events:  72 per day
+```
+
+Validate the plist:
+
+```bash
+plutil -lint ~/Library/LaunchAgents/com.richardmauri.sailing-keepalive.plist
+```
+
+Load the LaunchAgent for the current logged-in user:
+
+```bash
+launchctl bootstrap gui/$(id -u) \
+  ~/Library/LaunchAgents/com.richardmauri.sailing-keepalive.plist
+```
+
+Inspect its status:
+
+```bash
+launchctl print gui/$(id -u)/com.richardmauri.sailing-keepalive
+```
+
+A scheduled one-shot job will normally show:
+
+```text
+state = not running
+```
+
+between invocations. That is expected; it does not mean the LaunchAgent is disabled.
+
+To force an immediate test run:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.richardmauri.sailing-keepalive
+```
+
+Then check the run count and most recent exit status:
+
+```bash
+launchctl print gui/$(id -u)/com.richardmauri.sailing-keepalive \
+  | grep -E 'runs|last exit code|state'
+```
+
+A successful test should show a run count greater than zero and:
+
+```text
+last exit code = 0
+```
+
+The configured log files are:
+
+```text
+~/Library/Logs/sailing-keepalive.log
+~/Library/Logs/sailing-keepalive-error.log
+```
+
+With the minimal silent `curl` script, those files may remain empty after successful runs.
+
+#### Temporarily turn the keepalive off and back on
+
+To temporarily disable the keepalive without deleting either the script or plist:
+
+```bash
+launchctl bootout gui/$(id -u) \
+  ~/Library/LaunchAgents/com.richardmauri.sailing-keepalive.plist
+```
+
+To turn it back on later:
+
+```bash
+launchctl bootstrap gui/$(id -u) \
+  ~/Library/LaunchAgents/com.richardmauri.sailing-keepalive.plist
+```
+
+To confirm whether it is currently loaded:
+
+```bash
+launchctl print gui/$(id -u)/com.richardmauri.sailing-keepalive
+```
+
+If the LaunchAgent is loaded, `launchctl print` displays its configuration and state. If it has been booted out, `launchctl` reports that the service could not be found.
+
+If the plist itself is edited, boot it out and bootstrap it again so `launchd` reloads the updated configuration.
+
 ## Program structure
 
 The Go application is built as a package rather than from `main.go` alone.
