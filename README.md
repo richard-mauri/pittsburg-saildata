@@ -7,7 +7,7 @@ The default wind station is **PSBC1**.
 ## Current release
 
 **Public version: 1.12.9**  
-**Generated source lineage: v297**
+**Generated source lineage: v300**
 
 **Current SST status:** deferred/disabled in v195; see **Deferred SST — future approach** below.
 **Current chlorophyll status:** both Chlorophyll Field and Chlorophyll Contours are deferred/disabled in v198.
@@ -17,6 +17,37 @@ Version 1.9.2 builds on the streamlined browser workflow with clearer observatio
 
 
 
+
+## v300 / 1.12.9 Go compatibility repair
+
+- Advances the generated development build to **v300** while retaining public/application version **1.12.9**.
+- Fixes the v299 compile failure on the project's current Go toolchain caused by use of `time.Time.UnixMilli()`, which is unavailable on older Go releases.
+- Replaces `parsed.UnixMilli()` with the compatibility-safe equivalent `parsed.UnixNano() / int64(time.Millisecond)`.
+- No fire-perimeter filtering, fire-detection, smoke, map, report, or data-source behavior changes are intended relative to v299.
+- `appVersion` remains **1.12.9** until the next pre-push semantic-version review.
+
+## v299 / 1.12.9 latest-per-incident fire perimeter filtering
+
+- Advances the generated development build to **v299** while retaining public/application version **1.12.9** during iterative development.
+- Fixes the v298 active-fire-perimeter display where multiple overlapping WFIGS source polygons for the same incident could all be rendered at once.
+- The `/fire-perimeters` proxy now requests WFIGS incident identifiers, feature visibility/status fields, and perimeter timestamps, then groups returned features by IRWIN incident ID. If an IRWIN ID is unavailable, incident name plus type is used as a conservative fallback key.
+- For each incident, the server keeps only the newest perimeter using `poly_PolygonDateTime`, then `poly_DateCurrent`, then the incident modified timestamp as fallback. Ties prefer the larger perimeter acreage.
+- The proxy defensively excludes non-approved, non-public, or non-visible features if such records are ever returned by the upstream service.
+- GeoJSON responses now include `source_feature_count` and `incident_count` metadata so the browser can report when several source polygons were reduced to one latest perimeter per incident.
+- Fire-perimeter popups identify the displayed geometry as the latest current perimeter for that incident and show the perimeter timestamp when the source provides one.
+- NOAA HMS satellite fire detections are unchanged. The existing smoke, fire-detection, and fire-perimeter layers remain separate products and remain off by default.
+- `appVersion` remains **1.12.9** until the next pre-push semantic-version review.
+
+## v298 / 1.12.9 fire context overlays
+
+- Advances the generated development build to **v298** while retaining public/application version **1.12.9** during iterative development.
+- Adds two independent **Weather & Hazards** map overlays: **Active fire perimeters (NIFC/WFIGS)** and **Satellite fire detections (NOAA HMS)**.
+- Active fire perimeters are loaded through a new `/fire-perimeters` server proxy that queries the National Interagency Fire Center's current WFIGS perimeter service only for the visible map viewport. Wildfire and prescribed-fire perimeters are styled separately and can be clicked for incident context such as name, acres, containment, and location when those fields are available.
+- Satellite fire detections are loaded through a new `/fire-detections` endpoint using NOAA Hazard Mapping System active-fire point shapefiles. The server prefers NOAA's current compact ArcGIS/WFS-derived ZIP and falls back through recent dated files, matching the resilience pattern already used by the HMS smoke overlay.
+- NOAA HMS fire detections are general strategic-planning guidance rather than tactical fire-location data; the popup explicitly says they should be corroborated before tactical use.
+- Both fire overlays are off by default, refresh against the current map viewport while enabled, participate in **Clear all overlays**, and do not change selected location, wind/current stations, forecasts, or report calculations.
+- Keeps the existing **Satellite smoke (NOAA HMS)** overlay separate. A visible fire, perimeter, or satellite hotspot does not imply that HMS has published a smoke-plume polygon for that location/time.
+- This is a meaningful new user-facing map capability. The eventual release SemVer should be reviewed as a likely **minor** release; `appVersion` remains **1.12.9** for this iterative candidate until the pre-push/release review.
 
 ## v297 / 1.12.9 release candidate
 
@@ -784,7 +815,7 @@ The service is designed to answer two practical questions:
 1. What is the wind doing now?
 2. What are the tidal currents expected to do during the preferred planning period?
 
-Wind observations come from NOAA/NDBC. Current predictions come from NOAA CO-OPS. Forecast-zone context and marine forecast information come from the National Weather Service. Optional map context includes NOAA/NESDIS satellite cloud cover, NOAA HMS smoke analysis, NEXRAD radar imagery, and an observational sea-level-pressure/isobar layer derived from current NOAA/NWS Aviation Weather Center METAR data.
+Wind observations come from NOAA/NDBC. Current predictions come from NOAA CO-OPS. Forecast-zone context and marine forecast information come from the National Weather Service. Optional map context includes NOAA/NESDIS satellite cloud cover, NOAA HMS smoke analysis, NOAA HMS satellite fire detections, NIFC/WFIGS current fire perimeters, NEXRAD radar imagery, and an observational sea-level-pressure/isobar layer derived from current NOAA/NWS Aviation Weather Center METAR data.
 
 The application is a conditions-planning aid. It is not a navigation system and is not a substitute for official navigation products, charts, notices, or prudent seamanship.
 
@@ -962,6 +993,8 @@ Surface Pressure / Isobars uses current mean sea-level-pressure observations fro
 This pressure layer is intended to show the approximate pressure-gradient pattern around the map view. It is **not an official analyzed surface chart** and can contain interpolation uncertainty where the METAR network is sparse. Observations older than three hours are excluded, and the overlay reports when too few current pressure stations are available to construct contours.
 
 Smoke uses NOAA Hazard Mapping System analysis polygons and is qualitative satellite analysis, not AQI and not measured PM2.5 concentration.
+
+Active fire perimeters use the National Interagency Fire Center's current WFIGS perimeter service and are viewport-filtered through the Go server. Satellite fire detections use NOAA HMS active-fire points. These are separate fire-context products: a fire perimeter or hotspot can be present even when HMS has no smoke-plume polygon for the same location/time. NOAA HMS fire locations are general guidance for strategic planning and should not be used by themselves for tactical response or evacuation decisions.
 
 Forecast-zone styling uses enhanced contrast on imagery basemaps so the boundary remains visible over Satellite and Hybrid backgrounds.
 
@@ -1218,6 +1251,53 @@ If the LaunchAgent is loaded, `launchctl print` displays its configuration and s
 
 If the plist itself is edited, boot it out and bootstrap it again so `launchd` reloads the updated configuration.
 
+
+
+### Go toolchain compatibility baseline
+
+This repository intentionally targets **Go 1.13**, as declared by `go.mod`:
+
+```text
+module pittsburg-saildata
+
+go 1.13
+```
+
+All regenerated Go source must remain compatible with Go 1.13 unless the project explicitly decides to raise the minimum Go version and updates `go.mod` as part of that change.
+
+This is a hard compatibility constraint for ChatGPT-assisted regeneration. Before emitting a new `main-updated-vNNN.go`, verify that every newly introduced standard-library API existed in Go 1.13. Do not assume the toolchain is current merely because the generated code is being written today.
+
+Examples of APIs that must **not** be introduced while the project remains on Go 1.13 include:
+
+```text
+time.Time.UnixMilli   // added after Go 1.13
+io.ReadAll            // added after Go 1.13
+io.NopCloser          // added after Go 1.13
+os.ReadFile           // added after Go 1.13
+os.WriteFile          // added after Go 1.13
+```
+
+Use Go-1.13-compatible equivalents instead, for example:
+
+```go
+milliseconds := parsed.UnixNano() / int64(time.Millisecond)
+body, err := ioutil.ReadAll(r)
+body, err := ioutil.ReadFile(path)
+err := ioutil.WriteFile(path, body, 0644)
+```
+
+The existing source already uses older compatibility patterns such as `ioutil.ReadAll`; preserve those patterns unless the minimum Go version is deliberately changed.
+
+For every regeneration that changes Go code:
+
+1. Treat **Go 1.13** as the compile target.
+2. Check every newly introduced standard-library function, method, type, and package feature against that target.
+3. Prefer APIs and idioms already present in the repository when they satisfy the requirement.
+4. Run `gofmt`.
+5. Run the project's local `go build ./...` and `go test ./...` with the actual installed/project toolchain before a candidate is considered validated.
+6. Do not describe a candidate as compile-validated unless it has actually been built with the project's compatible toolchain.
+
+If a future feature genuinely requires a newer Go release, handle that as an explicit toolchain migration rather than silently introducing a newer API into generated source.
 
 ### Generated artifact naming
 
@@ -2109,17 +2189,17 @@ This section is the authoritative development handoff for this repository. A new
 <!-- PROJECT-STATE:BEGIN -->
 
 - Public app version: **1.12.9**
-- Generated source build: **v297**
-- Next generated source build: **v298**
+- Generated source build: **v300**
+- Next generated source build: **v301**
 - Authoritative repository: **https://github.com/richard-mauri/pittsburg-saildata**
 - Authoritative branch: **main**
-- Release status: **v297 / 1.12.9 release candidate**
+- Release status: **v300 / 1.12.9 development candidate — Go compatibility repair; SemVer review pending**
 
 ### Managed-file checkpoints
 
 | Repository file | SHA-256 |
 | --- | --- |
-| `main.go` | `5c4acd8167fbf34616b8bdae4143e8669a23d10f8eb585d76059a7fddbf25b48` |
+| `main.go` | `ed1ff163bebbd5843b5534f260cd3b4b43d368f38f53c71239b3166f99b70dd0` |
 | `assets/yogiisms.txt` | `4ebf00217e194ee26a8e8fe38237b298800b36ead0c64accdbb82f623c142371` |
 | `assets/fishing_reports.json` | `02b01de77784153157c6a4a60d6ad21e286f7c191bbe204fed605659ea15ca5e` |
 | `check-project-state.sh` | `85fa5062e2ae4509174b6843ebc0066f4a94e2f2e90001230ca74c07aeb500dc` |
@@ -2136,7 +2216,7 @@ The generated build number is immutable. Any change to generated Go source bytes
 
 The public application version and generated build are separate identities. The current runtime identity is expected to render as:
 
-`Version 1.12.9 · Build v297`
+`Version 1.12.9 · Build v300`
 
 For future public pushes, increment the patch/micro version (`1.9.2` → `1.9.3` → `1.9.4`, and so on). Existing Git release tags are immutable: never reuse or move an existing version tag.
 
@@ -2200,7 +2280,7 @@ Map controls place **Map Types**, **Map Overlays**, and **Center Map** on one ro
 
 NOAA Nautical Chart is considered practical at **Zoom 9+**. If Nautical is the preferred basemap and the user zooms below 9, Street Map is shown temporarily with a notice; Nautical automatically returns at Zoom 9+. Legitimate inland/no-chart blank areas at supported zooms are left unchanged.
 
-Map overlays include NWS forecast zone, NOAA HMS qualitative smoke, NOAA/NDBC Marine / Bay wind barbs, Aviation Weather Center METAR Land / Inland wind barbs, **Surface Pressure / Isobars**, **Global Swell Forecast**, **Sea Surface Temp**, NOAA/NESDIS cloud cover, and NEXRAD radar. Global Swell Forecast uses public PacIOOS/NOAA-NCEP WaveWatch III `shgt`, `sper`, and `sdir` fields for basin-scale swell tracking with a 0-to-120-hour forecast slider; it is not a surf-break forecast. The two wind-barb layers share buffered viewport loading but use independent observation networks; zoom-dependent collision thinning keeps wide-area views readable. Sea Surface Temp is deferred/disabled in v195; the future approach is documented in this README, variable `analysed_sst`, a daily global Level-4 blended SST field at about 5 km resolution. v191 uses the PFEL/ERD host and its matching `nesdis...` dataset identifier for the primary path, with a matching Central-host fallback only for SST imagery. v189 uses the current NOAA NESDIS ERDDAP identifier after the older `noaacwBLENDEDsstDNDaily` path stopped serving the deployed overlay. `/sst-info` resolves the latest available dataset time and `/sst-overlay` renders the current map bounds through ERDDAP `griddap` as a transparent PNG using a fixed **35–95°F** wide-area fishing-oriented scale. Because the ERDDAP source image is linear in latitude while Leaflet is EPSG:3857 Web Mercator, v180 server-side reprojects the SST scanlines into Web Mercator before returning the PNG. The browser displays that reprojected PNG as a normal Leaflet image overlay at 0.50 opacity. CoastWatch's native transparent/no-data edge is preserved and no secondary coastline mask is applied. The wider fixed range avoids painting most warm tropical/subtropical water with one saturated hottest color while preserving cross-view comparability. At low zooms, Leaflet world wrapping can extend the viewport outside -180°/+180°. v183 keeps the reliable single-image path: it clips the visible viewport to the one 360° world copy containing the map center, translates that interval into NOAA's canonical longitude range, and displays the returned SST image over only that clipped interval. The projection fix improves geographic alignment at wide map extents; the approximately 5 km source grid still limits shoreline-scale detail. Saildrone Observations is a separate optional moving-platform layer backed by NOAA PMEL public ERDDAP; it displays the latest available position and met-ocean readings from configured 2026 missions and is not treated as a persistent local station network. v187 discovers each mission's ERDDAP schema before requesting data, requires only time/position for plotting, and treats wind, SST, salinity, currents, and wave measurements as optional enrichments. HMS smoke uses the current warm yellow → amber → burnt-orange light/medium/heavy palette. Smoke is qualitative satellite analysis, not AQI or measured PM2.5.
+Map overlays include NWS forecast zone, NOAA HMS qualitative smoke, NOAA/NDBC Marine / Bay wind barbs, Aviation Weather Center METAR Land / Inland wind barbs, **Surface Pressure / Isobars**, **Global Swell Forecast**, **Sea Surface Temp**, NOAA/NESDIS cloud cover, and NEXRAD radar. Global Swell Forecast uses public PacIOOS/NOAA-NCEP WaveWatch III `shgt`, `sper`, and `sdir` fields for basin-scale swell tracking with a 0-to-120-hour forecast slider; it is not a surf-break forecast. The two wind-barb layers share buffered viewport loading but use independent observation networks; zoom-dependent collision thinning keeps wide-area views readable. Sea Surface Temp is deferred/disabled in v195; the future approach is documented in this README, variable `analysed_sst`, a daily global Level-4 blended SST field at about 5 km resolution. v191 uses the PFEL/ERD host and its matching `nesdis...` dataset identifier for the primary path, with a matching Central-host fallback only for SST imagery. v189 uses the current NOAA NESDIS ERDDAP identifier after the older `noaacwBLENDEDsstDNDaily` path stopped serving the deployed overlay. `/sst-info` resolves the latest available dataset time and `/sst-overlay` renders the current map bounds through ERDDAP `griddap` as a transparent PNG using a fixed **35–95°F** wide-area fishing-oriented scale. Because the ERDDAP source image is linear in latitude while Leaflet is EPSG:3857 Web Mercator, v180 server-side reprojects the SST scanlines into Web Mercator before returning the PNG. The browser displays that reprojected PNG as a normal Leaflet image overlay at 0.50 opacity. CoastWatch's native transparent/no-data edge is preserved and no secondary coastline mask is applied. The wider fixed range avoids painting most warm tropical/subtropical water with one saturated hottest color while preserving cross-view comparability. At low zooms, Leaflet world wrapping can extend the viewport outside -180°/+180°. v183 keeps the reliable single-image path: it clips the visible viewport to the one 360° world copy containing the map center, translates that interval into NOAA's canonical longitude range, and displays the returned SST image over only that clipped interval. The projection fix improves geographic alignment at wide map extents; the approximately 5 km source grid still limits shoreline-scale detail. Saildrone Observations is a separate optional moving-platform layer backed by NOAA PMEL public ERDDAP; it displays the latest available position and met-ocean readings from configured 2026 missions and is not treated as a persistent local station network. v187 discovers each mission's ERDDAP schema before requesting data, requires only time/position for plotting, and treats wind, SST, salinity, currents, and wave measurements as optional enrichments. HMS smoke uses the current warm yellow → amber → burnt-orange light/medium/heavy palette. Smoke is qualitative satellite analysis, not AQI or measured PM2.5. v298 adds separate NIFC/WFIGS current-fire-perimeter and NOAA HMS satellite-fire-detection overlays so visible fire context is not conflated with smoke-plume analysis. v299 filters WFIGS perimeter responses to the newest approved/public/visible perimeter per incident, preventing historical or duplicate source polygons for the same incident from stacking on the map.
 
 The Welcome page reflects the current Conditions Now / Planning and Details workflow and retains the randomized Yogi Berra quotation. `assets/yogiisms.txt` currently contains the expanded 59-line quote set.
 

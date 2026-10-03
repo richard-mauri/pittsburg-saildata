@@ -30,7 +30,7 @@ import (
 
 const (
 	appVersion                      = "1.12.9"
-	buildVersion                    = "v297"
+	buildVersion                    = "v300"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -2127,6 +2127,205 @@ func runServer(
 		}
 	})
 
+	mux.HandleFunc("/fire-detections", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		q := r.URL.Query()
+		parseCoord := func(name string) (float64, error) {
+			value := strings.TrimSpace(q.Get(name))
+			if value == "" {
+				return 0, fmt.Errorf("%s is required", name)
+			}
+			parsed, err := strconv.ParseFloat(value, 64)
+			if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+				return 0, fmt.Errorf("%s must be a finite number", name)
+			}
+			return parsed, nil
+		}
+		west, err := parseCoord("west")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		south, err := parseCoord("south")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		east, err := parseCoord("east")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		north, err := parseCoord("north")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if west < -180 || west > 180 || east < -180 || east > 180 ||
+			south < -90 || south > 90 || north < -90 || north > 90 ||
+			west >= east || south >= north {
+			http.Error(w, "invalid map bounds", http.StatusBadRequest)
+			return
+		}
+
+		analysisDate, detections, err := fetchNOAAHMSFireDetections()
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "private, max-age=300")
+		if err != nil {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+
+		visible := make([]hmsFireDetection, 0)
+		for _, detection := range detections {
+			if detection.Lon >= west && detection.Lon <= east &&
+				detection.Lat >= south && detection.Lat <= north {
+				visible = append(visible, detection)
+			}
+		}
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{
+			"analysis_date": analysisDate,
+			"detections":    visible,
+		}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+
+	mux.HandleFunc("/fire-perimeters", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		q := r.URL.Query()
+		parseCoord := func(name string) (float64, error) {
+			value := strings.TrimSpace(q.Get(name))
+			if value == "" {
+				return 0, fmt.Errorf("%s is required", name)
+			}
+			parsed, err := strconv.ParseFloat(value, 64)
+			if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+				return 0, fmt.Errorf("%s must be a finite number", name)
+			}
+			return parsed, nil
+		}
+		west, err := parseCoord("west")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		south, err := parseCoord("south")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		east, err := parseCoord("east")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		north, err := parseCoord("north")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if west < -180 || west > 180 || east < -180 || east > 180 ||
+			south < -90 || south > 90 || north < -90 || north > 90 ||
+			west >= east || south >= north {
+			http.Error(w, "invalid map bounds", http.StatusBadRequest)
+			return
+		}
+
+		upstream, err := url.Parse(
+			"https://services3.arcgis.com/T4QMspbfLg3qTGWY/arcgis/rest/services/" +
+				"WFIGS_Interagency_Perimeters_Current/FeatureServer/0/query",
+		)
+		if err != nil {
+			http.Error(w, "fire perimeter service configuration error", http.StatusInternalServerError)
+			return
+		}
+		params := upstream.Query()
+		params.Set("where", "attr_IncidentTypeCategory IN ('WF','RX')")
+		params.Set("geometry", fmt.Sprintf("%.6f,%.6f,%.6f,%.6f", west, south, east, north))
+		params.Set("geometryType", "esriGeometryEnvelope")
+		params.Set("inSR", "4326")
+		params.Set("outSR", "4326")
+		params.Set("spatialRel", "esriSpatialRelIntersects")
+		params.Set("outFields",
+			"poly_IncidentName,poly_GISAcres,poly_Acres_AutoCalc,"+
+				"poly_DateCurrent,poly_PolygonDateTime,poly_IRWINID,"+
+				"poly_FeatureStatus,poly_FeatureAccess,poly_IsVisible,"+
+				"attr_IncidentName,attr_IncidentSize,attr_CalculatedAcres,"+
+				"attr_PercentContained,attr_IncidentTypeCategory,"+
+				"attr_POOState,attr_POOCounty,attr_IrwinID,"+
+				"attr_ModifiedOnDateTime_dt")
+		params.Set("returnGeometry", "true")
+		params.Set("geometryPrecision", "5")
+		params.Set("maxAllowableOffset", "0.0005")
+		params.Set("f", "geojson")
+		upstream.RawQuery = params.Encode()
+
+		req, err := http.NewRequest(http.MethodGet, upstream.String(), nil)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		req.Header.Set("User-Agent", "pittsburg-saildata/"+appVersion)
+		req.Header.Set("Accept", "application/geo+json, application/json")
+
+		client := &http.Client{Timeout: 14 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			http.Error(w, "NIFC/WFIGS fire perimeter request failed", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			http.Error(w, fmt.Sprintf("NIFC/WFIGS returned HTTP %d", resp.StatusCode), http.StatusBadGateway)
+			return
+		}
+		body, err := ioutil.ReadAll(io.LimitReader(resp.Body, 10<<20))
+		if err != nil {
+			http.Error(w, "read NIFC/WFIGS fire perimeter response failed", http.StatusBadGateway)
+			return
+		}
+
+		var probe struct {
+			Type  string `json:"type"`
+			Error *struct {
+				Code    int      `json:"code"`
+				Message string   `json:"message"`
+				Details []string `json:"details"`
+			} `json:"error,omitempty"`
+		}
+		if err := json.Unmarshal(body, &probe); err != nil {
+			http.Error(w, "invalid NIFC/WFIGS fire perimeter response", http.StatusBadGateway)
+			return
+		}
+		if probe.Error != nil {
+			message := strings.TrimSpace(probe.Error.Message)
+			if message == "" {
+				message = "NIFC/WFIGS fire perimeter service error"
+			}
+			http.Error(w, message, http.StatusBadGateway)
+			return
+		}
+
+		filteredBody, _, _, err := filterLatestWFIGSPerimeters(body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/geo+json; charset=utf-8")
+		w.Header().Set("Cache-Control", "private, max-age=120")
+		_, _ = w.Write(filteredBody)
+	})
+
 	mux.HandleFunc("/pressure-observations", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -3890,6 +4089,462 @@ func fetchNOAAHMSSmoke() (string, *hmsSmokeFeatureCollection, error) {
 
 	return "", nil, fmt.Errorf(
 		"NOAA HMS satellite smoke analysis is temporarily unavailable; " +
+			"no current or recent shapefile analysis could be loaded.",
+	)
+}
+
+func firePerimeterPropertyString(properties map[string]interface{}, names ...string) string {
+	for _, name := range names {
+		value, ok := properties[name]
+		if !ok || value == nil {
+			continue
+		}
+		switch typed := value.(type) {
+		case string:
+			if trimmed := strings.TrimSpace(typed); trimmed != "" {
+				return trimmed
+			}
+		default:
+			if formatted := strings.TrimSpace(fmt.Sprint(typed)); formatted != "" &&
+				formatted != "<nil>" {
+				return formatted
+			}
+		}
+	}
+	return ""
+}
+
+func firePerimeterPropertyNumber(properties map[string]interface{}, names ...string) float64 {
+	for _, name := range names {
+		value, ok := properties[name]
+		if !ok || value == nil {
+			continue
+		}
+		switch typed := value.(type) {
+		case float64:
+			if !math.IsNaN(typed) && !math.IsInf(typed, 0) {
+				return typed
+			}
+		case float32:
+			parsed := float64(typed)
+			if !math.IsNaN(parsed) && !math.IsInf(parsed, 0) {
+				return parsed
+			}
+		case int:
+			return float64(typed)
+		case int64:
+			return float64(typed)
+		case json.Number:
+			if parsed, err := typed.Float64(); err == nil &&
+				!math.IsNaN(parsed) && !math.IsInf(parsed, 0) {
+				return parsed
+			}
+		case string:
+			if parsed, err := strconv.ParseFloat(strings.TrimSpace(typed), 64); err == nil &&
+				!math.IsNaN(parsed) && !math.IsInf(parsed, 0) {
+				return parsed
+			}
+		}
+	}
+	return 0
+}
+
+func firePerimeterPropertyTime(properties map[string]interface{}, names ...string) float64 {
+	for _, name := range names {
+		value, ok := properties[name]
+		if !ok || value == nil {
+			continue
+		}
+		switch typed := value.(type) {
+		case float64:
+			if !math.IsNaN(typed) && !math.IsInf(typed, 0) {
+				return typed
+			}
+		case json.Number:
+			if parsed, err := typed.Float64(); err == nil {
+				return parsed
+			}
+		case string:
+			valueText := strings.TrimSpace(typed)
+			if valueText == "" {
+				continue
+			}
+			if parsed, err := strconv.ParseFloat(valueText, 64); err == nil {
+				return parsed
+			}
+			layouts := []string{
+				time.RFC3339Nano,
+				time.RFC3339,
+				"2006-01-02 15:04:05",
+				"01/02/2006 03:04:05 PM",
+				"1/2/2006 3:04:05 PM",
+			}
+			for _, layout := range layouts {
+				if parsed, err := time.Parse(layout, valueText); err == nil {
+					return float64(parsed.UnixNano() / int64(time.Millisecond))
+				}
+			}
+		}
+	}
+	return 0
+}
+
+func firePerimeterIncidentKey(properties map[string]interface{}) string {
+	incidentID := firePerimeterPropertyString(
+		properties,
+		"poly_IRWINID",
+		"attr_IrwinID",
+	)
+	incidentID = strings.ToLower(strings.Trim(strings.TrimSpace(incidentID), "{}"))
+	if incidentID != "" {
+		return "irwin:" + incidentID
+	}
+
+	name := strings.ToLower(strings.TrimSpace(firePerimeterPropertyString(
+		properties,
+		"attr_IncidentName",
+		"poly_IncidentName",
+	)))
+	category := strings.ToUpper(strings.TrimSpace(firePerimeterPropertyString(
+		properties,
+		"attr_IncidentTypeCategory",
+	)))
+	if name != "" {
+		return "name:" + category + ":" + name
+	}
+	return ""
+}
+
+func firePerimeterFeatureIsUsable(properties map[string]interface{}) bool {
+	status := strings.ToLower(strings.TrimSpace(firePerimeterPropertyString(
+		properties,
+		"poly_FeatureStatus",
+	)))
+	if status != "" && status != "approved" {
+		return false
+	}
+
+	access := strings.ToLower(strings.TrimSpace(firePerimeterPropertyString(
+		properties,
+		"poly_FeatureAccess",
+	)))
+	if access != "" && access != "public" {
+		return false
+	}
+
+	visible := strings.ToLower(strings.TrimSpace(firePerimeterPropertyString(
+		properties,
+		"poly_IsVisible",
+	)))
+	if visible != "" && visible != "yes" && visible != "true" && visible != "1" {
+		return false
+	}
+
+	return true
+}
+
+func firePerimeterFeatureRank(properties map[string]interface{}) (float64, float64) {
+	timestamp := firePerimeterPropertyTime(
+		properties,
+		"poly_PolygonDateTime",
+		"poly_DateCurrent",
+		"attr_ModifiedOnDateTime_dt",
+	)
+	acres := firePerimeterPropertyNumber(
+		properties,
+		"poly_GISAcres",
+		"poly_Acres_AutoCalc",
+		"attr_IncidentSize",
+		"attr_CalculatedAcres",
+	)
+	return timestamp, acres
+}
+
+func filterLatestWFIGSPerimeters(body []byte) ([]byte, int, int, error) {
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(body, &document); err != nil {
+		return nil, 0, 0, fmt.Errorf("decode NIFC/WFIGS GeoJSON: %w", err)
+	}
+
+	var features []json.RawMessage
+	if rawFeatures, ok := document["features"]; ok {
+		if err := json.Unmarshal(rawFeatures, &features); err != nil {
+			return nil, 0, 0, fmt.Errorf("decode NIFC/WFIGS features: %w", err)
+		}
+	}
+
+	type candidate struct {
+		raw       json.RawMessage
+		timestamp float64
+		acres     float64
+	}
+
+	sourceCount := len(features)
+	selected := make(map[string]candidate)
+	unkeyed := make([]json.RawMessage, 0)
+
+	for _, rawFeature := range features {
+		var feature struct {
+			Properties map[string]interface{} `json:"properties"`
+		}
+		decoder := json.NewDecoder(bytes.NewReader(rawFeature))
+		decoder.UseNumber()
+		if err := decoder.Decode(&feature); err != nil {
+			continue
+		}
+		if !firePerimeterFeatureIsUsable(feature.Properties) {
+			continue
+		}
+
+		key := firePerimeterIncidentKey(feature.Properties)
+		if key == "" {
+			unkeyed = append(unkeyed, rawFeature)
+			continue
+		}
+
+		timestamp, acres := firePerimeterFeatureRank(feature.Properties)
+		existing, found := selected[key]
+		if !found ||
+			timestamp > existing.timestamp ||
+			(timestamp == existing.timestamp && acres > existing.acres) {
+			selected[key] = candidate{
+				raw:       rawFeature,
+				timestamp: timestamp,
+				acres:     acres,
+			}
+		}
+	}
+
+	filtered := make([]json.RawMessage, 0, len(selected)+len(unkeyed))
+	for _, candidate := range selected {
+		filtered = append(filtered, candidate.raw)
+	}
+	filtered = append(filtered, unkeyed...)
+
+	filteredJSON, err := json.Marshal(filtered)
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("encode filtered NIFC/WFIGS features: %w", err)
+	}
+	document["features"] = filteredJSON
+
+	sourceCountJSON, _ := json.Marshal(sourceCount)
+	incidentCountJSON, _ := json.Marshal(len(filtered))
+	document["source_feature_count"] = sourceCountJSON
+	document["incident_count"] = incidentCountJSON
+
+	filteredBody, err := json.Marshal(document)
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("encode filtered NIFC/WFIGS GeoJSON: %w", err)
+	}
+	return filteredBody, sourceCount, len(filtered), nil
+}
+
+type hmsFireDetection struct {
+	Lat       float64 `json:"lat"`
+	Lon       float64 `json:"lon"`
+	YearDay   string  `json:"year_day,omitempty"`
+	TimeUTC   string  `json:"time_utc,omitempty"`
+	Satellite string  `json:"satellite,omitempty"`
+	Method    string  `json:"method,omitempty"`
+	Ecosystem string  `json:"ecosystem,omitempty"`
+	FRP       string  `json:"frp,omitempty"`
+}
+
+func parseHMSDBFRecords(body []byte) ([]map[string]string, error) {
+	if len(body) < 32 {
+		return nil, fmt.Errorf("NOAA HMS fire DBF is too short")
+	}
+
+	recordCount := int(binary.LittleEndian.Uint32(body[4:8]))
+	headerLength := int(binary.LittleEndian.Uint16(body[8:10]))
+	recordLength := int(binary.LittleEndian.Uint16(body[10:12]))
+	if recordCount < 0 || headerLength < 33 || recordLength < 2 || headerLength > len(body) {
+		return nil, fmt.Errorf("NOAA HMS fire DBF has an invalid header")
+	}
+
+	fields := make([]hmsDBFField, 0, 16)
+	offset := 1
+	for pos := 32; pos+32 <= headerLength; pos += 32 {
+		if body[pos] == 0x0D {
+			break
+		}
+		rawName := body[pos : pos+11]
+		if nul := bytes.IndexByte(rawName, 0); nul >= 0 {
+			rawName = rawName[:nul]
+		}
+		name := strings.TrimSpace(string(rawName))
+		length := int(body[pos+16])
+		if name == "" || length <= 0 {
+			continue
+		}
+		fields = append(fields, hmsDBFField{name: name, offset: offset, length: length})
+		offset += length
+	}
+
+	records := make([]map[string]string, 0, recordCount)
+	for i := 0; i < recordCount; i++ {
+		start := headerLength + i*recordLength
+		end := start + recordLength
+		if start < 0 || end > len(body) {
+			break
+		}
+		record := body[start:end]
+		values := make(map[string]string, len(fields))
+		if len(record) == 0 || record[0] == '*' {
+			records = append(records, values)
+			continue
+		}
+		for _, field := range fields {
+			fieldStart := field.offset
+			fieldEnd := fieldStart + field.length
+			if fieldStart < 0 || fieldEnd > len(record) {
+				continue
+			}
+			values[strings.ToLower(field.name)] = strings.TrimSpace(string(record[fieldStart:fieldEnd]))
+		}
+		records = append(records, values)
+	}
+	return records, nil
+}
+
+func parseHMSFireShapefile(
+	body []byte,
+	records []map[string]string,
+) ([]hmsFireDetection, error) {
+	if len(body) < 100 {
+		return nil, fmt.Errorf("NOAA HMS fire shapefile is too short")
+	}
+
+	detections := make([]hmsFireDetection, 0)
+	recordIndex := 0
+	for pos := 100; pos+8 <= len(body); {
+		contentWords := int(binary.BigEndian.Uint32(body[pos+4 : pos+8]))
+		contentBytes := contentWords * 2
+		recordStart := pos + 8
+		recordEnd := recordStart + contentBytes
+		if contentBytes < 20 || recordEnd > len(body) {
+			break
+		}
+		record := body[recordStart:recordEnd]
+		shapeType := int32(binary.LittleEndian.Uint32(record[0:4]))
+		if shapeType == 1 || shapeType == 11 || shapeType == 21 {
+			lon := math.Float64frombits(binary.LittleEndian.Uint64(record[4:12]))
+			lat := math.Float64frombits(binary.LittleEndian.Uint64(record[12:20]))
+			if !math.IsNaN(lon) && !math.IsNaN(lat) &&
+				!math.IsInf(lon, 0) && !math.IsInf(lat, 0) &&
+				lon >= -180 && lon <= 180 && lat >= -90 && lat <= 90 {
+				fields := map[string]string{}
+				if recordIndex < len(records) {
+					fields = records[recordIndex]
+				}
+				first := func(names ...string) string {
+					for _, name := range names {
+						if value := strings.TrimSpace(fields[strings.ToLower(name)]); value != "" {
+							return value
+						}
+					}
+					return ""
+				}
+				detections = append(detections, hmsFireDetection{
+					Lat:       lat,
+					Lon:       lon,
+					YearDay:   first("yearday", "year_day"),
+					TimeUTC:   first("time", "time_utc"),
+					Satellite: first("satellite"),
+					Method:    first("method", "source"),
+					Ecosystem: first("ecosystem", "ecosys"),
+					FRP:       first("frp"),
+				})
+			}
+		}
+		recordIndex++
+		pos = recordEnd
+	}
+	if len(detections) == 0 {
+		return nil, fmt.Errorf("NOAA HMS fire shapefile contained no usable fire detections")
+	}
+	return detections, nil
+}
+
+func parseNOAAHMSFireZip(body []byte) ([]hmsFireDetection, error) {
+	reader, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		return nil, fmt.Errorf("open NOAA HMS fire ZIP: %w", err)
+	}
+
+	var shpBody []byte
+	var dbfBody []byte
+	for _, file := range reader.File {
+		name := strings.ToLower(strings.TrimSpace(file.Name))
+		if !strings.HasSuffix(name, ".shp") && !strings.HasSuffix(name, ".dbf") {
+			continue
+		}
+		rc, err := file.Open()
+		if err != nil {
+			return nil, err
+		}
+		data, readErr := ioutil.ReadAll(io.LimitReader(rc, 12<<20))
+		closeErr := rc.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+		switch {
+		case strings.HasSuffix(name, ".shp"):
+			shpBody = data
+		case strings.HasSuffix(name, ".dbf"):
+			dbfBody = data
+		}
+	}
+	if len(shpBody) == 0 || len(dbfBody) == 0 {
+		return nil, fmt.Errorf("NOAA HMS fire ZIP is missing .shp or .dbf data")
+	}
+	records, err := parseHMSDBFRecords(dbfBody)
+	if err != nil {
+		return nil, err
+	}
+	return parseHMSFireShapefile(shpBody, records)
+}
+
+func fetchNOAAHMSFireDetections() (string, []hmsFireDetection, error) {
+	currentURL :=
+		"https://satepsanone.nesdis.noaa.gov/pub/FIRE/web/HMS/" +
+			"Fire_Points/Shapefile/ArcGIS_WFS_source/hms_fire.zip"
+
+	if body, modified, err := fetchNOAAHMSSmokeZip(currentURL); err == nil {
+		if detections, parseErr := parseNOAAHMSFireZip(body); parseErr == nil && len(detections) > 0 {
+			dateText := "latest"
+			if !modified.IsZero() {
+				dateText = modified.Format("Jan 2, 2006")
+			}
+			return dateText, detections, nil
+		}
+	}
+
+	now := time.Now().UTC()
+	for daysBack := 0; daysBack <= 7; daysBack++ {
+		day := now.AddDate(0, 0, -daysBack)
+		dateText := day.Format("20060102")
+		sourceURL := fmt.Sprintf(
+			"https://satepsanone.nesdis.noaa.gov/pub/FIRE/web/HMS/"+
+				"Fire_Points/Shapefile/%s/%s/hms_fire%s.zip",
+			day.Format("2006"),
+			day.Format("01"),
+			dateText,
+		)
+		body, _, err := fetchNOAAHMSSmokeZip(sourceURL)
+		if err != nil {
+			continue
+		}
+		detections, err := parseNOAAHMSFireZip(body)
+		if err == nil && len(detections) > 0 {
+			return day.Format("Jan 2, 2006"), detections, nil
+		}
+	}
+	return "", nil, fmt.Errorf(
+		"NOAA HMS satellite fire detections are temporarily unavailable; " +
 			"no current or recent shapefile analysis could be loaded.",
 	)
 }
@@ -6504,7 +7159,7 @@ h3{margin:1.2rem 0 .35rem;color:var(--navy)}
 <p><strong>Wind:</strong> recent NOAA/NDBC observations, wind history, and nearby station alternatives.</p>
 <p><strong>Currents:</strong> NOAA CO-OPS ebb, flood, slack, maximum-current timing, and 1/3/7-day current graphs.</p>
 <p><strong>Weather:</strong> NWS local conditions/forecast context and forecast-zone information for a selected map point.</p>
-<p><strong>Map context:</strong> street, nautical, satellite, and hybrid basemaps plus forecast-zone, smoke, sea-surface-temperature, cloud-cover, radar, and ALERTCalifornia camera overlays.</p>
+<p><strong>Map context:</strong> street, nautical, satellite, and hybrid basemaps plus forecast-zone, smoke, active-fire-perimeter, satellite-fire-detection, sea-surface-temperature, cloud-cover, radar, and ALERTCalifornia camera overlays.</p>
 </section>
 
 <section class="card full qa">
@@ -6515,7 +7170,7 @@ h3{margin:1.2rem 0 .35rem;color:var(--navy)}
 <details><summary>What does Local Conditions show?</summary><p>For the selected map point, the app uses the NWS point forecast to show the nearby city/state label, current-hour forecast temperature, expected high/low, and a short forecast phrase.</p></details>
 <details><summary>Can I choose another wind station?</summary><p>Yes. Nearby wind-station candidates appear after you select a location. You can compare them on the map/table and choose the station you think best represents the water you care about.</p></details>
 <details><summary>Is this tide data or current data?</summary><p><strong>Current data.</strong> The graph is predicted speed and direction of moving water — flood above zero, ebb below zero, and crossings near slack. Tide height and current are related, but they are not the same thing.</p></details>
-<details><summary>What map choices are available?</summary><p>Planning and Details includes Street Map, Nautical Chart, Satellite, and Hybrid basemaps; independent forecast-zone, satellite-smoke, global PacIOOS/NOAA WaveWatch III swell, NOAA CoastWatch Sea Surface Temp, NOAA/NESDIS cloud-cover, NEXRAD radar, and ALERTCalifornia camera overlays; and Center Map actions for your location, entered coordinates, selected location, wind station, and currents station.</p></details>
+<details><summary>What map choices are available?</summary><p>Planning and Details includes Street Map, Nautical Chart, Satellite, and Hybrid basemaps; independent forecast-zone, satellite-smoke, NIFC/WFIGS active-fire-perimeter, NOAA HMS satellite-fire-detection, global PacIOOS/NOAA WaveWatch III swell, NOAA CoastWatch Sea Surface Temp, NOAA/NESDIS cloud-cover, NEXRAD radar, and ALERTCalifornia camera overlays; and Center Map actions for your location, entered coordinates, selected location, wind station, and currents station.</p></details>
 <details><summary>Is this for navigation or safety decisions?</summary><p>No. It is a conditions-planning and exploration tool. Observations can be delayed or missing, station exposure differs, and current/forecast products have limitations. Use official marine forecasts, charts, notices, local knowledge, and prudent seamanship.</p></details>
 </section>
 
@@ -6816,7 +7471,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 <section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Open the full planning dashboard for location, wind, currents, forecasts, map layers, and customization controls.</p></div><a id="planning-page-link" class="planning-page-link" href="{{.PlanningDetailsURL}}">Planning and Details →</a></section>
 {{else}}
 <section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Full planning dashboard and customization controls.</p></div><a id="conditions-page-link" class="planning-page-link" href="{{.ConditionsURL}}">← Back to Conditions Now</a></section>
-<section class="card full map-card"><div class="map-intro"><div><div class="map-intro-title"><h2>Location</h2><details class="location-help"><summary aria-label="About location selection" title="About location selection">ⓘ</summary><div class="location-help-panel"><div class="location-help-header"><strong>About location selection</strong><button type="button" class="location-help-close" aria-label="Close location information" title="Close">×</button></div><div class="location-help-body"><p><strong>Selected location</strong> is the point used for selected-location weather and nearby-station searches. Click the map to set or change it.</p><p>Panning, zooming, My location, and Center Map only change the map view. The latitude/longitude fields show the map center; editing them and choosing <strong>Center Map → Latitude &amp; Longitude</strong> does not change the selected location.</p><p><strong>Find nearby stations</strong> searches around the selected location. Open a candidate station on the map to review it and commit it as the wind source; the associated currents station is previewed with it.</p></div></div></details></div><div class="map-help">Click the map to select a location for weather and nearby stations.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-alertcalifornia-panel" class="alertcalifornia-panel" hidden role="dialog" aria-modal="false" aria-labelledby="map-alertcalifornia-panel-title"><div class="alertcalifornia-panel-head"><div id="map-alertcalifornia-panel-title" class="alertcalifornia-panel-title">ALERTCalifornia camera</div><button id="map-alertcalifornia-panel-close" class="alertcalifornia-panel-close" type="button" aria-label="Close ALERTCalifornia camera" title="Close">×</button></div><div id="map-alertcalifornia-panel-body" class="alertcalifornia-panel-body"></div></div><div id="map-swell-info-panel" class="swell-info-panel" hidden role="dialog" aria-modal="false" aria-labelledby="map-swell-info-panel-title"><div class="swell-info-panel-head"><div id="map-swell-info-panel-title" class="swell-info-panel-title">Swell Forecast</div><button id="map-swell-info-panel-close" class="swell-info-panel-close" type="button" aria-label="Close swell forecast information" title="Close">×</button></div><div id="map-swell-info-panel-body" class="swell-info-panel-body"></div></div><div id="map-nautical-zoom-note" class="map-nautical-zoom-note" hidden aria-live="polite">Nautical chart available at Zoom 9+.</div><div id="map-resize-handle" class="map-resize-handle" role="separator" aria-label="Resize map vertically" aria-orientation="horizontal" aria-valuemin="260" aria-valuemax="900" aria-valuenow="390" aria-grabbed="false" tabindex="0" title="Drag up or down to resize map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-scale-row" aria-label="Map scale"><span id="map-scale-status" class="map-scale-status" role="status" aria-live="polite"></span></div><div class="map-state-controls" aria-label="Map controls"><details id="map-types-menu" class="map-overlays-menu"><summary>Map Types</summary><div class="map-overlays-panel"><button type="button" class="map-menu-close" aria-label="Close Map Types" title="Close">×</button><label class="map-overlay-toggle"><input type="radio" name="map-type" value="map"> <span>Street Map</span></label><label id="map-type-nautical-label" class="map-overlay-toggle"><input id="map-type-nautical" type="radio" name="map-type" value="nautical"> <span>Nautical Chart <small>(Zoom 9+)</small></span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="satellite"> <span>Satellite</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="hybrid"> <span>Hybrid</span></label></div></details><details id="map-overlays-menu" class="map-overlays-menu"><summary>Map Overlays</summary><div class="map-overlays-panel"><div class="map-overlays-toolbar"><button type="button" id="map-overlays-clear" class="map-overlay-clear">Clear all overlays</button><button type="button" class="map-menu-close" aria-label="Close Map Overlays" title="Close">×</button></div><details class="map-overlay-group"><summary>Weather &amp; Hazards</summary><div class="map-overlay-group-body"><label id="map-marine-zone-control" class="map-overlay-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-smoke"> <span>Satellite smoke (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-clouds"> <span>Satellite Cloud Cover (NOAA)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-radar"> <span>Weather radar (NOAA/NWS)</span></label></div></details><details class="map-overlay-group"><summary>Wind &amp; Pressure</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-wind-barbs"> <span>Marine / Bay Wind Barbs (NOAA/NDBC)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-inland-wind-barbs"> <span>Land / Inland Wind Barbs (METAR)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-pressure"> <span>Surface Pressure / Isobars (NOAA/NWS METAR)</span></label></div></details><details class="map-overlay-group"><summary>Surf &amp; Swell</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-swell"> <span>Global Swell Forecast (PacIOOS / NOAA WW3)</span></label><div id="map-swell-controls" class="map-swell-controls" hidden><div class="map-swell-control-row"><label for="map-swell-hours">Forecast time</label><div class="map-swell-slider-wrap"><input id="map-swell-hours" type="range" min="0" max="120" step="6" value="0" aria-label="Swell forecast time, from now through 120 hours in the future"><div class="map-swell-slider-labels"><span>Now</span><span>+120h (5 days)</span></div></div></div><div id="map-swell-time" class="map-swell-selected-time">Selected: Now</div><div class="map-swell-control-note">Smooth color = swell height · arrows = swell travel direction. Forecast range: Now to +120h (5 days). Tap/click the colored swell field or an arrow for details.</div></div></div></details><details class="map-overlay-group"><summary>Terrain &amp; Seafloor</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-structure"> <span>Topography &amp; Bathymetry (NOAA ETOPO + offshore feature names)</span></label></div></details><details class="map-overlay-group"><summary>Marine Places</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marinas"> <span>Marinas <small id="map-marine-count-marinas"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="boatyards"> <span>Boatyards &amp; Repair <small id="map-marine-count-boatyards"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="fuel_docks"> <span>Fuel Docks <small id="map-marine-count-fuel_docks"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="launch_ramps"> <span>Launch Ramps <small id="map-marine-count-launch_ramps"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="ferry_terminals"> <span>Ferry Terminals <small id="map-marine-count-ferry_terminals"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marine_supply"> <span>Marine Supply <small id="map-marine-count-marine_supply"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="yacht_clubs"> <span>Yacht Clubs <small id="map-marine-count-yacht_clubs"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="waterfront_restaurants"> <span>Waterfront Restaurants <small id="map-marine-count-waterfront_restaurants"></small></span></label></div></details><details class="map-overlay-group"><summary>Observations</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-saildrone"> <span>Saildrone Observations (NOAA PMEL)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-alertcalifornia"> <span>ALERTCalifornia Cameras (UC San Diego)</span></label></div></details></div></details><details id="map-center-menu" class="map-overlays-menu"><summary>Center Map</summary><div class="map-overlays-panel map-center-panel"><button type="button" class="map-menu-close" aria-label="Close Center Map" title="Close">×</button><button type="button" id="map-geolocate" class="map-center-action" title="Center the map on your device location without changing the selected location">My location</button><button type="button" id="map-nav-coordinates" class="map-center-action" title="Center the map on the latitude and longitude shown below">Latitude &amp; Longitude</button><button type="button" id="map-nav-selected" class="map-center-action" {{if not .MapHasRequest}}disabled{{end}}>Selected location</button><button type="button" id="map-nav-wind" class="map-center-action" {{if not .MapHasWind}}disabled{{end}}>Selected wind station</button><button type="button" id="map-nav-current" class="map-center-action" {{if not .MapHasCurrent}}disabled{{end}}>Selected currents station</button></div></details></div><div class="map-primary-actions" aria-label="Location and station actions"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Find nearby stations</span><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates}}false{{else}}true{{end}}" {{if not (or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates)}}disabled{{end}}>Clear location &amp; stations</button></div><div class="map-location-info-grid"><div class="map-coordinate-entry" aria-label="Map center coordinates"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLat}}" aria-label="Map center latitude"></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLon}}" aria-label="Map center longitude"></div><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div id="selected-location-weather" class="selected-location-weather" aria-live="polite"><div id="selected-location-weather-empty" class="selected-location-weather-empty" {{if .MapHasRequest}}hidden{{end}}><strong>Selected Location Weather</strong><span>Select a location on the map to view current weather and forecast information.</span></div><div id="selected-location-weather-content" {{if not .MapHasRequest}}hidden{{end}}><div class="selected-location-weather-columns"><div class="selected-location-weather-point-column"><div class="selected-location-weather-head"><strong>Selected Location Weather</strong></div><div id="selected-location-weather-place" class="selected-location-weather-place">{{if .MapHasRequest}}{{if .SelectedWeatherLocation}}Near {{.SelectedWeatherLocation}}{{else}}Selected location{{end}}{{else}}Select a location for weather{{end}}</div><div id="selected-location-point-forecast" {{if and .MarineForecastPeriods .SelectedWeatherError}}hidden{{end}}><div class="selected-location-point-head"><strong>NWS Point Forecast</strong><span id="selected-location-weather-updated" class="selected-location-weather-updated">{{if .SelectedWeatherUpdated}}Updated {{.SelectedWeatherUpdated}}{{end}}</span></div><div class="selected-location-weather-metrics"><span class="selected-location-weather-metric"><b>Forecast temp:</b> <span id="selected-location-weather-air">{{if .SelectedWeatherAirTemp}}{{.SelectedWeatherAirTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>High:</b> <span id="selected-location-weather-high">{{if .SelectedWeatherHighTemp}}{{.SelectedWeatherHighTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>Low:</b> <span id="selected-location-weather-low">{{if .SelectedWeatherLowTemp}}{{.SelectedWeatherLowTemp}}{{else}}—{{end}}</span></span></div><p id="selected-location-weather-forecast" class="selected-location-weather-forecast" {{if not .SelectedWeatherShortForecast}}hidden{{end}}>{{.SelectedWeatherShortForecast}}</p><p id="selected-location-weather-error" class="selected-location-weather-error" {{if or (not .SelectedWeatherError) .MarineForecastPeriods}}hidden{{end}}>{{.SelectedWeatherError}}</p><p class="selected-location-weather-note">NWS point forecast for the selected map point. Forecast temperature is the current-hour forecast, not a direct observation.</p></div><p id="selected-location-weather-context" class="selected-location-weather-context" {{if not (and .MarineForecastPeriods .SelectedWeatherError)}}hidden{{end}}>NWS point-forecast temperature data is unavailable here; the applicable marine-zone forecast is shown in the Marine Forecast section.</p></div><div id="selected-location-weather-detail" class="selected-location-weather-detail" {{if not (or .MarineForecastPeriods .MarineForecastAlerts .MarineForecastError)}}hidden{{end}}><div class="selected-location-weather-detail-head"><strong id="marine-forecast-heading">{{if .MarineForecastPeriods}}NWS Marine Forecast{{else}}NWS Forecast Zone / Alerts{{end}}</strong><span id="marine-forecast-zone" class="marine-forecast-zone" {{if not .MarineForecastZone}}hidden{{end}}>{{if .MarineForecastPeriods}}Marine zone{{else}}NWS forecast zone{{end}} {{.MarineForecastZone}}{{if .MarineForecastUpdated}} · Updated {{.MarineForecastUpdated}}{{end}}</span></div><div id="marine-forecast-alerts" class="marine-alerts" aria-label="Active National Weather Service alerts" {{if not .MarineForecastAlerts}}hidden{{end}}>{{range .MarineForecastAlerts}}<span class="marine-alert">⚠ NWS alert — {{.}}</span>{{end}}</div><div id="marine-forecast-periods" class="marine-periods" {{if not .MarineForecastPeriods}}hidden{{end}}>{{range .MarineForecastPeriods}}<div class="marine-period">{{if .Name}}<strong>{{.Name}}</strong>{{end}}{{if .Forecast}}<p>{{.Forecast}}</p>{{end}}</div>{{end}}</div><p id="marine-forecast-note" class="marine-forecast-note" {{if not .MarineForecastPeriods}}hidden{{end}}>Official NWS coastal marine-zone forecast for the zone containing the selected point. It applies to the broader marine zone, not specifically to the selected point.</p><p id="marine-forecast-error" class="marine-forecast-error" {{if not .MarineForecastError}}hidden{{end}}>{{if .MarineForecastError}}{{.MarineForecastError}}{{end}}</p></div></div></div></div><div class="map-controls"><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><details class="map-overlay-help"><summary>Map overlay details</summary><div class="map-overlay-help-body">Topography & Bathymetry combines NOAA/NCEI ETOPO land topography and seafloor bathymetry with NOAA Marine Cadastre official named offshore features. Fishing-relevant features such as seamounts, banks, ridges, hills, knolls, shoals, reefs, rises, plateaus, pinnacles, and escarpments are labeled locally for better contrast. It is intended for fishing-planning context, not navigation; smaller pinnacles may not appear in the global relief model. Marine / Bay Wind Barbs uses live NOAA/NDBC station observations from all active stations with usable wind inside the buffered map viewport; standard meteorological barbs show wind-from direction and speed, and stale observations are faded. Land / Inland Wind Barbs is a separate optional layer sourced from Aviation Weather Center’s complete current-METAR cache and filtered locally to the buffered viewport, including many ASOS/AWOS airport sites. Both controls are display-only and do not change the selected wind station or selected location. Wind-barb tooltips follow the shared page Wind units preference; barb geometry remains based on standard knot increments. Saildrone Observations uses NOAA PMEL public ERDDAP mission data and plots the latest reported position and met-ocean readings from configured 2026 NOAA Saildrone missions; availability is mission-dependent and these moving platforms are not a fixed station network. ALERTCalifornia Cameras uses the official UC San Diego/ALERTCalifornia ArcGIS camera layer, requests only cameras in the current map viewport, and shows the current camera image plus a link to the official live camera page. Camera imagery is displayed unmodified with ALERTCalifornia | UC San Diego attribution. Exact positions are plotted only when the source provides them; fisherman shorthand such as “20×20” is shown as a derived approximate position with an uncertainty circle, and broad reports such as “Cordell to Monterey” are shown as regional zones rather than fake point coordinates. Satellite Cloud Cover uses NOAA/NESDIS GOES imagery rendered for the current map view; daylight areas appear natural-color-like and nighttime areas use infrared imagery. Radar uses Iowa State IEM's Web-Mercator CONUS NEXRAD N0Q WMS layer; a clear/transparent radar layer can simply mean no precipitation echoes are present. Surface Pressure / Isobars uses current NOAA/NWS Aviation Weather Center METAR mean sea-level-pressure observations. The browser interpolates those point observations into contour lines at a zoom-appropriate interval; it is useful pressure-gradient context but is not an official analyzed surface chart. Global Swell Forecast uses the public PacIOOS WaveWatch III global model for basin-scale swell tracking. The browser renders a padded, geographically anchored forecast field and reuses that loaded buffer during short pans; replacement buffers are swapped in only after enough new data are available. Wide-area views use a globally aligned coarser WW3 sampling stride for responsiveness, while closer views retain finer model sampling. The display uses interpolation and periodic dateline handling to present the gridded model smoothly; these display techniques do not increase the underlying model resolution. Sparse clickable arrows show swell travel direction, and the colored swell field or an arrow can be tapped for height, peak period, swell-from direction, travel direction, and forecast-valid time. It is intended for ocean-basin swell tracking and travel planning, not break-specific surf height.</div></details><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-weather-overlay-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-pressure-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div id="map-structure-status" class="map-structure-status" hidden></div><div id="map-windbarb-status" class="map-windbarb-status" hidden></div><div id="map-saildrone-status" class="map-saildrone-status" hidden></div><div id="map-alertcalifornia-status" class="map-alertcalifornia-status" hidden aria-live="polite"></div><div id="map-swell-status" class="map-swell-status" hidden aria-live="polite"></div><div id="map-swell-legend" class="map-swell-legend" hidden><strong>Swell height</strong><span>0</span><span class="map-swell-gradient" aria-hidden="true"></span><span>20+ ft</span><span>· arrows: swell travel direction</span></div><div class="map-layer-note">Drag the handle directly below the map to make the map taller or shorter. Keyboard users can focus the handle and use ↑/↓ (Shift for larger steps).</div><div class="info-popup-row map-info-popup-row"><button id="map-legend-open" class="info-popup-open" type="button" aria-haspopup="dialog" aria-controls="map-legend-modal">ⓘ Map legend</button><button id="map-sources-open" class="info-popup-open" type="button" aria-haspopup="dialog" aria-controls="map-sources-modal">ⓘ Map &amp; data sources</button></div><div id="map-legend-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-legend-title"><div class="info-popup-dialog-head"><h2 id="map-legend-title">Map Legend</h2><button id="map-legend-close" class="info-popup-close" type="button" aria-label="Close map legend" title="Close">×</button></div><div class="info-popup-body"><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span><span class="map-key"><span class="map-dot saildrone" aria-hidden="true"></span>Saildrone latest position</span><span class="map-key"><span class="map-dot alertcalifornia" aria-hidden="true"></span>ALERTCalifornia camera</span></div><div class="map-legend"><span class="map-key"><span class="map-dot marine marina" aria-hidden="true"></span>Marina</span><span class="map-key"><span class="map-dot marine boatyard" aria-hidden="true"></span>Boatyard &amp; repair</span><span class="map-key"><span class="map-dot marine fuel" aria-hidden="true"></span>Fuel dock</span><span class="map-key"><span class="map-dot marine ramp" aria-hidden="true"></span>Launch ramp</span><span class="map-key"><span class="map-dot marine ferry" aria-hidden="true"></span>Ferry terminal</span><span class="map-key"><span class="map-dot marine supply" aria-hidden="true"></span>Marine supply</span><span class="map-key"><span class="map-dot marine club" aria-hidden="true"></span>Yacht club</span><span class="map-key"><span class="map-dot marine restaurant" aria-hidden="true"></span>Waterfront restaurant</span></div></div></div></div><div id="map-sources-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-sources-title"><div class="info-popup-dialog-head"><h2 id="map-sources-title">Map &amp; Data Sources</h2><button id="map-sources-close" class="info-popup-close" type="button" aria-label="Close map and data sources" title="Close">×</button></div><div class="info-popup-body"><p class="map-sources-note">Base maps: <strong>Street Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service and is available at Zoom 9 or closer; <strong>Satellite</strong> uses Esri World Imagery; <strong>Hybrid</strong> combines Esri imagery with place/boundary labels. NWS forecast-zone, NOAA smoke, <strong>Sea Surface Temp</strong>, <strong>Global Swell Forecast</strong>, <strong>Satellite Cloud Cover</strong>, radar, and <strong>ALERTCalifornia Cameras</strong> remain independent overlays. Global Swell Forecast uses PacIOOS public ERDDAP access to the NOAA/NCEP WaveWatch III global model. ALERTCalifornia camera locations and current imagery come from the official UC San Diego/ALERTCalifornia ArcGIS feed. The nautical chart layer is for planning/reference and does not replace official navigation products.</p></div></div></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
+<section class="card full map-card"><div class="map-intro"><div><div class="map-intro-title"><h2>Location</h2><details class="location-help"><summary aria-label="About location selection" title="About location selection">ⓘ</summary><div class="location-help-panel"><div class="location-help-header"><strong>About location selection</strong><button type="button" class="location-help-close" aria-label="Close location information" title="Close">×</button></div><div class="location-help-body"><p><strong>Selected location</strong> is the point used for selected-location weather and nearby-station searches. Click the map to set or change it.</p><p>Panning, zooming, My location, and Center Map only change the map view. The latitude/longitude fields show the map center; editing them and choosing <strong>Center Map → Latitude &amp; Longitude</strong> does not change the selected location.</p><p><strong>Find nearby stations</strong> searches around the selected location. Open a candidate station on the map to review it and commit it as the wind source; the associated currents station is previewed with it.</p></div></div></details></div><div class="map-help">Click the map to select a location for weather and nearby stations.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-alertcalifornia-panel" class="alertcalifornia-panel" hidden role="dialog" aria-modal="false" aria-labelledby="map-alertcalifornia-panel-title"><div class="alertcalifornia-panel-head"><div id="map-alertcalifornia-panel-title" class="alertcalifornia-panel-title">ALERTCalifornia camera</div><button id="map-alertcalifornia-panel-close" class="alertcalifornia-panel-close" type="button" aria-label="Close ALERTCalifornia camera" title="Close">×</button></div><div id="map-alertcalifornia-panel-body" class="alertcalifornia-panel-body"></div></div><div id="map-swell-info-panel" class="swell-info-panel" hidden role="dialog" aria-modal="false" aria-labelledby="map-swell-info-panel-title"><div class="swell-info-panel-head"><div id="map-swell-info-panel-title" class="swell-info-panel-title">Swell Forecast</div><button id="map-swell-info-panel-close" class="swell-info-panel-close" type="button" aria-label="Close swell forecast information" title="Close">×</button></div><div id="map-swell-info-panel-body" class="swell-info-panel-body"></div></div><div id="map-nautical-zoom-note" class="map-nautical-zoom-note" hidden aria-live="polite">Nautical chart available at Zoom 9+.</div><div id="map-resize-handle" class="map-resize-handle" role="separator" aria-label="Resize map vertically" aria-orientation="horizontal" aria-valuemin="260" aria-valuemax="900" aria-valuenow="390" aria-grabbed="false" tabindex="0" title="Drag up or down to resize map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-scale-row" aria-label="Map scale"><span id="map-scale-status" class="map-scale-status" role="status" aria-live="polite"></span></div><div class="map-state-controls" aria-label="Map controls"><details id="map-types-menu" class="map-overlays-menu"><summary>Map Types</summary><div class="map-overlays-panel"><button type="button" class="map-menu-close" aria-label="Close Map Types" title="Close">×</button><label class="map-overlay-toggle"><input type="radio" name="map-type" value="map"> <span>Street Map</span></label><label id="map-type-nautical-label" class="map-overlay-toggle"><input id="map-type-nautical" type="radio" name="map-type" value="nautical"> <span>Nautical Chart <small>(Zoom 9+)</small></span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="satellite"> <span>Satellite</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="hybrid"> <span>Hybrid</span></label></div></details><details id="map-overlays-menu" class="map-overlays-menu"><summary>Map Overlays</summary><div class="map-overlays-panel"><div class="map-overlays-toolbar"><button type="button" id="map-overlays-clear" class="map-overlay-clear">Clear all overlays</button><button type="button" class="map-menu-close" aria-label="Close Map Overlays" title="Close">×</button></div><details class="map-overlay-group"><summary>Weather &amp; Hazards</summary><div class="map-overlay-group-body"><label id="map-marine-zone-control" class="map-overlay-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-smoke"> <span>Satellite smoke (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-fire-perimeters"> <span>Active fire perimeters (NIFC/WFIGS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-fire-detections"> <span>Satellite fire detections (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-clouds"> <span>Satellite Cloud Cover (NOAA)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-radar"> <span>Weather radar (NOAA/NWS)</span></label></div></details><details class="map-overlay-group"><summary>Wind &amp; Pressure</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-wind-barbs"> <span>Marine / Bay Wind Barbs (NOAA/NDBC)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-inland-wind-barbs"> <span>Land / Inland Wind Barbs (METAR)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-pressure"> <span>Surface Pressure / Isobars (NOAA/NWS METAR)</span></label></div></details><details class="map-overlay-group"><summary>Surf &amp; Swell</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-swell"> <span>Global Swell Forecast (PacIOOS / NOAA WW3)</span></label><div id="map-swell-controls" class="map-swell-controls" hidden><div class="map-swell-control-row"><label for="map-swell-hours">Forecast time</label><div class="map-swell-slider-wrap"><input id="map-swell-hours" type="range" min="0" max="120" step="6" value="0" aria-label="Swell forecast time, from now through 120 hours in the future"><div class="map-swell-slider-labels"><span>Now</span><span>+120h (5 days)</span></div></div></div><div id="map-swell-time" class="map-swell-selected-time">Selected: Now</div><div class="map-swell-control-note">Smooth color = swell height · arrows = swell travel direction. Forecast range: Now to +120h (5 days). Tap/click the colored swell field or an arrow for details.</div></div></div></details><details class="map-overlay-group"><summary>Terrain &amp; Seafloor</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-structure"> <span>Topography &amp; Bathymetry (NOAA ETOPO + offshore feature names)</span></label></div></details><details class="map-overlay-group"><summary>Marine Places</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marinas"> <span>Marinas <small id="map-marine-count-marinas"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="boatyards"> <span>Boatyards &amp; Repair <small id="map-marine-count-boatyards"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="fuel_docks"> <span>Fuel Docks <small id="map-marine-count-fuel_docks"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="launch_ramps"> <span>Launch Ramps <small id="map-marine-count-launch_ramps"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="ferry_terminals"> <span>Ferry Terminals <small id="map-marine-count-ferry_terminals"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marine_supply"> <span>Marine Supply <small id="map-marine-count-marine_supply"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="yacht_clubs"> <span>Yacht Clubs <small id="map-marine-count-yacht_clubs"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="waterfront_restaurants"> <span>Waterfront Restaurants <small id="map-marine-count-waterfront_restaurants"></small></span></label></div></details><details class="map-overlay-group"><summary>Observations</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-saildrone"> <span>Saildrone Observations (NOAA PMEL)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-alertcalifornia"> <span>ALERTCalifornia Cameras (UC San Diego)</span></label></div></details></div></details><details id="map-center-menu" class="map-overlays-menu"><summary>Center Map</summary><div class="map-overlays-panel map-center-panel"><button type="button" class="map-menu-close" aria-label="Close Center Map" title="Close">×</button><button type="button" id="map-geolocate" class="map-center-action" title="Center the map on your device location without changing the selected location">My location</button><button type="button" id="map-nav-coordinates" class="map-center-action" title="Center the map on the latitude and longitude shown below">Latitude &amp; Longitude</button><button type="button" id="map-nav-selected" class="map-center-action" {{if not .MapHasRequest}}disabled{{end}}>Selected location</button><button type="button" id="map-nav-wind" class="map-center-action" {{if not .MapHasWind}}disabled{{end}}>Selected wind station</button><button type="button" id="map-nav-current" class="map-center-action" {{if not .MapHasCurrent}}disabled{{end}}>Selected currents station</button></div></details></div><div class="map-primary-actions" aria-label="Location and station actions"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Find nearby stations</span><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates}}false{{else}}true{{end}}" {{if not (or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates)}}disabled{{end}}>Clear location &amp; stations</button></div><div class="map-location-info-grid"><div class="map-coordinate-entry" aria-label="Map center coordinates"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLat}}" aria-label="Map center latitude"></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLon}}" aria-label="Map center longitude"></div><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div id="selected-location-weather" class="selected-location-weather" aria-live="polite"><div id="selected-location-weather-empty" class="selected-location-weather-empty" {{if .MapHasRequest}}hidden{{end}}><strong>Selected Location Weather</strong><span>Select a location on the map to view current weather and forecast information.</span></div><div id="selected-location-weather-content" {{if not .MapHasRequest}}hidden{{end}}><div class="selected-location-weather-columns"><div class="selected-location-weather-point-column"><div class="selected-location-weather-head"><strong>Selected Location Weather</strong></div><div id="selected-location-weather-place" class="selected-location-weather-place">{{if .MapHasRequest}}{{if .SelectedWeatherLocation}}Near {{.SelectedWeatherLocation}}{{else}}Selected location{{end}}{{else}}Select a location for weather{{end}}</div><div id="selected-location-point-forecast" {{if and .MarineForecastPeriods .SelectedWeatherError}}hidden{{end}}><div class="selected-location-point-head"><strong>NWS Point Forecast</strong><span id="selected-location-weather-updated" class="selected-location-weather-updated">{{if .SelectedWeatherUpdated}}Updated {{.SelectedWeatherUpdated}}{{end}}</span></div><div class="selected-location-weather-metrics"><span class="selected-location-weather-metric"><b>Forecast temp:</b> <span id="selected-location-weather-air">{{if .SelectedWeatherAirTemp}}{{.SelectedWeatherAirTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>High:</b> <span id="selected-location-weather-high">{{if .SelectedWeatherHighTemp}}{{.SelectedWeatherHighTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>Low:</b> <span id="selected-location-weather-low">{{if .SelectedWeatherLowTemp}}{{.SelectedWeatherLowTemp}}{{else}}—{{end}}</span></span></div><p id="selected-location-weather-forecast" class="selected-location-weather-forecast" {{if not .SelectedWeatherShortForecast}}hidden{{end}}>{{.SelectedWeatherShortForecast}}</p><p id="selected-location-weather-error" class="selected-location-weather-error" {{if or (not .SelectedWeatherError) .MarineForecastPeriods}}hidden{{end}}>{{.SelectedWeatherError}}</p><p class="selected-location-weather-note">NWS point forecast for the selected map point. Forecast temperature is the current-hour forecast, not a direct observation.</p></div><p id="selected-location-weather-context" class="selected-location-weather-context" {{if not (and .MarineForecastPeriods .SelectedWeatherError)}}hidden{{end}}>NWS point-forecast temperature data is unavailable here; the applicable marine-zone forecast is shown in the Marine Forecast section.</p></div><div id="selected-location-weather-detail" class="selected-location-weather-detail" {{if not (or .MarineForecastPeriods .MarineForecastAlerts .MarineForecastError)}}hidden{{end}}><div class="selected-location-weather-detail-head"><strong id="marine-forecast-heading">{{if .MarineForecastPeriods}}NWS Marine Forecast{{else}}NWS Forecast Zone / Alerts{{end}}</strong><span id="marine-forecast-zone" class="marine-forecast-zone" {{if not .MarineForecastZone}}hidden{{end}}>{{if .MarineForecastPeriods}}Marine zone{{else}}NWS forecast zone{{end}} {{.MarineForecastZone}}{{if .MarineForecastUpdated}} · Updated {{.MarineForecastUpdated}}{{end}}</span></div><div id="marine-forecast-alerts" class="marine-alerts" aria-label="Active National Weather Service alerts" {{if not .MarineForecastAlerts}}hidden{{end}}>{{range .MarineForecastAlerts}}<span class="marine-alert">⚠ NWS alert — {{.}}</span>{{end}}</div><div id="marine-forecast-periods" class="marine-periods" {{if not .MarineForecastPeriods}}hidden{{end}}>{{range .MarineForecastPeriods}}<div class="marine-period">{{if .Name}}<strong>{{.Name}}</strong>{{end}}{{if .Forecast}}<p>{{.Forecast}}</p>{{end}}</div>{{end}}</div><p id="marine-forecast-note" class="marine-forecast-note" {{if not .MarineForecastPeriods}}hidden{{end}}>Official NWS coastal marine-zone forecast for the zone containing the selected point. It applies to the broader marine zone, not specifically to the selected point.</p><p id="marine-forecast-error" class="marine-forecast-error" {{if not .MarineForecastError}}hidden{{end}}>{{if .MarineForecastError}}{{.MarineForecastError}}{{end}}</p></div></div></div></div><div class="map-controls"><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><details class="map-overlay-help"><summary>Map overlay details</summary><div class="map-overlay-help-body">Topography & Bathymetry combines NOAA/NCEI ETOPO land topography and seafloor bathymetry with NOAA Marine Cadastre official named offshore features. Fishing-relevant features such as seamounts, banks, ridges, hills, knolls, shoals, reefs, rises, plateaus, pinnacles, and escarpments are labeled locally for better contrast. It is intended for fishing-planning context, not navigation; smaller pinnacles may not appear in the global relief model. Marine / Bay Wind Barbs uses live NOAA/NDBC station observations from all active stations with usable wind inside the buffered map viewport; standard meteorological barbs show wind-from direction and speed, and stale observations are faded. Land / Inland Wind Barbs is a separate optional layer sourced from Aviation Weather Center’s complete current-METAR cache and filtered locally to the buffered viewport, including many ASOS/AWOS airport sites. Both controls are display-only and do not change the selected wind station or selected location. Wind-barb tooltips follow the shared page Wind units preference; barb geometry remains based on standard knot increments. Saildrone Observations uses NOAA PMEL public ERDDAP mission data and plots the latest reported position and met-ocean readings from configured 2026 NOAA Saildrone missions; availability is mission-dependent and these moving platforms are not a fixed station network. ALERTCalifornia Cameras uses the official UC San Diego/ALERTCalifornia ArcGIS camera layer, requests only cameras in the current map viewport, and shows the current camera image plus a link to the official live camera page. Camera imagery is displayed unmodified with ALERTCalifornia | UC San Diego attribution. Exact positions are plotted only when the source provides them; fisherman shorthand such as “20×20” is shown as a derived approximate position with an uncertainty circle, and broad reports such as “Cordell to Monterey” are shown as regional zones rather than fake point coordinates. Satellite Cloud Cover uses NOAA/NESDIS GOES imagery rendered for the current map view; daylight areas appear natural-color-like and nighttime areas use infrared imagery. Radar uses Iowa State IEM's Web-Mercator CONUS NEXRAD N0Q WMS layer; a clear/transparent radar layer can simply mean no precipitation echoes are present. Surface Pressure / Isobars uses current NOAA/NWS Aviation Weather Center METAR mean sea-level-pressure observations. The browser interpolates those point observations into contour lines at a zoom-appropriate interval; it is useful pressure-gradient context but is not an official analyzed surface chart. Global Swell Forecast uses the public PacIOOS WaveWatch III global model for basin-scale swell tracking. The browser renders a padded, geographically anchored forecast field and reuses that loaded buffer during short pans; replacement buffers are swapped in only after enough new data are available. Wide-area views use a globally aligned coarser WW3 sampling stride for responsiveness, while closer views retain finer model sampling. The display uses interpolation and periodic dateline handling to present the gridded model smoothly; these display techniques do not increase the underlying model resolution. Sparse clickable arrows show swell travel direction, and the colored swell field or an arrow can be tapped for height, peak period, swell-from direction, travel direction, and forecast-valid time. It is intended for ocean-basin swell tracking and travel planning, not break-specific surf height.</div></details><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-fire-perimeter-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-fire-detection-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-weather-overlay-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-pressure-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div id="map-structure-status" class="map-structure-status" hidden></div><div id="map-windbarb-status" class="map-windbarb-status" hidden></div><div id="map-saildrone-status" class="map-saildrone-status" hidden></div><div id="map-alertcalifornia-status" class="map-alertcalifornia-status" hidden aria-live="polite"></div><div id="map-swell-status" class="map-swell-status" hidden aria-live="polite"></div><div id="map-swell-legend" class="map-swell-legend" hidden><strong>Swell height</strong><span>0</span><span class="map-swell-gradient" aria-hidden="true"></span><span>20+ ft</span><span>· arrows: swell travel direction</span></div><div class="map-layer-note">Drag the handle directly below the map to make the map taller or shorter. Keyboard users can focus the handle and use ↑/↓ (Shift for larger steps).</div><div class="info-popup-row map-info-popup-row"><button id="map-legend-open" class="info-popup-open" type="button" aria-haspopup="dialog" aria-controls="map-legend-modal">ⓘ Map legend</button><button id="map-sources-open" class="info-popup-open" type="button" aria-haspopup="dialog" aria-controls="map-sources-modal">ⓘ Map &amp; data sources</button></div><div id="map-legend-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-legend-title"><div class="info-popup-dialog-head"><h2 id="map-legend-title">Map Legend</h2><button id="map-legend-close" class="info-popup-close" type="button" aria-label="Close map legend" title="Close">×</button></div><div class="info-popup-body"><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span><span class="map-key"><span class="map-dot saildrone" aria-hidden="true"></span>Saildrone latest position</span><span class="map-key"><span class="map-dot alertcalifornia" aria-hidden="true"></span>ALERTCalifornia camera</span></div><div class="map-legend"><span class="map-key"><span class="map-dot marine marina" aria-hidden="true"></span>Marina</span><span class="map-key"><span class="map-dot marine boatyard" aria-hidden="true"></span>Boatyard &amp; repair</span><span class="map-key"><span class="map-dot marine fuel" aria-hidden="true"></span>Fuel dock</span><span class="map-key"><span class="map-dot marine ramp" aria-hidden="true"></span>Launch ramp</span><span class="map-key"><span class="map-dot marine ferry" aria-hidden="true"></span>Ferry terminal</span><span class="map-key"><span class="map-dot marine supply" aria-hidden="true"></span>Marine supply</span><span class="map-key"><span class="map-dot marine club" aria-hidden="true"></span>Yacht club</span><span class="map-key"><span class="map-dot marine restaurant" aria-hidden="true"></span>Waterfront restaurant</span></div></div></div></div><div id="map-sources-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-sources-title"><div class="info-popup-dialog-head"><h2 id="map-sources-title">Map &amp; Data Sources</h2><button id="map-sources-close" class="info-popup-close" type="button" aria-label="Close map and data sources" title="Close">×</button></div><div class="info-popup-body"><p class="map-sources-note">Base maps: <strong>Street Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service and is available at Zoom 9 or closer; <strong>Satellite</strong> uses Esri World Imagery; <strong>Hybrid</strong> combines Esri imagery with place/boundary labels. NWS forecast-zone, NOAA smoke, <strong>Active Fire Perimeters</strong>, <strong>Satellite Fire Detections</strong>, <strong>Sea Surface Temp</strong>, <strong>Global Swell Forecast</strong>, <strong>Satellite Cloud Cover</strong>, radar, and <strong>ALERTCalifornia Cameras</strong> remain independent overlays. Active Fire Perimeters use the National Interagency Fire Center WFIGS current perimeter service. Satellite Fire Detections use NOAA Hazard Mapping System active-fire detections. Global Swell Forecast uses PacIOOS public ERDDAP access to the NOAA/NCEP WaveWatch III global model. ALERTCalifornia camera locations and current imagery come from the official UC San Diego/ALERTCalifornia ArcGIS feed. The nautical chart layer is for planning/reference and does not replace official navigation products.</p></div></div></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
 {{if .WindError}}<section class="card full error-card"><h2>Wind station selection unavailable</h2><p class="error-message">{{.WindError}}</p><p class="error-help">The page is still available so you can inspect the request and nearby station diagnostics. Try nearby coordinates or an explicit NDBC station ID.</p></section>{{end}}
 <section class="card full wind-card"><div class="wind-card-head"><h2>Wind</h2></div>
 <div class="metrics">
@@ -8952,6 +9607,8 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     marineZoneOverlayVisible: false,
     smokeOverlayVisible: false,
     smokeOverlayLoaded: false,
+    firePerimetersVisible: false,
+    fireDetectionsVisible: false,
     structureOverlayVisible: false,
     windBarbsVisible: false,
     inlandWindBarbsVisible: false,
@@ -8979,6 +9636,12 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   var marineZoneHaloLayer = null;
   var smokeLayer = null;
   var smokeOutlineLayer = null;
+  var firePerimeterLayer = null;
+  var fireDetectionLayer = L.layerGroup();
+  var firePerimeterRequestSerial = 0;
+  var fireDetectionRequestSerial = 0;
+  var firePerimeterRefreshTimer = null;
+  var fireDetectionRefreshTimer = null;
   var swellHeatLayer = L.layerGroup();
   var swellVectorLayer = L.layerGroup();
   var swellRequestSerial = 0;
@@ -9847,6 +10510,260 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   {{if .MarineForecastGeometry}}
   setMarineZoneOverlay({{.MarineForecastZone}}, {{.MarineForecastGeometry}});
   {{end}}
+
+
+  function setFireOverlayStatus(id, message, isError) {
+    var status = document.getElementById(id);
+    if (!status) return;
+    status.hidden = !message;
+    status.textContent = message || "";
+    status.style.color = isError ? "#8b2c2c" : "";
+  }
+
+  function currentCanonicalMapBounds() {
+    var bounds = map.getBounds();
+    var west = Math.max(-180, Number(bounds.getWest()));
+    var east = Math.min(180, Number(bounds.getEast()));
+    var south = Math.max(-90, Number(bounds.getSouth()));
+    var north = Math.min(90, Number(bounds.getNorth()));
+    if (!(west < east && south < north)) return null;
+    return {west:west, south:south, east:east, north:north};
+  }
+
+  function fireBoundsParams() {
+    var bounds = currentCanonicalMapBounds();
+    if (!bounds) return null;
+    var params = new URLSearchParams();
+    params.set("west", bounds.west.toFixed(6));
+    params.set("south", bounds.south.toFixed(6));
+    params.set("east", bounds.east.toFixed(6));
+    params.set("north", bounds.north.toFixed(6));
+    return params;
+  }
+
+  function firePerimeterStyle(feature) {
+    var props = feature && feature.properties ? feature.properties : {};
+    var category = String(props.attr_IncidentTypeCategory || "").toUpperCase();
+    var prescribed = category === "RX";
+    return {
+      color: prescribed ? "#a56a12" : "#8d3f32",
+      weight: 2,
+      opacity: 0.9,
+      fillColor: prescribed ? "#d39a3a" : "#a85c49",
+      fillOpacity: 0.24
+    };
+  }
+
+  function firePerimeterPopup(feature) {
+    var props = feature && feature.properties ? feature.properties : {};
+    var name = props.attr_IncidentName || props.poly_IncidentName || "Current fire perimeter";
+    var category = String(props.attr_IncidentTypeCategory || "").toUpperCase();
+    var typeText = category === "RX" ? "Prescribed fire" : "Wildfire";
+    var acres = Number(props.attr_IncidentSize);
+    if (!Number.isFinite(acres) || acres <= 0) acres = Number(props.poly_GISAcres);
+    var contained = Number(props.attr_PercentContained);
+    var place = [props.attr_POOCounty, props.attr_POOState].filter(Boolean).join(", ");
+    var parts = ["<strong>" + escapeHTML(name) + "</strong>", escapeHTML(typeText)];
+    if (Number.isFinite(acres) && acres > 0) parts.push(acres.toLocaleString([], {maximumFractionDigits:0}) + " acres");
+    if (Number.isFinite(contained) && contained >= 0) parts.push(contained.toFixed(0) + "% contained");
+    if (place) parts.push(escapeHTML(place));
+    var perimeterTime = Number(props.poly_PolygonDateTime || props.poly_DateCurrent || props.attr_ModifiedOnDateTime_dt);
+    if (Number.isFinite(perimeterTime) && perimeterTime > 0) {
+      var perimeterDate = new Date(perimeterTime);
+      if (!Number.isNaN(perimeterDate.getTime())) {
+        parts.push("Perimeter: " + escapeHTML(perimeterDate.toLocaleString()));
+      }
+    }
+    parts.push("Latest current perimeter per incident");
+    parts.push("Source: NIFC / WFIGS");
+    return parts.join("<br>");
+  }
+
+  function clearFirePerimeters() {
+    firePerimeterRequestSerial++;
+    if (firePerimeterRefreshTimer) {
+      clearTimeout(firePerimeterRefreshTimer);
+      firePerimeterRefreshTimer = null;
+    }
+    if (firePerimeterLayer && map.hasLayer(firePerimeterLayer)) {
+      map.removeLayer(firePerimeterLayer);
+    }
+    firePerimeterLayer = null;
+  }
+
+  function loadFirePerimeters() {
+    if (!mapState.firePerimetersVisible) return;
+    var params = fireBoundsParams();
+    if (!params) {
+      setFireOverlayStatus("map-fire-perimeter-status", "Fire perimeters unavailable for this wrapped map view.", true);
+      return;
+    }
+    var requestID = ++firePerimeterRequestSerial;
+    setFireOverlayStatus("map-fire-perimeter-status", "Loading current NIFC/WFIGS fire perimeters…", false);
+    fetch("/fire-perimeters?" + params.toString(), {headers: {"Accept":"application/geo+json"}})
+      .then(function(resp) {
+        if (!resp.ok) return resp.text().then(function(t) { throw new Error(t || ("HTTP " + resp.status)); });
+        return resp.json();
+      })
+      .then(function(geojson) {
+        if (requestID !== firePerimeterRequestSerial || !mapState.firePerimetersVisible) return;
+        clearFirePerimeters();
+        firePerimeterRequestSerial = requestID;
+        var features = geojson && Array.isArray(geojson.features) ? geojson.features : [];
+        firePerimeterLayer = L.geoJSON(geojson || {type:"FeatureCollection",features:[]}, {
+          style: firePerimeterStyle,
+          onEachFeature: function(feature, layer) {
+            layer.bindPopup(firePerimeterPopup(feature), {maxWidth:300});
+          }
+        });
+        if (mapState.firePerimetersVisible) firePerimeterLayer.addTo(map);
+        var sourceFeatureCount = Number(geojson && geojson.source_feature_count);
+        var incidentCount = Number(geojson && geojson.incident_count);
+        var perimeterStatus = "";
+        if (features.length) {
+          perimeterStatus = "Current NIFC/WFIGS perimeters: " + features.length +
+            " latest incident perimeter" + (features.length === 1 ? "" : "s") +
+            " in current map view.";
+          if (Number.isFinite(sourceFeatureCount) && sourceFeatureCount > features.length) {
+            perimeterStatus += " " + sourceFeatureCount +
+              " source polygon" + (sourceFeatureCount === 1 ? "" : "s") +
+              " reduced to the latest perimeter per incident.";
+          } else if (Number.isFinite(incidentCount) && incidentCount > 0) {
+            perimeterStatus += " Latest perimeter per incident.";
+          }
+        } else {
+          perimeterStatus = "No current NIFC/WFIGS fire perimeters intersect this map view.";
+        }
+        setFireOverlayStatus(
+          "map-fire-perimeter-status",
+          perimeterStatus,
+          false
+        );
+      })
+      .catch(function(err) {
+        if (requestID !== firePerimeterRequestSerial || !mapState.firePerimetersVisible) return;
+        setFireOverlayStatus(
+          "map-fire-perimeter-status",
+          "Current fire perimeters unavailable: " + String(err && err.message ? err.message : err),
+          true
+        );
+      });
+  }
+
+  function scheduleFirePerimeterRefresh() {
+    if (!mapState.firePerimetersVisible) return;
+    if (firePerimeterRefreshTimer) clearTimeout(firePerimeterRefreshTimer);
+    firePerimeterRefreshTimer = setTimeout(function() {
+      firePerimeterRefreshTimer = null;
+      loadFirePerimeters();
+    }, 250);
+  }
+
+  function setFirePerimetersVisible(visible) {
+    mapState.firePerimetersVisible = !!visible;
+    if (mapState.firePerimetersVisible) {
+      loadFirePerimeters();
+    } else {
+      clearFirePerimeters();
+      setFireOverlayStatus("map-fire-perimeter-status", "", false);
+    }
+  }
+
+  function fireDetectionPopup(item) {
+    var parts = ["<strong>NOAA HMS satellite fire detection</strong>"];
+    if (item.satellite) parts.push("Satellite: " + escapeHTML(item.satellite));
+    if (item.method) parts.push("Method: " + escapeHTML(item.method));
+    if (item.year_day || item.time_utc) {
+      parts.push("Detection: " + escapeHTML([item.year_day, item.time_utc ? item.time_utc + " UTC" : ""].filter(Boolean).join(" ")));
+    }
+    if (item.frp) parts.push("FRP: " + escapeHTML(item.frp));
+    parts.push(Number(item.lat).toFixed(4) + ", " + Number(item.lon).toFixed(4));
+    parts.push("General guidance only; corroborate before tactical use.");
+    return parts.join("<br>");
+  }
+
+  function clearFireDetections() {
+    fireDetectionRequestSerial++;
+    if (fireDetectionRefreshTimer) {
+      clearTimeout(fireDetectionRefreshTimer);
+      fireDetectionRefreshTimer = null;
+    }
+    fireDetectionLayer.clearLayers();
+  }
+
+  function loadFireDetections() {
+    if (!mapState.fireDetectionsVisible) return;
+    var params = fireBoundsParams();
+    if (!params) {
+      setFireOverlayStatus("map-fire-detection-status", "Satellite fire detections unavailable for this wrapped map view.", true);
+      return;
+    }
+    var requestID = ++fireDetectionRequestSerial;
+    setFireOverlayStatus("map-fire-detection-status", "Loading NOAA HMS satellite fire detections…", false);
+    fetch("/fire-detections?" + params.toString(), {headers: {"Accept":"application/json"}})
+      .then(function(resp) {
+        if (!resp.ok) return resp.text().then(function(t) { throw new Error(t || ("HTTP " + resp.status)); });
+        return resp.json();
+      })
+      .then(function(payload) {
+        if (requestID !== fireDetectionRequestSerial || !mapState.fireDetectionsVisible) return;
+        fireDetectionLayer.clearLayers();
+        var items = payload && Array.isArray(payload.detections) ? payload.detections : [];
+        items.forEach(function(item) {
+          var lat = Number(item.lat);
+          var lon = Number(item.lon);
+          if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+          L.circleMarker([lat, lon], {
+            radius: 5,
+            color: "#b84318",
+            weight: 1.5,
+            opacity: 0.95,
+            fillColor: "#ff7a18",
+            fillOpacity: 0.72
+          }).bindPopup(fireDetectionPopup(item), {maxWidth:300}).addTo(fireDetectionLayer);
+        });
+        if (mapState.fireDetectionsVisible && !map.hasLayer(fireDetectionLayer)) {
+          fireDetectionLayer.addTo(map);
+        }
+        var dateText = payload && payload.analysis_date ? " · " + payload.analysis_date : "";
+        setFireOverlayStatus(
+          "map-fire-detection-status",
+          items.length
+            ? "NOAA HMS satellite fire detections" + dateText + ": " + items.length + " in current map view."
+            : "No NOAA HMS satellite fire detections" + dateText + " in this map view.",
+          false
+        );
+      })
+      .catch(function(err) {
+        if (requestID !== fireDetectionRequestSerial || !mapState.fireDetectionsVisible) return;
+        setFireOverlayStatus(
+          "map-fire-detection-status",
+          "Satellite fire detections unavailable: " + String(err && err.message ? err.message : err),
+          true
+        );
+      });
+  }
+
+  function scheduleFireDetectionRefresh() {
+    if (!mapState.fireDetectionsVisible) return;
+    if (fireDetectionRefreshTimer) clearTimeout(fireDetectionRefreshTimer);
+    fireDetectionRefreshTimer = setTimeout(function() {
+      fireDetectionRefreshTimer = null;
+      loadFireDetections();
+    }, 250);
+  }
+
+  function setFireDetectionsVisible(visible) {
+    mapState.fireDetectionsVisible = !!visible;
+    if (mapState.fireDetectionsVisible) {
+      if (!map.hasLayer(fireDetectionLayer)) fireDetectionLayer.addTo(map);
+      loadFireDetections();
+    } else {
+      clearFireDetections();
+      if (map.hasLayer(fireDetectionLayer)) map.removeLayer(fireDetectionLayer);
+      setFireOverlayStatus("map-fire-detection-status", "", false);
+    }
+  }
 
   function smokeStyle(feature) {
     var density = feature && feature.properties
@@ -10719,6 +11636,23 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     });
   }
 
+
+  var firePerimeterCheckbox = document.getElementById("map-show-fire-perimeters");
+  if (firePerimeterCheckbox) {
+    firePerimeterCheckbox.checked = !!mapState.firePerimetersVisible;
+    firePerimeterCheckbox.addEventListener("change", function() {
+      setFirePerimetersVisible(!!firePerimeterCheckbox.checked);
+    });
+  }
+
+  var fireDetectionCheckbox = document.getElementById("map-show-fire-detections");
+  if (fireDetectionCheckbox) {
+    fireDetectionCheckbox.checked = !!mapState.fireDetectionsVisible;
+    fireDetectionCheckbox.addEventListener("change", function() {
+      setFireDetectionsVisible(!!fireDetectionCheckbox.checked);
+    });
+  }
+
   var mapTypeInputs = document.querySelectorAll('input[name="map-type"]');
   mapTypeInputs.forEach(function(input) {
     input.checked = input.value === preferredMapLayerName;
@@ -10888,6 +11822,8 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     if (mapState.windBarbsVisible || mapState.inlandWindBarbsVisible) scheduleWindBarbRefresh();
     if (mapState.saildroneVisible && saildroneLayer) updateSaildroneViewportStatus();
     if (mapState.alertCaliforniaVisible) scheduleAlertCaliforniaRefresh();
+    if (mapState.firePerimetersVisible) scheduleFirePerimeterRefresh();
+    if (mapState.fireDetectionsVisible) scheduleFireDetectionRefresh();
 
     if (!mapState.smokeOverlayVisible || !smokeLayer) return;
     var visibleCount = 0;
