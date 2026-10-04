@@ -1,13 +1,13 @@
 # Mauri's Weather & Water Conditions
 
-A Go service for San Francisco Bay and Delta sailing conditions. It combines NOAA/NDBC wind observations, NOAA CO-OPS current predictions, National Weather Service forecast context, and optional map overlays into a practical browser dashboard, text reports, JSON output, and a compact voice-oriented Bottom Line.
+A Go service for San Francisco Bay and Delta sailing conditions. It combines NOAA/NDBC wind observations, NOAA CO-OPS current predictions, National Weather Service forecast context, and optional map overlays, including recent public AIS vessel tracks, into a practical browser dashboard, text reports, JSON output, and a compact voice-oriented Bottom Line.
 
 The default wind station is **PSBC1**.
 
 ## Current release
 
-**Public version: 1.13.0**  
-**Generated source lineage: v333**
+**Public version: 1.14.0**  
+**Generated source lineage: v336**
 
 **Current SST status:** deferred/disabled in v195; see **Deferred SST — future approach** below.
 **Current chlorophyll status:** both Chlorophyll Field and Chlorophyll Contours are deferred/disabled in v198.
@@ -17,6 +17,37 @@ Version 1.9.2 builds on the streamlined browser workflow with clearer observatio
 
 
 
+
+
+## v336 / 1.14.0 AIS explicit refresh control
+
+- Advances the generated development build to **v336** while retaining public/application version **1.14.0**.
+- Changes the visible **Load track** action to call `/ais-track?query=...&refresh=1`, so pressing the button explicitly bypasses any still-fresh in-memory track cache entry for that vessel.
+- The Go `/ais-track` handler now recognizes `refresh=1` and performs a fresh Open Waters `/v1/vessels/{mmsi}/track` request, then replaces the corresponding 10-minute server cache entry with the returned track.
+- Normal non-refresh AIS requests retain the existing 10-minute in-memory cache behavior. Vessel-name resolution may still use its short-lived cached Open Waters search response; the resolved vessel's actual track is refreshed by the Load track action.
+- Preserves the v335 Go-toolchain compatibility requirement by continuing to use `ioutil.ReadAll(...)`; no `io.ReadAll(...)` calls are introduced.
+- No temperature-playback, weather, swell, currents, or other overlay behavior is changed.
+- `main.go` candidate SHA-256 for this build: `9263af54e029e55f3d1c94b8bc2eecd3d299dcdc8f4136a10705d4d4a598060c`.
+
+## v335 / 1.14.0 Go compatibility repair
+
+- Advances the generated development build to **v335** while retaining public/application version **1.14.0**.
+- Fixes the v334 compile failure on the project's established Go toolchain by replacing the new AIS code's `io.ReadAll(...)` call with the existing compatibility-safe `ioutil.ReadAll(...)` pattern already used throughout this codebase.
+- Preserves the v334 AIS vessel-track feature, Open Waters integration, 10-minute in-memory cache, map controls, and all v333 temperature-playback behavior unchanged.
+- This deliberately follows the same compatibility rule documented by the earlier v274 repair: do not introduce `io.ReadAll` into this project unless the supported Go baseline is explicitly raised.
+- `main.go` candidate SHA-256 for this build: `ad3bbf47dfa5e8c327669f68f246c1f44789849b0d811d2d473f9f4e1423f716`.
+
+## v334 / 1.14.0 AIS vessel-track overlay
+
+- Advances the public/application version to **1.14.0** and generated build to **v334** because this build adds a new user-facing map capability rather than refining an existing feature.
+- Adds a new **Vessels → AIS Vessel Track (Open Waters)** section to Map Overlays with a **Vessel name or MMSI** field plus **Load track** and **Clear** controls.
+- Adds server endpoint **`/ais-track?query=...`**. A 9-digit MMSI is used directly; a vessel-name query is resolved through the public Open Waters `/v1/vessels?q=` lookup. Exact case-insensitive name matches are preferred. If a partial name is ambiguous, the endpoint returns candidate vessel names/MMSIs instead of silently selecting one.
+- Fetches the selected vessel's public **`/v1/vessels/{mmsi}/track`** history through the Go service. Anonymous Open Waters access currently reaches up to the most recent **48 hours**; AIS reception gaps remain visible rather than being synthetically filled.
+- Adds a **10-minute in-memory server cache** for successful Open Waters search/track responses. No persistent database, disk, WebSocket, background AIS collector, or real-time session is required; a Render restart simply causes the next user request to fetch the public history again.
+- Renders the returned GeoJSON track as a Leaflet polyline and marks the latest known AIS position. The latest-position popup shows vessel name, MMSI, report time, SOG, COG, and latitude/longitude. Loading a track fits the map to the returned recent track.
+- Adds an AIS marker/track entry to the Map Legend and credits the **Open Waters AIS HTTP API** in Map & Data Sources. The overlay is explicitly planning context and not a navigation system.
+- Keeps the v333 air-temperature persistent-canvas renderer, NOW control, playback behavior, and all existing weather/water overlays unchanged.
+- `main.go` candidate SHA-256 for this build: `cd8d3d6c699a3bf750d7a987a746d80fea5d750433de6e7f08c184794e11e81c`.
 
 ## v333 / 1.13.0 persistent temperature canvas and NOW control
 
@@ -1609,7 +1640,7 @@ The project uses three-part versions:
 - **minor** — new feature or significant behavior change
 - **micro** — small UI polish or minor refinement
 
-The current release candidate is **1.13.0**. Generated source builds also carry a separate `buildVersion` identifier so test clients can distinguish successive candidates.
+The current release candidate is **1.14.0**. Generated source builds also carry a separate `buildVersion` identifier so test clients can distinguish successive candidates.
 
 ### 1.9.1 / v131
 
@@ -2379,18 +2410,18 @@ This section is the authoritative development handoff for this repository. A new
 
 <!-- PROJECT-STATE:BEGIN -->
 
-- Public app version: **1.13.0**
-- Generated source build: **v333**
-- Next generated source build: **v334**
+- Public app version: **1.14.0**
+- Generated source build: **v336**
+- Next generated source build: **v337**
 - Authoritative repository: **https://github.com/richard-mauri/pittsburg-saildata**
 - Authoritative branch: **main**
-- Release status: **v333 / 1.13.0 development candidate — persistent temperature canvas and NOW control**
+- Release status: **v336 / 1.14.0 development candidate — AIS Load Track explicit refresh**
 
 ### Managed-file checkpoints
 
 | Repository file | SHA-256 |
 | --- | --- |
-| `main.go` | `3b4d6aaa8600d54fae82096cdaef053111f2b2a49a0e4e87da43108f59a40603` |
+| `main.go` | `9263af54e029e55f3d1c94b8bc2eecd3d299dcdc8f4136a10705d4d4a598060c` |
 | `assets/yogiisms.txt` | `4ebf00217e194ee26a8e8fe38237b298800b36ead0c64accdbb82f623c142371` |
 | `assets/fishing_reports.json` | `02b01de77784153157c6a4a60d6ad21e286f7c191bbe204fed605659ea15ca5e` |
 | `check-project-state.sh` | `85fa5062e2ae4509174b6843ebc0066f4a94e2f2e90001230ca74c07aeb500dc` |
@@ -2407,9 +2438,9 @@ The generated build number is immutable. Any change to generated Go source bytes
 
 The public application version and generated build are separate identities. The current runtime identity is expected to render as:
 
-`Version 1.13.0 · Build v333`
+`Version 1.14.0 · Build v336`
 
-For future public pushes, increment the patch/micro version (`1.9.2` → `1.9.3` → `1.9.4`, and so on). Existing Git release tags are immutable: never reuse or move an existing version tag.
+For future public pushes, choose the semantic version deliberately: patch for fixes/refinements, minor for backward-compatible user-facing features, and major only for incompatible changes. Existing Git release tags are immutable: never reuse or move an existing version tag.
 
 ### Verification workflow
 
