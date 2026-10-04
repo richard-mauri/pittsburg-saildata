@@ -6,8 +6,8 @@ The default wind station is **PSBC1**.
 
 ## Current release
 
-**Public version: 1.12.9**  
-**Generated source lineage: v300**
+**Public version: 1.13.0**  
+**Generated source lineage: v333**
 
 **Current SST status:** deferred/disabled in v195; see **Deferred SST — future approach** below.
 **Current chlorophyll status:** both Chlorophyll Field and Chlorophyll Contours are deferred/disabled in v198.
@@ -17,6 +17,244 @@ Version 1.9.2 builds on the streamlined browser workflow with clearer observatio
 
 
 
+
+## v333 / 1.13.0 persistent temperature canvas and NOW control
+
+- Advances the generated development build to **v333** while retaining public/application version **1.13.0**.
+- Replaces forecast playback's repeated PNG data-URL / `L.imageOverlay.setUrl(...)` frame updates with one persistent Leaflet canvas overlay. Forecast pixels are written directly into that mounted canvas with `putImageData()`, avoiding browser image-source replacement and decode gaps during animation.
+- The first forecast canvas is fully painted before it is added to the map, so the observed-to-forecast crossfade always has a renderable destination. Subsequent forecast frames repaint the same canvas in place rather than replacing the layer or its image source.
+- Keeps v331/v332 playback timing, fractional resume behavior, 15-minute manual stepping, and v329 one-valid-anchor NoData fallback unchanged.
+- Adds a dedicated **NOW** button to the on-map air-temperature transport. NOW stops playback, returns the slider and committed timeline state to 0h, and restores the observed NDBC/METAR temperature field.
+- Returning from forecast to observed now waits for a replacement image layer to load when an old temperature layer is still visible; prepainted forecast canvas layers bypass that wait because they are immediately renderable.
+- No changes are made to the fixed temperature palette, NDFD anchor cadence, speed/range choices, grid dimensions, or the CONUS Zoom 4+ restriction.
+- `main.go` candidate SHA-256 for this build: `3b4d6aaa8600d54fae82096cdaef053111f2b2a49a0e4e87da43108f59a40603`.
+
+## v332 / 1.13.0 observed-to-forecast flash suppression
+
+- Advances the generated development build to **v332** while retaining public/application version **1.13.0**.
+- Changes only the first observed-to-forecast temperature handoff used when playback leaves NOW.
+- Keeps the observed temperature layer fully visible until the newly created forecast `L.imageOverlay` fires its Leaflet `load` event, confirming that the forecast image is actually renderable.
+- Only after that load event does the normal 320 ms crossfade begin, preventing a transient bare-map flash caused by fading the observed layer before the forecast image had painted.
+- Forecast-to-forecast playback remains on the existing forecast layer and keeps the v331 continuous NOW-to-+3h playback path, v330 fractional resume behavior, and v329 one-valid-anchor NoData fallback unchanged.
+- No changes are made to temperature interpolation math, forecast timing, 15-minute manual stepping, speed/range controls, palette, grid dimensions, or the CONUS Zoom 4+ restriction.
+- `main.go` candidate SHA-256 for this build: `3461e6c1bea114c1eed3ad15576bb276611bf8d3b1e72d74a3322be4fc934c21`.
+
+## v331 / 1.13.0 continuous playback start from NOW
+
+- Advances the generated development build to **v331** while retaining public/application version **1.13.0**.
+- Removes the v330 playback-start special case that assigned the timeline directly from NOW to **+3h** before animation began.
+- Starting Play at NOW now enters the same client-side NDFD interpolation path used by later forecast segments, animating continuously from **0h to +3h** instead of committing +3h first.
+- Keeps fractional resume behavior from v330: Play commits the slider's visible quarter-hour position and continues from that exact time.
+- Keeps v329's immediate one-valid-anchor NoData fallback and the existing 15-minute manual stepping unchanged.
+- At the selected playback-range endpoint, playback resets to observed NOW and then continues forward on the normal playback path.
+- No changes are made to temperature palette, NDFD grid dimensions, speed/range choices, map controls, or the CONUS Zoom 4+ restriction.
+- `main.go` candidate SHA-256 for this build: `e3d9da9ef7d3f833bcc55714f9c7339b0eef3cd8040641c7e32445690baa883b`.
+
+## v330 / 1.13.0 playback resume and anchor-boundary continuity
+
+- Advances the generated development build to **v330** while retaining public/application version **1.13.0**.
+- Keeps v329's 15-minute manual stepping and immediate one-valid-anchor NoData fallback unchanged.
+- Fixes Play after a manual slider move by committing the slider's current quarter-hour value into both committed forecast state and displayed forecast state before playback resumes.
+- Playback resumed from a fractional time now fetches the surrounding official three-hour NDFD anchors rather than attempting to request a nonexistent fractional-hour NDFD grid.
+- Changes forecast playback interpolation to use the current fractional time within its surrounding anchor pair, so resume from values such as +4h 15m continues forward from that exact displayed position.
+- Removes the inter-segment hold for forecast-to-forecast playback. Once a three-hour anchor is reached, the next segment begins immediately; the following anchor is preloaded in the background.
+- Uses linear elapsed-time progression across each anchor interval instead of restarting a smoothstep easing curve at every three-hour boundary, avoiding the visible slow-down/restart that could look like abrupt jumps.
+- Leaves NOW observed behavior, forecast range controls, speed controls, map controls, grid dimensions, fixed temperature palette, and CONUS Zoom 4+ restriction unchanged.
+- `main.go` candidate SHA-256 for this build: `e8eef5571d837c9a356cb29ae5156abd3f6687873d2652f69ab47cbcedad791b`.
+
+## v329 / 1.13.0 temperature interpolation NoData fallback repair
+
+- Advances the generated development build to **v329** while retaining public/application version **1.13.0**.
+- Keeps the confirmed-working **v326/v315 playback renderer** and the v327/v328 15-minute manual stepping behavior intact.
+- Removes the old **0.65 blend-threshold** fallback that left the temperature overlay transparent when only one of the two surrounding three-hour NDFD anchor grids had a valid cell.
+- When both surrounding anchor cells are valid, temperature remains linearly interpolated. When only the lower anchor is valid, that lower value is retained; when only the upper anchor is valid, that upper value is used immediately. Only locations with no valid value in either anchor remain transparent.
+- Applies the same fallback inside the shared forecast-grid renderer used by manual stepping and playback, preventing the first seven 15-minute steps from going blank solely because the 0-hour anchor contains NoData where the +3-hour anchor is valid.
+- No cache-envelope, playback scheduling, layer lifecycle, speed, range, or map-control behavior is changed in this build.
+- `main.go` candidate SHA-256 for this build: `52d0312f5200c9b1df1e03e96a0300208584bf276fb2488c32933d37b375ee7e`.
+
+## v328 / 1.13.0 canonical artifact regeneration
+
+- Advances the generated development build to **v328** while retaining public/application version **1.13.0**.
+- Carries forward **v327** temperature behavior unchanged, including the confirmed-working playback renderer and 15-minute manual Previous/Next interpolation.
+- This build is an artifact-handoff regeneration only; no map, playback, forecast-grid, or temperature-rendering behavior is intentionally changed.
+- Preserves the canonical generated source filename **`main-updated-v328.go`** for the existing download/build/test workflow.
+- `main.go` candidate SHA-256 for this build: `76bcef8d6cb73c870733d44575c0e382d6159997c4f8c1a2c1ba69c52eac34d2`.
+
+## v327 / 1.13.0 15-minute manual temperature stepping
+
+- Advances the generated development build to **v327** while retaining public/application version **1.13.0**.
+- Keeps the confirmed-working **v326/v315 playback renderer and playback lifecycle unchanged**.
+- Changes manual Air Temperature Previous/Next stepping from the official three-hour anchors to **15-minute increments**. Keyboard Left/Right uses the same 15-minute increment; Home still returns to NOW and End moves to the selected range endpoint.
+- Manual fractional forecast times are rendered by numerically interpolating the two surrounding official three-hour NOAA/NWS NDFD temperature grids. No fictitious 15-minute NOAA forecast cycles are claimed.
+- Adds the NDFD **0-hour/model-NOW** grid as the lower interpolation anchor for +0:15 through +2:45 manual steps. The existing observed NOW display remains the timeline value at exactly 0.
+- Keeps Play/Pause behavior, playback speed **0.5× / 1× / 2×**, playback range **6h / 12h / 24h**, grid dimensions, layer transitions, and playback scheduling exactly on the v326 baseline.
+- Updates the on-map Previous/Next accessibility labels to **Previous 15 minutes** and **Next 15 minutes**.
+- `main.go` candidate SHA-256 for this build: `8db265d88ef8f70ec2426442a014e67ffdb03ba46b456d1f89b73b40e14b75da`.
+
+## v326 / 1.13.0 playback baseline reset
+
+- Advances the generated development build to **v326** while retaining public/application version **1.13.0**.
+- Resets the Air Temperature playback implementation to the last explicitly observed working renderer from **v315** rather than continuing the experimental v321-v325 playback/cache lineage.
+- Keeps v315's client-interpolated NDFD playback/layer lifecycle intact; the later persistent-canvas/cache experiments are intentionally not carried forward in this candidate.
+- Restores compact on-map playback controls without changing the v315 forecast renderer: previous/next official 3-hour forecast anchor, Play/Pause, playback speed **0.5× / 1× / 2×**, and playback range **6h / 12h / 24h**.
+- Playback duration scales with the selected speed, and the loop/preload endpoint respects the selected range.
+- Manual previous/next stepping deliberately remains on official three-hour forecast anchors in this regression-reset build. Fifteen-minute manual stepping is **not** reintroduced here so it cannot contaminate validation of the known-good playback renderer; it can be added separately after playback is confirmed stable.
+- Retains the v315 map-mounted live temperature time badge, numeric NDFD interpolation during playback, fixed −10°F to 110°F palette, and CONUS Zoom 4+ restriction.
+- The v316-v325 temperature experiments remain historical generated builds but are superseded for this regression-reset source line.
+- `main.go` candidate SHA-256 for this build: `7344705acfd43c6cbd639cc81421ac13a586ad8b244eedbf1675452c0625fc05`.
+
+## v315 / 1.13.0 map-mounted live temperature timeline
+
+- Advances the generated development build to **v315** while retaining public/application version **1.13.0**.
+- Moves the active Air Temperature time readout out of the Map Overlays popup and onto the map itself as a compact non-interactive badge, so the overlay menu can be closed while playback continues without obscuring the forecast field.
+- Removes the popup's **Selected:** time line. The map badge now reports **Air Temperature · NOW · Observed** at NOW and the active forecast offset directly on the map. During interpolation it reports the fractional playback position, such as **+4h 25m · Interpolated forecast**.
+- Changes the temperature range input from a three-hour-only range to a fine-grained display range and updates its thumb continuously during client-side NDFD interpolation. The slider therefore tracks the same interpolated time as the rendered field instead of jumping only at +3 h anchor times.
+- Keeps manual forecast commits snapped to official three-hour NDFD anchors; Left/Right keyboard stepping still moves one three-hour anchor, while Home selects NOW and End selects +24 h. The finer slider resolution is used for playback/preview position rather than claiming additional NOAA forecast cycles.
+- Smooths the initial NOW → +3 h playback indicator across the existing atomic observed-to-forecast layer transition. The +24 h → NOW loop reset remains an intentional product-boundary reset because NOW observations and forecast guidance are different source products.
+- Closing the Map Overlays menu does not stop playback. The Play/Pause control and slider remain in the menu, while the live playback state remains visible on the map.
+- Retains v314's numeric-grid NDFD interpolation, field-matched pointer sampling, fixed −10°F to 110°F palette, and all unrelated map/report behavior.
+- `main.go` candidate SHA-256 for this build: `4e0bfc604830e921a14b59d687f3d9db0fd6a2ac3a0bb4d946cf5257bdd18be7`.
+
+## v314 / 1.13.0 client-interpolated NDFD temperature animation
+
+- Advances the generated development build to **v314** while retaining public/application version **1.13.0**.
+- Replaces the forecast-temperature playback path that swapped rendered three-hour PNG frames with a **client-interpolated temperature-grid animation**. The sailing service now requests the selected NOAA/NWS NDFD raster at a bounded grid resolution, decodes each cell to a temperature using NOAA's published raster legend, and sends those scalar temperatures to the browser in a compact base64-packed signed-16-bit grid.
+- The browser renders forecast temperature with the app's fixed **−10°F to 110°F** palette and numerically interpolates each grid cell between adjacent NDFD forecast times. Playback therefore creates genuine intermediate scalar fields between the real +3 h forecast frames instead of merely cross-fading two colored images.
+- Forecast playback preloads the adjacent NDFD grid, animates each three-hour interval over about **1.35 seconds** with smoothstep temporal interpolation, and updates the map at roughly 18 frames per second. The underlying published forecast anchors remain +3 h, +6 h, ... +24 h; fractional times shown during playback are explicitly interpolated visual states.
+- The forecast pointer inspector now samples the same client-side scalar grid currently being rendered, including the interpolated field during playback. This removes the separate pointer-network lookup from the normal forecast-hover path and keeps pointer values synchronized with the visible temperature field.
+- Strengthens keyboard control of the temperature timeline for Safari/WebView/Leaflet combinations: the slider explicitly claims focus on pointer interaction, Left/Right step one three-hour forecast frame, Home selects NOW, and End selects +24 h. A capture-phase keyboard handler prevents Leaflet map navigation from consuming those keys while the temperature slider owns focus.
+- Keeps the v310 observed-temperature sparse-coverage fade and the existing observed NOW product. The NOW↔forecast product boundary still uses an atomic layer transition, while forecast-to-forecast motion is now scalar-grid interpolation rather than PNG swapping.
+- NOAA's current NDFD map service advertises a default **3-hour** time interval and the temperature image layers used here remain the official forecast anchors; this build does not invent additional NOAA forecast cycles. Intermediate animation frames are calculated locally from adjacent official fields.
+- `main.go` candidate SHA-256 for this build: `8c1c7ab596bc3b5b362c9e0ca630cd596234079ad42ca3cf0ba4b9a32b17acb9`.
+
+## v313 / 1.13.0 temperature playback smoothing + keyboard stepping
+
+- Advances the generated development build to **v313** while retaining public/application version **1.13.0**.
+- Makes temperature-frame changes **atomic**: the currently visible frame remains on the map until the replacement NOW/forecast frame has loaded and is ready to display, eliminating the blank transition seen when looping from +24 h back to NOW.
+- Adds a short **320 ms opacity cross-fade** between the old and new temperature layers so Play/Pause animation and manual timeline changes are visually smoother instead of abruptly swapping rasters.
+- Keeps playback frame-aware: the next frame is not scheduled until the cross-fade has completed successfully. A failed frame still stops playback rather than skipping ahead.
+- Adds explicit keyboard control to the Air Temperature range input: **Left Arrow** steps back 3 hours, **Right Arrow** steps forward 3 hours, **Home** jumps to NOW, and **End** jumps to +24 h. Keyboard stepping pauses playback and loads the selected frame immediately.
+- Retains v312 Play/Pause looping, v311 field-matched NDFD pointer sampling, v310 soft observed-coverage fade, fixed −10°F to 110°F Map Legend scale, CONUS-only / Zoom-4+ limits, and all unrelated map/report behavior.
+- `main.go` candidate SHA-256 for this build: `edfcf04015fb3a23eb4105b56a920f35e6cabc635345841782f49264cdf44f86`.
+
+## v312 / 1.13.0 temperature timeline playback
+
+- Advances the generated development build to **v312** while retaining public/application version **1.13.0**.
+- Adds a compact **Play / Pause** control beside the Air Temperature time slider. Playback loops continuously through **NOW, +3 h, +6 h, +9 h, +12 h, +15 h, +18 h, +21 h, +24 h**, then returns to NOW.
+- Playback is frame-aware rather than timer-blind: the next step is scheduled only after the current observed or NOAA/NWS NDFD forecast temperature frame finishes loading successfully, followed by a short display hold.
+- Manual slider movement immediately pauses playback, and disabling the Air Temperature overlay also stops the animation and clears its timer. A failed temperature frame stops playback instead of skipping ahead through unresolved requests.
+- The button changes between **▶ Play** and **❚❚ Pause**, exposes pressed state for assistive technology, and is disabled whenever the Air Temperature overlay itself is disabled.
+- Retains v311's field-matched NDFD forecast pointer sampling, v310 soft observed-coverage fade, Map Legend temperature scale, unified NOW-to-+24 h timeline, Web-Mercator alignment, CONUS-only / Zoom-4+ limits, and unrelated map/report behavior.
+- `main.go` candidate SHA-256 for this build: `36ec0e216a17fd86c97cff2e2068c8d896797b014ba6220e6197ea52706dafbd`.
+
+## v311 / 1.13.0 NDFD field-matched forecast pointer
+
+- Advances the generated development build to **v311** while retaining public/application version **1.13.0**.
+- Replaces the v310 forecast pointer's separate NWS hourly point-forecast lookup with a value derived from the **same NOAA/NWS NDFD raster layer used to draw the selected +3 h through +24 h forecast overlay**.
+- For a forecast pointer request, the server requests a small Web-Mercator NDFD export centered on the pointer from the same forecast-hour layer, samples the rendered center pixels, and matches their RGB value against NOAA's own legend for that raster layer. This makes the tooltip follow the displayed forecast field instead of failing where the separate point-forecast API has no hourly product.
+- Caches the NOAA NDFD legend palette by layer so pointer movement does not re-download the large legend definition on every sample.
+- Keeps v310's soft observed-coverage fade, NOW observed pointer interpolation, fixed **−10°F to 110°F** Map Legend scale, unified NOW-to-+24 h timeline, Web-Mercator alignment, CONUS-only / Zoom-4+ limits, and unrelated map/report behavior.
+- `main.go` candidate SHA-256 for this build: `2c4f5342e588ab793063065bdb6bcd05cca070acca7283c9181b8cba4bb24f74`.
+
+## v310 / 1.13.0 soft observed coverage + reliable forecast pointer lookup
+
+- Advances the generated development build to **v310** while retaining public/application version **1.13.0**.
+- Replaces the v309 observed-temperature heat map's hard maximum-distance cutoff with a **smooth sparse-coverage fade**. The local 8-neighbor inverse-distance interpolation still preserves regional structure, but pixels now taper gradually to transparent as the nearest usable observation becomes distant instead of ending in blocky geometric holes.
+- Tightens the fully authoritative observed-temperature radius and limits the outer fade radius so the map does not imply precise observed air temperature far offshore where NDBC/METAR coverage is sparse.
+- Replaces the v309 forecast pointer inspector's unreliable ArcGIS/NDFD raster `identify` request with the official **NOAA/NWS hourly point forecast**. For a +3 h through +24 h slider selection, the server chooses the hourly forecast period whose valid time is nearest the requested future time and returns its temperature to the pointer tooltip.
+- Forecast pointer readouts include the nearest valid local forecast time when available; the visual forecast raster remains the NOAA/NWS NDFD gridded temperature layer, so the point readout and rendered raster remain separate NWS products and may differ slightly.
+- Keeps the fixed **−10°F to 110°F** legend embedded in the Map Legend, the unified NOW-to-+24 h timeline, Web-Mercator raster alignment, CONUS-only / Zoom-4+ limits, and all unrelated map/report behavior.
+- `main.go` candidate SHA-256 for this build: `34fc388d930d74621271d250a801b14fcf4f7abddcc12f6af1e456e25f02f08a`.
+
+## v309 / 1.13.0 temperature legend card + pointer inspector
+
+- Advances the generated development build to **v309** while retaining public/application version **1.13.0**.
+- Moves the fixed **−10°F to 110°F Air Temperature scale** into the existing **Map Legend** card instead of rendering it as a separate status-row legend below the map.
+- Adds a Zoom-Earth-style pointer temperature inspector while the Air Temperature overlay is enabled. At **NOW**, moving the pointer reports the same local 8-neighbor interpolated NDBC + METAR observed temperature used to render the heat map.
+- At **+3 h through +24 h**, pointer movement performs a throttled point identify against the active NOAA/NWS NDFD temperature layer through the sailing service and reports the forecast temperature for the selected forecast hour.
+- Keeps the temperature raster non-interactive so the inspector does not block normal Leaflet panning/zooming or selected-location behavior. The pointer readout disappears when the cursor leaves the map or when the Air Temperature overlay is disabled.
+- Retains v308 Web-Mercator raster alignment, v307 local-neighbor interpolation, the unified NOW-to-+24 h timeline, CONUS-only / Zoom-4+ limits, and all unrelated map/report behavior.
+- `main.go` candidate SHA-256 for this build: `ae6bed20f11c40634e8c3282987b5cbae22fb233383b4ef0a390ac6277e4cac7`.
+
+## v308 / 1.13.0 Web-Mercator temperature alignment + persistent scale
+
+- Advances the generated development build to **v308** while retaining public/application version **1.13.0**.
+- Fixes the CONUS temperature-overlay registration error visible at wide map views. The prior forecast request asked NOAA/NWS NDFD for an **EPSG:4326** raster and then stretched that latitude/longitude image into Leaflet's **EPSG:3857 Web-Mercator** map plane, causing coastlines, state boundaries, and other geographic features to drift out of alignment.
+- Requests NDFD forecast imagery with both `bboxSR=3857` and `imageSR=3857`, using the exact Leaflet-projected meter bounds and disabling ArcGIS aspect-ratio adjustment so the returned forecast raster uses the same map projection and extent as the Leaflet overlay.
+- Rebuilds the **NOW / observed** interpolation canvas on a Web-Mercator pixel grid as well. Each raster pixel is sampled at its EPSG:3857 map position and unprojected to latitude/longitude only for local-neighbor temperature interpolation, avoiding the smaller but related latitude-stretch error in the observed layer.
+- Keeps the **−10°F to 110°F** temperature scale visible when moving from NOW into +3 h through +24 h forecast positions instead of hiding the legend for forecast frames.
+- Retains v307's unified NOW-to-+24 h timeline, local 8-neighbor observed interpolation, CONUS-only / Zoom-4+ limits, NDBC + METAR observation source, NOAA/NWS NDFD forecast source, and all unrelated map/report behavior.
+- `main.go` candidate SHA-256 for this build: `690b8577561a985a89b4842057b5d6da9ae819bd0bbcae96c8f8096ea01845da`.
+
+## v307 / 1.13.0 unified temperature timeline + local interpolation
+
+- Advances the generated development build to **v307** while retaining public/application version **1.13.0**.
+- Removes the separate **Observed / Forecast** radio controls from the Air Temperature overlay. A single discrete time slider now controls the product: **NOW** uses current observations, while **+3 h through +24 h** automatically use NOAA/NWS NDFD forecast guidance.
+- Labels the selected slider position with both time and source, e.g. **Selected: NOW · Observed · NDBC + METAR** or **Selected: +6h · Forecast · NOAA/NWS NDFD**.
+- Keeps the temperature time control visible directly beneath the Air Temperature checkbox and disables it only when the overlay itself is off.
+- Replaces the v306 observed all-station weighted average with **local 8-neighbor inverse-distance interpolation** in geographic distance. Each raster cell uses only nearby stations within a zoom-dependent influence radius, preventing broad CONUS views from collapsing toward a nearly uniform continental mean.
+- Uses stronger local weighting and a maximum influence radius that tightens as the user zooms in, preserving coastal, valley, desert, mountain, and regional temperature gradients while avoiding unsupported long-distance extrapolation.
+- Refines the fixed **−10°F to 110°F** observed palette for greater visual separation through the common 50–90°F range.
+- Retains the CONUS-only, Zoom-4+ performance limits, NDBC + METAR 90-minute observation freshness policy, NOAA/NWS NDFD future forecast source, v305 wind-barb compile repair, and v306 accordion clipping repair.
+- `main.go` candidate SHA-256 for this build: `413913d8c6e978aa066c8de7a1decb9a32ff6deedd4e87e1e3a523ea38363738`.
+
+## v306 / 1.13.0 Air Temperature control clipping repair
+
+- Advances the generated development build to **v306** while retaining public/application version **1.13.0**.
+- Fixes the unusable **Observed / Forecast** controls in the **Weather & Hazards** accordion. The parent `.map-overlay-group` no longer clips overflowing child content, so the Air Temperature mode row and forecast controls remain fully visible inside the open group.
+- Compacts the Air Temperature control block directly beneath the checkbox and labels the mode row explicitly as **Mode: Observed / Forecast**.
+- Keeps the mode controls visible-but-disabled when the Air Temperature overlay is off and enables them immediately when the overlay is on. Forecast-only time controls continue to appear only in Forecast mode.
+- Shortens the inline source note to reduce vertical height while retaining the **CONUS only · Zoom 4+** limitation and the NDBC + METAR / NOAA-NWS NDFD source distinction.
+- Keeps v305's wind-barb compile repair, v304's CONUS/Zoom-4 performance limits, and the fixed −10°F to 110°F temperature palette unchanged.
+- `main.go` candidate SHA-256 for this build: `3ea3f8bc84dde17c69caaeb3b33cc978ac45329d621782617087a0bddb9dd1bf`.
+
+## v305 / 1.13.0 wind-barb bounds compile repair
+
+- Advances the generated development build to **v305** while retaining public/application version **1.13.0**.
+- Fixes the v304 compile failure `undefined: longitudeInWrappedBounds` in the `/wind-barbs` handler.
+- Restores the marine wind-barb station filter to its original direct viewport longitude test (`minLon <= station.Lon <= maxLon`). The wrapped-longitude helper belongs only to the earlier temperature-overlay implementation and must not be referenced by the wind-barb endpoint.
+- Makes no intended change to v304 CONUS temperature coverage, Zoom 4 minimum, Observed/Forecast controls, forecast slider, fixed −10°F to 110°F palette, or any other map/report behavior.
+- `main.go` candidate SHA-256 for this build: `d4b26a6664db265253ecf3cda2181156e7089f8ae30956ce59b8dfd5c160ee54`.
+
+## v304 / 1.13.0 CONUS temperature scope and mode-control repair
+
+- Advances the generated development build to **v304** while deliberately retaining public/application version **1.13.0** within the air-temperature feature line.
+- Limits both Observed and Forecast air-temperature overlays to the **contiguous United States (CONUS)** and requires **Zoom 4 or closer** before rendering. This removes the unnecessary world-scale interpolation/world-wrap path that could freeze the UI or leave incomplete temperature coverage at very wide zoom levels.
+- The `/air-temperature-overlay` endpoint now clamps requests to approximately **20–55°N, 130–60°W** and returns no temperature field outside that domain.
+- Removes the browser-side longitude-copy expansion used by the v303 observed heat map; observed interpolation now works only with real CONUS station coordinates inside a bounded padded viewport.
+- Reduces the observed interpolation raster workload for smoother map interaction while retaining the fixed **−10°F to 110°F** meteorological palette.
+- Makes the **Observed / Forecast** mode controls persistently discoverable directly below the Air Temperature checkbox. When the overlay is off the mode controls remain visible but disabled; when enabled they become active immediately, including after restored map state, without requiring a checkbox-change event.
+- Forecast mode keeps the NOAA/NWS NDFD **Now through +24 h** control and is likewise limited to the CONUS/Zoom-4+ display domain.
+- Keeps the temperature overlay display-only and leaves selected location, wind/current station selection, current predictions, and unrelated overlays unchanged.
+- `main.go` candidate SHA-256 for this build: `f6c61e4ca45bea595e3951e63753fe34ec64b2896015f4434e9404582556a833`.
+
+## v303 / 1.13.0 air-temperature wrap, palette, and forecast mode
+
+- Advances the generated development build to **v303** while deliberately retaining public/application version **1.13.0**; this is the next candidate in the temperature-overlay feature line started by v302.
+- Fixes the observed temperature heat-map world-wrap/dateline bug that could leave a hard vertical uncovered strip at wide zoom levels. The observational viewport can now extend across wrapped longitudes, and station longitudes are repeated into the appropriate Leaflet world copy before interpolation.
+- Revises the fixed **−10°F to 110°F** observed-temperature palette so freezing and colder values occupy purple/blue/cyan, typical 50–70°F temperatures remain teal/green, yellow begins near the upper 70s/80s, and orange/red are reserved for hotter 90–110°F conditions.
+- Adds **Observed / Forecast** controls under the Air Temperature Heat Map. Observed mode keeps the NDBC + METAR interpolated field with the fixed scale and 90-minute freshness cutoff.
+- Adds NOAA/NWS **National Digital Forecast Database (NDFD)** gridded temperature as Forecast mode, with a **Now through +24 h** slider in 3-hour increments. Forecast imagery uses the official NDFD temperature rendering and remains display-only.
+- Switching modes removes the inactive temperature layer before loading the selected mode, and map movement refreshes the active mode without changing selected location, wind/current stations, forecasts elsewhere in the page, or report calculations.
+- Keeps SST deferred/disabled and retains all unrelated v302 behavior.
+- `main.go` candidate SHA-256 for this build: `1cb212d5ca5028663f999196955ca0874f0b1c697005347c60ab45709a58a5d2`.
+
+## v302 / 1.13.0 observed air-temperature heat map
+
+- Advances the generated development build to **v302** and begins public/application version **1.13.0** because the air-temperature heat map is a meaningful new user-facing map capability.
+- Adds **Air Temperature (NOAA/NDBC + METAR)** under **Map Overlays → Weather & Hazards** as a continuous interpolated color field rather than station icons.
+- Uses current NOAA/NDBC `ATMP` observations for marine/bay coverage together with Aviation Weather Center METAR air-temperature observations for inland coverage.
+- Loads observations for a padded map viewport and excludes observations older than **90 minutes** so stale stations do not distort the field.
+- Renders the interpolated field as a semi-transparent Leaflet image overlay and keeps the temperature color meaning fixed across pans, zooms, seasons, and locations with a **−10°F to 110°F** scale; values outside that range clamp to the endpoint colors.
+- Adds an on-map temperature legend/status line and keeps the heat map display-only: it does not change selected location, wind station, currents station, forecasts, or report calculations.
+- Removes stale user-facing references that still described **Sea Surface Temp** as an active overlay. SST itself remains deferred/disabled, as documented below.
+- Supersedes the unpaired **v301 / 1.12.9** draft. v301 should not be promoted because it retained the old semantic version contrary to this README's version-management policy and did not include the required companion README update.
+- `main.go` candidate SHA-256 for this build: `a0e66d9355a699950d16bd997bd609dc6c4c5e1169190164831de52d665b93b0`.
+
+## v301 / 1.12.9 superseded draft
+
+- Generated the first implementation of the observed air-temperature heat map, but incorrectly retained application version **1.12.9** and omitted the companion README regeneration.
+- This build number is consumed and immutable. Do not copy v301 to repository `main.go`; use **v302 / 1.13.0** instead.
 
 ## v300 / 1.12.9 Go compatibility repair
 
@@ -1080,52 +1318,177 @@ curl -sS \
 curl -sS "http://localhost:8080/health"
 ```
 
+### macOS daytime keepalive for Render
 
-### Go toolchain compatibility baseline
+The deployed Render service can be kept warm during the normal daytime sailing-planning window by having macOS call the existing lightweight `/health` endpoint every 10 minutes. No additional Go endpoint or keepalive mode is required.
 
-This repository intentionally targets **Go 1.13**, as declared by `go.mod`:
-
-```text
-module pittsburg-saildata
-
-go 1.13
-```
-
-All regenerated Go source must remain compatible with Go 1.13 unless the project explicitly decides to raise the minimum Go version and updates `go.mod` as part of that change.
-
-This is a hard compatibility constraint for ChatGPT-assisted regeneration. Before emitting a new `main-updated-vNNN.go`, verify that every newly introduced standard-library API existed in Go 1.13. Do not assume the toolchain is current merely because the generated code is being written today.
-
-Examples of APIs that must **not** be introduced while the project remains on Go 1.13 include:
+The local helper script is:
 
 ```text
-time.Time.UnixMilli   // added after Go 1.13
-io.ReadAll            // added after Go 1.13
-io.NopCloser          // added after Go 1.13
-os.ReadFile           // added after Go 1.13
-os.WriteFile          // added after Go 1.13
+cmd/keepalive.sh
 ```
 
-Use Go-1.13-compatible equivalents instead, for example:
+A minimal script is:
 
-```go
-milliseconds := parsed.UnixNano() / int64(time.Millisecond)
-body, err := ioutil.ReadAll(r)
-body, err := ioutil.ReadFile(path)
-err := ioutil.WriteFile(path, body, 0644)
+```bash
+#!/bin/bash
+curl -fsS --max-time 20 \
+  https://pittsburg-saildata.onrender.com/health \
+  >/dev/null 2>&1
 ```
 
-The existing source already uses older compatibility patterns such as `ioutil.ReadAll`; preserve those patterns unless the minimum Go version is deliberately changed.
+Make the script executable:
 
-For every regeneration that changes Go code:
+```bash
+chmod +x cmd/keepalive.sh
+```
 
-1. Treat **Go 1.13** as the compile target.
-2. Check every newly introduced standard-library function, method, type, and package feature against that target.
-3. Prefer APIs and idioms already present in the repository when they satisfy the requirement.
-4. Run `gofmt`.
-5. Run the project's local `go build ./...` and `go test ./...` with the actual installed/project toolchain before a candidate is considered validated.
-6. Do not describe a candidate as compile-validated unless it has actually been built with the project's compatible toolchain.
+The Mac uses a per-user `launchd` LaunchAgent:
 
-If a future feature genuinely requires a newer Go release, handle that as an explicit toolchain migration rather than silently introducing a newer API into generated source.
+```text
+~/Library/LaunchAgents/com.richardmauri.sailing-keepalive.plist
+```
+
+The LaunchAgent schedules 72 one-shot runs per day:
+
+- 05:30, 05:40, and 05:50
+- every 10 minutes from 06:00 through 16:50
+- 17:00, 17:10, and 17:20
+
+This covers the intended **5:30 AM through 5:30 PM** daytime keepalive window while allowing the Render service to idle normally afterward. `launchd` starts the script at each scheduled time; the script performs one health request and exits, so no shell process stays running between pings.
+
+A convenient way to generate the LaunchAgent from the repository root is:
+
+```bash
+python3 - <<'PY'
+import plistlib
+from pathlib import Path
+
+home = Path.home()
+script = Path.cwd() / "cmd" / "keepalive.sh"
+plist_path = home / "Library" / "LaunchAgents" / "com.richardmauri.sailing-keepalive.plist"
+
+schedule = []
+
+for minute in (30, 40, 50):
+    schedule.append({"Hour": 5, "Minute": minute})
+
+for hour in range(6, 17):
+    for minute in range(0, 60, 10):
+        schedule.append({"Hour": hour, "Minute": minute})
+
+for minute in (0, 10, 20):
+    schedule.append({"Hour": 17, "Minute": minute})
+
+plist = {
+    "Label": "com.richardmauri.sailing-keepalive",
+    "ProgramArguments": [
+        "/bin/bash",
+        str(script),
+    ],
+    "StartCalendarInterval": schedule,
+    "StandardOutPath": str(home / "Library" / "Logs" / "sailing-keepalive.log"),
+    "StandardErrorPath": str(home / "Library" / "Logs" / "sailing-keepalive-error.log"),
+}
+
+plist_path.parent.mkdir(parents=True, exist_ok=True)
+
+with plist_path.open("wb") as f:
+    plistlib.dump(plist, f)
+
+print(f"Created: {plist_path}")
+print(f"Script:  {script}")
+print(f"Events:  {len(schedule)} per day")
+PY
+```
+
+The generated schedule should report:
+
+```text
+Events:  72 per day
+```
+
+Validate the plist:
+
+```bash
+plutil -lint ~/Library/LaunchAgents/com.richardmauri.sailing-keepalive.plist
+```
+
+Load the LaunchAgent for the current logged-in user:
+
+```bash
+launchctl bootstrap gui/$(id -u) \
+  ~/Library/LaunchAgents/com.richardmauri.sailing-keepalive.plist
+```
+
+Inspect its status:
+
+```bash
+launchctl print gui/$(id -u)/com.richardmauri.sailing-keepalive
+```
+
+A scheduled one-shot job will normally show:
+
+```text
+state = not running
+```
+
+between invocations. That is expected; it does not mean the LaunchAgent is disabled.
+
+To force an immediate test run:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.richardmauri.sailing-keepalive
+```
+
+Then check the run count and most recent exit status:
+
+```bash
+launchctl print gui/$(id -u)/com.richardmauri.sailing-keepalive \
+  | grep -E 'runs|last exit code|state'
+```
+
+A successful test should show a run count greater than zero and:
+
+```text
+last exit code = 0
+```
+
+The configured log files are:
+
+```text
+~/Library/Logs/sailing-keepalive.log
+~/Library/Logs/sailing-keepalive-error.log
+```
+
+With the minimal silent `curl` script, those files may remain empty after successful runs.
+
+#### Temporarily turn the keepalive off and back on
+
+To temporarily disable the keepalive without deleting either the script or plist:
+
+```bash
+launchctl bootout gui/$(id -u) \
+  ~/Library/LaunchAgents/com.richardmauri.sailing-keepalive.plist
+```
+
+To turn it back on later:
+
+```bash
+launchctl bootstrap gui/$(id -u) \
+  ~/Library/LaunchAgents/com.richardmauri.sailing-keepalive.plist
+```
+
+To confirm whether it is currently loaded:
+
+```bash
+launchctl print gui/$(id -u)/com.richardmauri.sailing-keepalive
+```
+
+If the LaunchAgent is loaded, `launchctl print` displays its configuration and state. If it has been booted out, `launchctl` reports that the service could not be found.
+
+If the plist itself is edited, boot it out and bootstrap it again so `launchd` reloads the updated configuration.
+
 
 ### Generated artifact naming
 
@@ -1246,7 +1609,7 @@ The project uses three-part versions:
 - **minor** — new feature or significant behavior change
 - **micro** — small UI polish or minor refinement
 
-The current release candidate is **1.12.9**. Generated source builds also carry a separate `buildVersion` identifier so test clients can distinguish successive candidates.
+The current release candidate is **1.13.0**. Generated source builds also carry a separate `buildVersion` identifier so test clients can distinguish successive candidates.
 
 ### 1.9.1 / v131
 
@@ -2016,18 +2379,18 @@ This section is the authoritative development handoff for this repository. A new
 
 <!-- PROJECT-STATE:BEGIN -->
 
-- Public app version: **1.12.9**
-- Generated source build: **v300**
-- Next generated source build: **v301**
+- Public app version: **1.13.0**
+- Generated source build: **v333**
+- Next generated source build: **v334**
 - Authoritative repository: **https://github.com/richard-mauri/pittsburg-saildata**
 - Authoritative branch: **main**
-- Release status: **v300 / 1.12.9 development candidate — Go compatibility repair; SemVer review pending**
+- Release status: **v333 / 1.13.0 development candidate — persistent temperature canvas and NOW control**
 
 ### Managed-file checkpoints
 
 | Repository file | SHA-256 |
 | --- | --- |
-| `main.go` | `ed1ff163bebbd5843b5534f260cd3b4b43d368f38f53c71239b3166f99b70dd0` |
+| `main.go` | `3b4d6aaa8600d54fae82096cdaef053111f2b2a49a0e4e87da43108f59a40603` |
 | `assets/yogiisms.txt` | `4ebf00217e194ee26a8e8fe38237b298800b36ead0c64accdbb82f623c142371` |
 | `assets/fishing_reports.json` | `02b01de77784153157c6a4a60d6ad21e286f7c191bbe204fed605659ea15ca5e` |
 | `check-project-state.sh` | `85fa5062e2ae4509174b6843ebc0066f4a94e2f2e90001230ca74c07aeb500dc` |
@@ -2044,7 +2407,7 @@ The generated build number is immutable. Any change to generated Go source bytes
 
 The public application version and generated build are separate identities. The current runtime identity is expected to render as:
 
-`Version 1.12.9 · Build v300`
+`Version 1.13.0 · Build v333`
 
 For future public pushes, increment the patch/micro version (`1.9.2` → `1.9.3` → `1.9.4`, and so on). Existing Git release tags are immutable: never reuse or move an existing version tag.
 
@@ -2108,7 +2471,7 @@ Map controls place **Map Types**, **Map Overlays**, and **Center Map** on one ro
 
 NOAA Nautical Chart is considered practical at **Zoom 9+**. If Nautical is the preferred basemap and the user zooms below 9, Street Map is shown temporarily with a notice; Nautical automatically returns at Zoom 9+. Legitimate inland/no-chart blank areas at supported zooms are left unchanged.
 
-Map overlays include NWS forecast zone, NOAA HMS qualitative smoke, NOAA/NDBC Marine / Bay wind barbs, Aviation Weather Center METAR Land / Inland wind barbs, **Surface Pressure / Isobars**, **Global Swell Forecast**, **Sea Surface Temp**, NOAA/NESDIS cloud cover, and NEXRAD radar. Global Swell Forecast uses public PacIOOS/NOAA-NCEP WaveWatch III `shgt`, `sper`, and `sdir` fields for basin-scale swell tracking with a 0-to-120-hour forecast slider; it is not a surf-break forecast. The two wind-barb layers share buffered viewport loading but use independent observation networks; zoom-dependent collision thinning keeps wide-area views readable. Sea Surface Temp is deferred/disabled in v195; the future approach is documented in this README, variable `analysed_sst`, a daily global Level-4 blended SST field at about 5 km resolution. v191 uses the PFEL/ERD host and its matching `nesdis...` dataset identifier for the primary path, with a matching Central-host fallback only for SST imagery. v189 uses the current NOAA NESDIS ERDDAP identifier after the older `noaacwBLENDEDsstDNDaily` path stopped serving the deployed overlay. `/sst-info` resolves the latest available dataset time and `/sst-overlay` renders the current map bounds through ERDDAP `griddap` as a transparent PNG using a fixed **35–95°F** wide-area fishing-oriented scale. Because the ERDDAP source image is linear in latitude while Leaflet is EPSG:3857 Web Mercator, v180 server-side reprojects the SST scanlines into Web Mercator before returning the PNG. The browser displays that reprojected PNG as a normal Leaflet image overlay at 0.50 opacity. CoastWatch's native transparent/no-data edge is preserved and no secondary coastline mask is applied. The wider fixed range avoids painting most warm tropical/subtropical water with one saturated hottest color while preserving cross-view comparability. At low zooms, Leaflet world wrapping can extend the viewport outside -180°/+180°. v183 keeps the reliable single-image path: it clips the visible viewport to the one 360° world copy containing the map center, translates that interval into NOAA's canonical longitude range, and displays the returned SST image over only that clipped interval. The projection fix improves geographic alignment at wide map extents; the approximately 5 km source grid still limits shoreline-scale detail. Saildrone Observations is a separate optional moving-platform layer backed by NOAA PMEL public ERDDAP; it displays the latest available position and met-ocean readings from configured 2026 missions and is not treated as a persistent local station network. v187 discovers each mission's ERDDAP schema before requesting data, requires only time/position for plotting, and treats wind, SST, salinity, currents, and wave measurements as optional enrichments. HMS smoke uses the current warm yellow → amber → burnt-orange light/medium/heavy palette. Smoke is qualitative satellite analysis, not AQI or measured PM2.5. v298 adds separate NIFC/WFIGS current-fire-perimeter and NOAA HMS satellite-fire-detection overlays so visible fire context is not conflated with smoke-plume analysis. v299 filters WFIGS perimeter responses to the newest approved/public/visible perimeter per incident, preventing historical or duplicate source polygons for the same incident from stacking on the map.
+Map overlays include NWS forecast zone, NOAA HMS qualitative smoke, **Air Temperature (NOAA/NDBC + METAR)**, NOAA/NDBC Marine / Bay wind barbs, Aviation Weather Center METAR Land / Inland wind barbs, **Surface Pressure / Isobars**, **Global Swell Forecast**, NOAA/NESDIS cloud cover, and NEXRAD radar. The Air Temperature layer is an interpolated observational heat map with a fixed **−10°F to 110°F** color scale; it combines fresh NDBC `ATMP` and METAR temperatures and intentionally renders no station icons. Global Swell Forecast uses public PacIOOS/NOAA-NCEP WaveWatch III `shgt`, `sper`, and `sdir` fields for basin-scale swell tracking with a 0-to-120-hour forecast slider; it is not a surf-break forecast. The two wind-barb layers share buffered viewport loading but use independent observation networks; zoom-dependent collision thinning keeps wide-area views readable. Sea Surface Temp remains deferred/disabled since v195; historical implementation notes are retained below for reference, but SST is not an active Map Overlays control. v191 uses the PFEL/ERD host and its matching `nesdis...` dataset identifier for the primary path, with a matching Central-host fallback only for SST imagery. v189 uses the current NOAA NESDIS ERDDAP identifier after the older `noaacwBLENDEDsstDNDaily` path stopped serving the deployed overlay. `/sst-info` resolves the latest available dataset time and `/sst-overlay` renders the current map bounds through ERDDAP `griddap` as a transparent PNG using a fixed **35–95°F** wide-area fishing-oriented scale. Because the ERDDAP source image is linear in latitude while Leaflet is EPSG:3857 Web Mercator, v180 server-side reprojects the SST scanlines into Web Mercator before returning the PNG. The browser displays that reprojected PNG as a normal Leaflet image overlay at 0.50 opacity. CoastWatch's native transparent/no-data edge is preserved and no secondary coastline mask is applied. The wider fixed range avoids painting most warm tropical/subtropical water with one saturated hottest color while preserving cross-view comparability. At low zooms, Leaflet world wrapping can extend the viewport outside -180°/+180°. v183 keeps the reliable single-image path: it clips the visible viewport to the one 360° world copy containing the map center, translates that interval into NOAA's canonical longitude range, and displays the returned SST image over only that clipped interval. The projection fix improves geographic alignment at wide map extents; the approximately 5 km source grid still limits shoreline-scale detail. Saildrone Observations is a separate optional moving-platform layer backed by NOAA PMEL public ERDDAP; it displays the latest available position and met-ocean readings from configured 2026 missions and is not treated as a persistent local station network. v187 discovers each mission's ERDDAP schema before requesting data, requires only time/position for plotting, and treats wind, SST, salinity, currents, and wave measurements as optional enrichments. HMS smoke uses the current warm yellow → amber → burnt-orange light/medium/heavy palette. Smoke is qualitative satellite analysis, not AQI or measured PM2.5. v298 adds separate NIFC/WFIGS current-fire-perimeter and NOAA HMS satellite-fire-detection overlays so visible fire context is not conflated with smoke-plume analysis. v299 filters WFIGS perimeter responses to the newest approved/public/visible perimeter per incident, preventing historical or duplicate source polygons for the same incident from stacking on the map.
 
 The Welcome page reflects the current Conditions Now / Planning and Details workflow and retains the randomized Yogi Berra quotation. `assets/yogiisms.txt` currently contains the expanded 59-line quote set.
 
@@ -2124,7 +2487,7 @@ When migrating development to a new conversation, provide or point the assistant
 
 > Read the **Development State and Chat Handoff** section of README.md, treat GitHub `main` as authoritative, and continue from the recorded generated build. Generate complete `main-updated-vNN.go` candidates, never overwrite `main.go`, run `gofmt`, and provide SHA-256 hashes and download links.
 
-The next source candidate should therefore be **v231** unless a newer local candidate is supplied.
+The next source candidate should therefore be **v303** unless a newer local candidate is supplied.
 
 
 

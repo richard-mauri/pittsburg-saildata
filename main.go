@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"encoding/xml"
@@ -29,8 +30,8 @@ import (
 )
 
 const (
-	appVersion                      = "1.12.9"
-	buildVersion                    = "v300"
+	appVersion                      = "1.13.0"
+	buildVersion                    = "v333"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -1199,10 +1200,10 @@ func writeWindSelectionText(
 	)
 }
 
-func fetchNDBCAirTemperatureF(stationID string) (float64, bool) {
+func fetchNDBCAirTemperatureObservation(stationID string) (float64, time.Time, bool) {
 	stationID = strings.ToUpper(strings.TrimSpace(stationID))
 	if !validStationID(stationID) {
-		return 0, false
+		return 0, time.Time{}, false
 	}
 
 	req, err := http.NewRequest(
@@ -1211,24 +1212,24 @@ func fetchNDBCAirTemperatureF(stationID string) (float64, bool) {
 		nil,
 	)
 	if err != nil {
-		return 0, false
+		return 0, time.Time{}, false
 	}
 	req.Header.Set("User-Agent", "pittsburg-saildata/"+appVersion)
 
 	client := &http.Client{Timeout: 8 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, false
+		return 0, time.Time{}, false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return 0, false
+		return 0, time.Time{}, false
 	}
 
 	body, err := ioutil.ReadAll(io.LimitReader(resp.Body, 512<<10))
 	if err != nil {
-		return 0, false
+		return 0, time.Time{}, false
 	}
 
 	airTempColumn := -1
@@ -1271,10 +1272,30 @@ func fetchNDBCAirTemperatureF(stationID string) (float64, bool) {
 			continue
 		}
 
-		return airTempC*9/5 + 32, true
+		obsTime := time.Time{}
+		if len(fields) >= 5 {
+			year, yerr := strconv.Atoi(fields[0])
+			month, merr := strconv.Atoi(fields[1])
+			day, derr := strconv.Atoi(fields[2])
+			hour, herr := strconv.Atoi(fields[3])
+			minute, minerr := strconv.Atoi(fields[4])
+			if yerr == nil && merr == nil && derr == nil && herr == nil && minerr == nil {
+				if year < 100 {
+					year += 2000
+				}
+				obsTime = time.Date(year, time.Month(month), day, hour, minute, 0, 0, time.UTC)
+			}
+		}
+
+		return airTempC*9/5 + 32, obsTime, true
 	}
 
-	return 0, false
+	return 0, time.Time{}, false
+}
+
+func fetchNDBCAirTemperatureF(stationID string) (float64, bool) {
+	tempF, _, ok := fetchNDBCAirTemperatureObservation(stationID)
+	return tempF, ok
 }
 
 func latestNearbyStationWind(stationID, windUnit string) (string, string) {
@@ -1732,6 +1753,177 @@ type nominatimSearchResult struct {
 	BoundingBox []string `json:"boundingbox"`
 }
 
+type ndfdLegendColor struct {
+	R, G, B uint8
+	TempF   float64
+}
+
+var (
+	ndfdLegendMu    sync.Mutex
+	ndfdLegendCache = make(map[int][]ndfdLegendColor)
+)
+
+func ndfdTemperatureLayerIDServer(hours int) (int, bool) {
+	ids := map[int]int{0: 8, 3: 12, 6: 16, 9: 20, 12: 24, 15: 28, 18: 32, 21: 36, 24: 40}
+	id, ok := ids[hours]
+	return id, ok
+}
+
+func parseNDFDLegendTemperature(label string) (float64, bool) {
+	parts := strings.Split(label, " - ")
+	if len(parts) != 2 {
+		return 0, false
+	}
+	lo, err1 := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
+	hi, err2 := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+	if err1 != nil || err2 != nil {
+		return 0, false
+	}
+	if hi-lo > 5 {
+		if lo < -30 {
+			return hi, true
+		}
+		return lo, true
+	}
+	return (lo + hi) / 2, true
+}
+
+func fetchNDFDLegendColors(layerID int) ([]ndfdLegendColor, error) {
+	ndfdLegendMu.Lock()
+	if cached := ndfdLegendCache[layerID]; len(cached) > 0 {
+		out := append([]ndfdLegendColor(nil), cached...)
+		ndfdLegendMu.Unlock()
+		return out, nil
+	}
+	ndfdLegendMu.Unlock()
+
+	client := &http.Client{Timeout: 12 * time.Second}
+	resp, err := client.Get("https://mapservices.weather.noaa.gov/raster/rest/services/NDFD/NDFD_temp/MapServer/legend?f=json")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("NDFD legend HTTP %d", resp.StatusCode)
+	}
+	var payload struct {
+		Layers []struct {
+			LayerID int `json:"layerId"`
+			Legend  []struct {
+				Label     string `json:"label"`
+				ImageData string `json:"imageData"`
+			} `json:"legend"`
+		} `json:"layers"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&payload); err != nil {
+		return nil, err
+	}
+	colors := make([]ndfdLegendColor, 0, 200)
+	for _, layer := range payload.Layers {
+		if layer.LayerID != layerID {
+			continue
+		}
+		for _, entry := range layer.Legend {
+			tempF, ok := parseNDFDLegendTemperature(entry.Label)
+			if !ok || strings.TrimSpace(entry.ImageData) == "" {
+				continue
+			}
+			raw, err := base64.StdEncoding.DecodeString(entry.ImageData)
+			if err != nil {
+				continue
+			}
+			img, err := png.Decode(bytes.NewReader(raw))
+			if err != nil {
+				continue
+			}
+			b := img.Bounds()
+			r, g, b0, a := img.At(b.Min.X+b.Dx()/2, b.Min.Y+b.Dy()/2).RGBA()
+			if a == 0 {
+				continue
+			}
+			colors = append(colors, ndfdLegendColor{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b0 >> 8), TempF: tempF})
+		}
+		break
+	}
+	if len(colors) == 0 {
+		return nil, fmt.Errorf("NDFD legend contained no colors for layer %d", layerID)
+	}
+	ndfdLegendMu.Lock()
+	ndfdLegendCache[layerID] = append([]ndfdLegendColor(nil), colors...)
+	ndfdLegendMu.Unlock()
+	return colors, nil
+}
+
+func webMercatorXY(lat, lon float64) (float64, float64) {
+	const earthRadius = 6378137.0
+	lat = math.Max(-85.05112878, math.Min(85.05112878, lat))
+	x := earthRadius * lon * math.Pi / 180
+	y := earthRadius * math.Log(math.Tan(math.Pi/4+lat*math.Pi/360))
+	return x, y
+}
+
+func sampleNDFDRenderedTemperature(lat, lon float64, layerID int) (float64, error) {
+	colors, err := fetchNDFDLegendColors(layerID)
+	if err != nil {
+		return 0, err
+	}
+	x, y := webMercatorXY(lat, lon)
+	const halfSpan = 3500.0
+	params := url.Values{}
+	params.Set("bbox", fmt.Sprintf("%.3f,%.3f,%.3f,%.3f", x-halfSpan, y-halfSpan, x+halfSpan, y+halfSpan))
+	params.Set("bboxSR", "3857")
+	params.Set("imageSR", "3857")
+	params.Set("size", "9,9")
+	params.Set("format", "png32")
+	params.Set("transparent", "true")
+	params.Set("adjustAspectRatio", "false")
+	params.Set("interpolation", "RSP_BilinearInterpolation")
+	params.Set("layers", fmt.Sprintf("show:%d", layerID))
+	params.Set("f", "image")
+	upstream := "https://mapservices.weather.noaa.gov/raster/rest/services/NDFD/NDFD_temp/MapServer/export?" + params.Encode()
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(upstream)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return 0, fmt.Errorf("NDFD export HTTP %d", resp.StatusCode)
+	}
+	img, err := png.Decode(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return 0, err
+	}
+	b := img.Bounds()
+	bestDist := math.MaxFloat64
+	bestTemp := 0.0
+	found := false
+	for dy := -1; dy <= 1; dy++ {
+		for dx := -1; dx <= 1; dx++ {
+			px := b.Min.X + b.Dx()/2 + dx
+			py := b.Min.Y + b.Dy()/2 + dy
+			if px < b.Min.X || px >= b.Max.X || py < b.Min.Y || py >= b.Max.Y {
+				continue
+			}
+			r, g, b0, a := img.At(px, py).RGBA()
+			if a < 0x4000 {
+				continue
+			}
+			r8, g8, b8 := float64(r>>8), float64(g>>8), float64(b0>>8)
+			for _, c := range colors {
+				dr, dg, db := r8-float64(c.R), g8-float64(c.G), b8-float64(c.B)
+				d := dr*dr + dg*dg + db*db
+				if d < bestDist {
+					bestDist, bestTemp, found = d, c.TempF, true
+				}
+			}
+		}
+	}
+	if !found {
+		return 0, fmt.Errorf("NDFD raster has no temperature at this point")
+	}
+	return bestTemp, nil
+}
 func runServer(
 	port string,
 	defaultStation string,
@@ -1816,6 +2008,8 @@ func runServer(
 		HasWgst     bool
 		PressureMB  float64
 		HasPressure bool
+		TempC       float64
+		HasTemp     bool
 	}
 	var metarCacheMu sync.Mutex
 	var metarCacheAt time.Time
@@ -1863,6 +2057,7 @@ func runServer(
 			Wgst        string `xml:"wind_gust_kt"`
 			Pressure    string `xml:"sea_level_pressure_mb"`
 			PressureSLP string `xml:"slp_mb"`
+			TempC       string `xml:"temp_c"`
 		}
 		var payload struct {
 			Data struct {
@@ -1908,6 +2103,11 @@ func runServer(
 				!math.IsNaN(pressure) && !math.IsInf(pressure, 0) && pressure >= 850 && pressure <= 1100 {
 				item.PressureMB = pressure
 				item.HasPressure = true
+			}
+			if tempC, err := strconv.ParseFloat(strings.TrimSpace(m.TempC), 64); err == nil &&
+				!math.IsNaN(tempC) && !math.IsInf(tempC, 0) && tempC >= -90 && tempC <= 70 {
+				item.TempC = tempC
+				item.HasTemp = true
 			}
 			result = append(result, item)
 		}
@@ -2089,6 +2289,299 @@ func runServer(
 		if err := json.NewEncoder(w).Encode(map[string]interface{}{"observations": items, "errors": errorsOut}); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
+	})
+
+	mux.HandleFunc("/air-temperature-overlay", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		q := r.URL.Query()
+		parseBound := func(key string) (float64, error) {
+			text := strings.TrimSpace(q.Get(key))
+			if text == "" {
+				return 0, fmt.Errorf("%s is required", key)
+			}
+			value, err := strconv.ParseFloat(text, 64)
+			if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
+				return 0, fmt.Errorf("invalid %s %q", key, text)
+			}
+			return value, nil
+		}
+		minLat, err := parseBound("min_lat")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		maxLat, err := parseBound("max_lat")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		minLon, err := parseBound("min_lon")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		maxLon, err := parseBound("max_lon")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if minLat < -90 || maxLat > 90 || minLat >= maxLat || minLon >= maxLon {
+			http.Error(w, "invalid air-temperature bounds", http.StatusBadRequest)
+			return
+		}
+
+		// The temperature overlay is intentionally limited to the contiguous U.S.
+		// domain. This avoids expensive world-scale interpolation and Leaflet world-
+		// wrap repaint behavior that is not useful for the Bay/Delta sailing service.
+		const (
+			conusSouth = 20.0
+			conusNorth = 55.0
+			conusWest  = -130.0
+			conusEast  = -60.0
+		)
+		minLat = math.Max(minLat, conusSouth)
+		maxLat = math.Min(maxLat, conusNorth)
+		minLon = math.Max(minLon, conusWest)
+		maxLon = math.Min(maxLon, conusEast)
+		if minLat >= maxLat || minLon >= maxLon {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.Header().Set("Cache-Control", "private, max-age=60")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"observations": []interface{}{}, "min_f": -10, "max_f": 110,
+				"note": "Air-temperature overlay is limited to the contiguous United States.",
+			})
+			return
+		}
+
+		type temperatureObservation struct {
+			Station string  `json:"station"`
+			Name    string  `json:"name,omitempty"`
+			Time    string  `json:"time,omitempty"`
+			Lat     float64 `json:"lat"`
+			Lon     float64 `json:"lon"`
+			TempF   float64 `json:"temp_f"`
+			Source  string  `json:"source"`
+		}
+		items := make([]temperatureObservation, 0, 160)
+		errorsOut := make([]string, 0, 2)
+		cutoff := time.Now().UTC().Add(-90 * time.Minute)
+		latest := time.Time{}
+
+		metars, metarErr := fetchCurrentMetars()
+		if metarErr != nil {
+			errorsOut = append(errorsOut, "Aviation Weather Center METAR cache: "+metarErr.Error())
+		} else {
+			for _, m := range metars {
+				if !m.HasTemp || m.Lat < minLat || m.Lat > maxLat || m.Lon < minLon || m.Lon > maxLon {
+					continue
+				}
+				if !m.Time.IsZero() && m.Time.UTC().Before(cutoff) {
+					continue
+				}
+				if m.Time.After(latest) {
+					latest = m.Time
+				}
+				item := temperatureObservation{
+					Station: m.Station, Name: m.Station, Lat: m.Lat, Lon: m.Lon,
+					TempF:  math.Round((m.TempC*9/5+32)*10) / 10,
+					Source: "NOAA/NWS Aviation Weather Center METAR",
+				}
+				if !m.Time.IsZero() {
+					item.Time = m.Time.UTC().Format(time.RFC3339)
+				}
+				items = append(items, item)
+			}
+		}
+
+		stations, stationErr := getActiveNDBCStations()
+		if stationErr != nil {
+			errorsOut = append(errorsOut, "NOAA/NDBC: "+stationErr.Error())
+		} else {
+			type candidate struct {
+				ID, Name string
+				Lat, Lon float64
+			}
+			candidates := make([]candidate, 0)
+			for _, station := range stations {
+				if station.Lat >= minLat && station.Lat <= maxLat && station.Lon >= minLon && station.Lon <= maxLon {
+					candidates = append(candidates, candidate{ID: station.ID, Name: station.Name, Lat: station.Lat, Lon: station.Lon})
+				}
+			}
+			// Keep global/very-wide views from fan-out fetching hundreds of individual realtime files.
+			if len(candidates) > 100 {
+				candidates = candidates[:100]
+			}
+			type stationResult struct {
+				item    temperatureObservation
+				obsTime time.Time
+				ok      bool
+			}
+			results := make(chan stationResult, len(candidates))
+			sem := make(chan struct{}, 8)
+			var wg sync.WaitGroup
+			for _, station := range candidates {
+				station := station
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					sem <- struct{}{}
+					tempF, obsTime, ok := fetchNDBCAirTemperatureObservation(station.ID)
+					<-sem
+					if !ok || (!obsTime.IsZero() && obsTime.UTC().Before(cutoff)) {
+						return
+					}
+					item := temperatureObservation{
+						Station: strings.ToUpper(strings.TrimSpace(station.ID)), Name: station.Name,
+						Lat: station.Lat, Lon: station.Lon, TempF: math.Round(tempF*10) / 10,
+						Source: "NOAA/NDBC",
+					}
+					if !obsTime.IsZero() {
+						item.Time = obsTime.UTC().Format(time.RFC3339)
+					}
+					results <- stationResult{item: item, obsTime: obsTime, ok: true}
+				}()
+			}
+			wg.Wait()
+			close(results)
+			for result := range results {
+				if result.ok {
+					items = append(items, result.item)
+					if result.obsTime.After(latest) {
+						latest = result.obsTime
+					}
+				}
+			}
+		}
+		sort.Slice(items, func(i, j int) bool {
+			if items[i].Source != items[j].Source {
+				return items[i].Source < items[j].Source
+			}
+			return items[i].Station < items[j].Station
+		})
+		payload := struct {
+			Updated      string                   `json:"updated,omitempty"`
+			Observations []temperatureObservation `json:"observations"`
+			Errors       []string                 `json:"errors,omitempty"`
+			MinF         float64                  `json:"min_f"`
+			MaxF         float64                  `json:"max_f"`
+			Note         string                   `json:"note"`
+		}{Observations: items, Errors: errorsOut, MinF: -10, MaxF: 110,
+			Note: "CONUS-only observed air-temperature heat map interpolated from current NOAA/NDBC and NOAA/NWS METAR stations; forecast mode uses NOAA/NWS NDFD gridded temperature guidance."}
+		if !latest.IsZero() {
+			payload.Updated = latest.UTC().Format(time.RFC3339)
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "private, max-age=60")
+		if err := json.NewEncoder(w).Encode(payload); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+
+	mux.HandleFunc("/air-temperature-grid", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		q := r.URL.Query()
+		parseFloat := func(name string) (float64, error) {
+			v, err := strconv.ParseFloat(strings.TrimSpace(q.Get(name)), 64)
+			if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
+				return 0, fmt.Errorf("invalid %s", name)
+			}
+			return v, nil
+		}
+		west, err := parseFloat("west")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		south, err := parseFloat("south")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		east, err := parseFloat("east")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		north, err := parseFloat("north")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		hours, err := strconv.Atoi(strings.TrimSpace(q.Get("hours")))
+		if err != nil {
+			http.Error(w, "invalid hours", http.StatusBadRequest)
+			return
+		}
+		width, err := strconv.Atoi(strings.TrimSpace(q.Get("width")))
+		if err != nil {
+			http.Error(w, "invalid width", http.StatusBadRequest)
+			return
+		}
+		height, err := strconv.Atoi(strings.TrimSpace(q.Get("height")))
+		if err != nil {
+			http.Error(w, "invalid height", http.StatusBadRequest)
+			return
+		}
+		if west < -130 || east > -60 || south < 20 || north > 55 || west >= east || south >= north ||
+			hours < 0 || hours > 24 || hours%3 != 0 || width < 48 || width > 360 || height < 32 || height > 220 {
+			http.Error(w, "invalid CONUS NDFD temperature grid request", http.StatusBadRequest)
+			return
+		}
+		raw, err := fetchNDFDTemperatureGrid(west, south, east, north, hours, width, height)
+		if err != nil {
+			http.Error(w, "NDFD temperature grid unavailable: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "private, max-age=120")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"west": west, "south": south, "east": east, "north": north,
+			"width": width, "height": height, "hours": hours,
+			"encoding": "int16-tenths-f-base64-le",
+			"nodata":   -32768,
+			"data":     base64.StdEncoding.EncodeToString(raw),
+			"source":   "NOAA/NWS NDFD raster decoded to temperature cells using the NOAA legend",
+		})
+	})
+
+	mux.HandleFunc("/air-temperature-point", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		q := r.URL.Query()
+		lat, latErr := strconv.ParseFloat(strings.TrimSpace(q.Get("lat")), 64)
+		lon, lonErr := strconv.ParseFloat(strings.TrimSpace(q.Get("lon")), 64)
+		hours, hoursErr := strconv.Atoi(strings.TrimSpace(q.Get("hours")))
+		if latErr != nil || lonErr != nil || hoursErr != nil || math.IsNaN(lat) || math.IsNaN(lon) ||
+			lat < 20 || lat > 55 || lon < -130 || lon > -60 || hours < 3 || hours > 24 || hours%3 != 0 {
+			http.Error(w, "invalid CONUS forecast temperature point", http.StatusBadRequest)
+			return
+		}
+		layerID, ok := ndfdTemperatureLayerIDServer(hours)
+		if !ok {
+			http.Error(w, "unsupported forecast hour", http.StatusBadRequest)
+			return
+		}
+		tempF, err := sampleNDFDRenderedTemperature(lat, lon, layerID)
+		if err != nil {
+			http.Error(w, "NDFD forecast temperature unavailable at this point", http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "private, max-age=60")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"temp_f": math.Round(tempF*10) / 10,
+			"hours":  hours,
+			"source": "NOAA/NWS NDFD rendered temperature field",
+		})
 	})
 
 	mux.HandleFunc("/smoke-overlay", func(w http.ResponseWriter, r *http.Request) {
@@ -3314,6 +3807,91 @@ func runServer(
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		fatal(err)
 	}
+}
+
+func fetchNDFDTemperatureGrid(west, south, east, north float64, hours, width, height int) ([]byte, error) {
+	layerID, ok := ndfdTemperatureLayerIDServer(hours)
+	if !ok {
+		return nil, fmt.Errorf("unsupported NDFD forecast hour %d", hours)
+	}
+	colors, err := fetchNDFDLegendColors(layerID)
+	if err != nil {
+		return nil, err
+	}
+	x0, y0 := webMercatorXY(south, west)
+	x1, y1 := webMercatorXY(north, east)
+	if x0 >= x1 || y0 >= y1 {
+		return nil, fmt.Errorf("invalid NDFD grid bounds")
+	}
+	params := url.Values{}
+	params.Set("bbox", fmt.Sprintf("%.3f,%.3f,%.3f,%.3f", x0, y0, x1, y1))
+	params.Set("bboxSR", "3857")
+	params.Set("imageSR", "3857")
+	params.Set("size", fmt.Sprintf("%d,%d", width, height))
+	params.Set("format", "png32")
+	params.Set("transparent", "true")
+	params.Set("adjustAspectRatio", "false")
+	// Nearest-neighbor preserves NOAA's discrete legend colors so each returned
+	// raster cell can be converted back to a temperature deterministically.
+	params.Set("interpolation", "RSP_NearestNeighbor")
+	params.Set("layers", fmt.Sprintf("show:%d", layerID))
+	params.Set("f", "image")
+	upstream := "https://mapservices.weather.noaa.gov/raster/rest/services/NDFD/NDFD_temp/MapServer/export?" + params.Encode()
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Get(upstream)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("NDFD grid export HTTP %d", resp.StatusCode)
+	}
+	img, err := png.Decode(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return nil, err
+	}
+	b := img.Bounds()
+	if b.Dx() != width || b.Dy() != height {
+		return nil, fmt.Errorf("unexpected NDFD grid dimensions %dx%d", b.Dx(), b.Dy())
+	}
+
+	const noData int16 = -32768
+	raw := make([]byte, width*height*2)
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			r, g, b0, a := img.At(b.Min.X+x, b.Min.Y+y).RGBA()
+			value := noData
+			if a >= 0x4000 {
+				r8, g8, b8 := float64(r>>8), float64(g>>8), float64(b0>>8)
+				bestDist := math.MaxFloat64
+				bestTemp := 0.0
+				for _, c := range colors {
+					dr := r8 - float64(c.R)
+					dg := g8 - float64(c.G)
+					db := b8 - float64(c.B)
+					d := dr*dr + dg*dg + db*db
+					if d < bestDist {
+						bestDist = d
+						bestTemp = c.TempF
+					}
+				}
+				if bestDist < math.MaxFloat64 {
+					scaled := math.Round(bestTemp * 10)
+					if scaled > math.MaxInt16 {
+						scaled = math.MaxInt16
+					}
+					if scaled < math.MinInt16+1 {
+						scaled = math.MinInt16 + 1
+					}
+					value = int16(scaled)
+				}
+			}
+			off := (y*width + x) * 2
+			binary.LittleEndian.PutUint16(raw[off:off+2], uint16(value))
+		}
+	}
+	return raw, nil
 }
 
 func previewCurrentStationForPoint(lat, lon float64) (*CurrentStation, error) {
@@ -7159,7 +7737,7 @@ h3{margin:1.2rem 0 .35rem;color:var(--navy)}
 <p><strong>Wind:</strong> recent NOAA/NDBC observations, wind history, and nearby station alternatives.</p>
 <p><strong>Currents:</strong> NOAA CO-OPS ebb, flood, slack, maximum-current timing, and 1/3/7-day current graphs.</p>
 <p><strong>Weather:</strong> NWS local conditions/forecast context and forecast-zone information for a selected map point.</p>
-<p><strong>Map context:</strong> street, nautical, satellite, and hybrid basemaps plus forecast-zone, smoke, active-fire-perimeter, satellite-fire-detection, sea-surface-temperature, cloud-cover, radar, and ALERTCalifornia camera overlays.</p>
+<p><strong>Map context:</strong> street, nautical, satellite, and hybrid basemaps plus forecast-zone, smoke, active-fire-perimeter, satellite-fire-detection, cloud-cover, radar, and ALERTCalifornia camera overlays.</p>
 </section>
 
 <section class="card full qa">
@@ -7170,7 +7748,7 @@ h3{margin:1.2rem 0 .35rem;color:var(--navy)}
 <details><summary>What does Local Conditions show?</summary><p>For the selected map point, the app uses the NWS point forecast to show the nearby city/state label, current-hour forecast temperature, expected high/low, and a short forecast phrase.</p></details>
 <details><summary>Can I choose another wind station?</summary><p>Yes. Nearby wind-station candidates appear after you select a location. You can compare them on the map/table and choose the station you think best represents the water you care about.</p></details>
 <details><summary>Is this tide data or current data?</summary><p><strong>Current data.</strong> The graph is predicted speed and direction of moving water — flood above zero, ebb below zero, and crossings near slack. Tide height and current are related, but they are not the same thing.</p></details>
-<details><summary>What map choices are available?</summary><p>Planning and Details includes Street Map, Nautical Chart, Satellite, and Hybrid basemaps; independent forecast-zone, satellite-smoke, NIFC/WFIGS active-fire-perimeter, NOAA HMS satellite-fire-detection, global PacIOOS/NOAA WaveWatch III swell, NOAA CoastWatch Sea Surface Temp, NOAA/NESDIS cloud-cover, NEXRAD radar, and ALERTCalifornia camera overlays; and Center Map actions for your location, entered coordinates, selected location, wind station, and currents station.</p></details>
+<details><summary>What map choices are available?</summary><p>Planning and Details includes Street Map, Nautical Chart, Satellite, and Hybrid basemaps; independent forecast-zone, satellite-smoke, NIFC/WFIGS active-fire-perimeter, NOAA HMS satellite-fire-detection, global PacIOOS/NOAA WaveWatch III swell, NOAA/NESDIS cloud-cover, NEXRAD radar, and ALERTCalifornia camera overlays; and Center Map actions for your location, entered coordinates, selected location, wind station, and currents station.</p></details>
 <details><summary>Is this for navigation or safety decisions?</summary><p>No. It is a conditions-planning and exploration tool. Observations can be delayed or missing, station exposure differs, and current/forecast products have limitations. Use official marine forecasts, charts, notices, local knowledge, and prudent seamanship.</p></details>
 </section>
 
@@ -7336,7 +7914,7 @@ var sailingHTMLTemplate = template.Must(template.New("sailing").Parse(`<!doctype
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <style>:root{--navy:#082b45;--blue:#126b91;--sea:#0b8793;--ink:#153242;--muted:#607886;--paper:#f5fafc;--card:#fff;--line:#d8e7ed;--flood:#087f8c;--ebb:#365f91;--slack:#756d64;--shadow:0 12px 34px rgba(8,43,69,.10)}*{box-sizing:border-box}body.tide-context-modal-open{overflow:hidden}body{margin:0;background:linear-gradient(180deg,#dff3f8,#f7fbfc 32rem);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Avenir Next",Avenir,Helvetica,Arial,sans-serif;line-height:1.45}.shell{max-width:880px;margin:auto;padding:28px 18px 64px}.planning-shell{max-width:1180px}.hero{color:#fff;padding:34px 30px 30px;border-radius:24px;min-height:360px;display:flex;flex-direction:column;justify-content:flex-end;background:
 linear-gradient(180deg,rgba(4,24,38,.06) 12%,rgba(4,24,38,.24) 48%,rgba(4,24,38,.86) 100%),
-url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text-shadow:0 2px 12px rgba(0,0,0,.45)}.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-weight:800;font-size:.76rem;opacity:.8}.photo-tag{margin-top:14px;font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;opacity:.72}h1{font-size:clamp(1.8rem,6vw,3.2rem);line-height:1.05;margin:.4rem 0 .6rem;letter-spacing:-.035em}.sub{opacity:.82}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}.full{grid-column:1/-1}h2{font-size:.82rem;letter-spacing:.13em;text-transform:uppercase;color:var(--blue);margin:0 0 16px}.bottom{font-size:1.13rem}.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.wind-card .metric{min-width:0}.wind-card .value{white-space:nowrap}@media(max-width:640px){.wind-card .metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}.metric{background:var(--paper);border-radius:15px;padding:14px}.label{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700}.value{font-size:1.55rem;font-weight:800;color:var(--navy)}.meta{color:var(--muted);font-size:.88rem;margin-top:12px}.station{font-weight:800;font-size:1.1rem;color:var(--navy)}.wind-distance-warning{margin-top:10px;padding:10px 12px;border:1px solid #e7c978;border-radius:12px;background:#fff8df;color:#654d08;font-size:.9rem}.wind-distance-warning strong{color:#4e3a00}.wind-summary{white-space:pre-line;margin-top:14px;padding:13px 14px;background:#eef7fa;border-left:4px solid var(--sea);border-radius:10px;color:var(--ink);font-size:.92rem}.event{display:grid;grid-template-columns:88px 12px 1fr;gap:12px;align-items:center;min-height:58px}.time{font-weight:800;color:var(--navy)}.dot{width:12px;height:12px;border-radius:50%;background:var(--slack);box-shadow:0 0 0 5px #edf3f5}.flood .dot{background:var(--flood)}.ebb .dot{background:var(--ebb)}.eventbody{border-left:2px solid var(--line);padding:8px 0 8px 18px}.eventlabel{font-weight:800}.eventdata{color:var(--muted);font-size:.9rem}.badge{display:inline-block;border-radius:999px;padding:5px 10px;background:#e9f6fb;color:var(--blue);font-size:.75rem;font-weight:800;margin-top:12px}.footer{text-align:center;color:var(--muted);font-size:.78rem;margin-top:22px}.hero .yogiism{margin:18px 0 0;max-width:720px;color:#fff;font-style:italic;font-size:.96rem;line-height:1.4;opacity:.96}.full-report{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:.88rem;line-height:1.55;background:#071f31;color:#e7f4f8;border-radius:14px;padding:18px;overflow-x:auto}.wind-readings{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}.wind-readings-header{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:8px}.wind-readings-title{font-weight:850;color:var(--navy)}.wind-reading-control{display:flex;align-items:flex-end;gap:7px;flex-wrap:wrap}.wind-reading-control label{display:flex;flex-direction:column;gap:3px;color:var(--muted);font-size:.72rem;font-weight:850;text-transform:uppercase;letter-spacing:.04em}.wind-reading-control select{min-width:76px;padding:6px 28px 6px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;font:inherit}.wind-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap}.wind-card-head h2{margin-bottom:16px}.wind-unit-control{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:.72rem;font-weight:850;text-transform:uppercase;letter-spacing:.04em}.wind-unit-control select{padding:6px 28px 6px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;font:inherit;color:var(--ink)}.wind-reading-chart{margin:4px 0 12px;border:1px solid var(--line);border-radius:10px;background:#fff;padding:8px}.wind-reading-chart svg{display:block;width:100%;height:auto;min-height:260px;max-height:320px}.wind-chart-grid{stroke:#dce6e9;stroke-width:1}.wind-chart-axis{stroke:#8aa0a8;stroke-width:1}.wind-chart-wind{fill:none;stroke:#126b91;stroke-width:2.5;stroke-linejoin:round;stroke-linecap:round}.wind-chart-gust{fill:none;stroke:#a95a24;stroke-width:1.7;stroke-linejoin:round;stroke-linecap:round}.wind-chart-label{fill:#60747c;font-size:12px;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}@media(max-width:640px){.wind-chart-label{font-size:13px}.wind-chart-readout{font-size:.9rem}.wind-chart-legend{font-size:.86rem}}.wind-chart-legend{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin:0 0 6px;color:var(--muted);font-size:.78rem;font-weight:750}.wind-chart-key{display:inline-flex;align-items:center;gap:6px}.wind-chart-key-line{display:inline-block;width:22px;border-top:3px solid #126b91}.wind-chart-key-line.gust{border-top-color:#a95a24;border-top-width:2px;border-top-style:solid}.wind-chart-empty{padding:34px 12px;text-align:center;color:var(--muted);font-size:.85rem}.wind-chart-cursor{stroke:#263b46;stroke-width:1.4;pointer-events:none}.wind-chart-cursor-dot{fill:#fff;stroke-width:2;pointer-events:none}.wind-chart-cursor-dot.wind{stroke:#126b91}.wind-chart-cursor-dot.gust{stroke:#a95a24}.wind-chart-hit{fill:transparent;cursor:crosshair;touch-action:none}.wind-chart-readout{margin:-2px 0 8px;color:var(--ink);font-size:.82rem;font-weight:750;min-height:1.2em}.wind-readings-scroll-shell{position:relative}.wind-readings-wrap{max-height:132px;overflow:auto;border:1px solid var(--line);border-radius:10px;-webkit-overflow-scrolling:touch}.wind-readings-scroll-cue{display:none}@media(max-width:640px){.wind-readings-scroll-shell.has-more::after{content:"";position:absolute;left:1px;right:1px;bottom:1px;height:40px;border-radius:0 0 9px 9px;background:linear-gradient(to bottom,rgba(255,255,255,0),rgba(255,255,255,.94));pointer-events:none}.wind-readings-scroll-cue{position:absolute;z-index:3;left:50%;bottom:6px;transform:translateX(-50%);display:none;padding:3px 8px;border-radius:999px;background:rgba(255,255,255,.94);box-shadow:0 1px 5px rgba(7,31,49,.16);color:var(--muted);font-size:.68rem;font-weight:850;letter-spacing:.03em;white-space:nowrap;pointer-events:none}.wind-readings-scroll-shell.has-more .wind-readings-scroll-cue{display:block}}.wind-readings-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.84rem}.wind-readings-table th,.wind-readings-table td{padding:7px 9px;border-top:1px solid var(--line);text-align:left;white-space:nowrap}.wind-readings-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc;color:var(--muted);font-size:.7rem;text-transform:uppercase;letter-spacing:.05em}.wind-readings-table tbody tr:first-child td{border-top:0}.card-action-row{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}#current-summary-card,.wind-card{min-width:0}.timeline-scope-note{margin:.15rem 0 1rem;color:var(--muted);font-size:.88rem}.current-events-integrated{margin:14px 0 4px;padding:10px 0 0;border-top:1px solid var(--line)}.current-events-head{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:8px}.current-events-head strong{color:var(--navy);font-size:.92rem}.current-events-head span{color:var(--muted);font-size:.78rem}.current-key-times{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:28px;row-gap:2px}.current-key-time{display:grid;grid-template-columns:76px minmax(0,1fr);gap:10px;align-items:baseline;padding:5px 0;border-bottom:1px solid #edf2f3;font-size:.86rem}.current-key-time-time{font-weight:800;color:var(--navy);white-space:nowrap}.current-key-time-label{color:var(--ink)}.current-key-time-label strong{font-weight:800}.current-key-time-meta{color:var(--muted);margin-left:6px;white-space:nowrap}@media(max-width:640px){.current-key-times{grid-template-columns:1fr}.current-key-time{grid-template-columns:72px minmax(0,1fr)}}.details-link-card{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap}.details-link-card h2{margin-bottom:.2rem}.details-link{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;white-space:nowrap}.details-note{color:var(--muted);font-size:.88rem;margin:-4px 0 14px}.info-popup-row{display:flex;justify-content:flex-end;margin:8px 0 12px}.map-info-popup-row{gap:8px;flex-wrap:wrap}.info-popup-open{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);border-radius:999px;padding:8px 12px;background:#fff;color:var(--blue);font:inherit;font-size:.84rem;font-weight:850;cursor:pointer}.info-popup-open:hover{background:var(--paper)}.info-popup-open:focus-visible{outline:2px solid var(--blue);outline-offset:2px}.tide-context-launcher{grid-column:1/-1}.tide-context-open{width:100%;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px 18px;border:1px solid var(--line);border-radius:16px;background:#fff;color:var(--blue);box-shadow:var(--shadow);font:inherit;font-weight:850;cursor:pointer;text-align:left}.tide-context-open:hover{background:var(--paper)}.tide-context-open:focus-visible{outline:2px solid var(--blue);outline-offset:2px}.tide-context-modal,.info-popup-modal{position:fixed;inset:0;z-index:3000;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(7,31,49,.38)}.tide-context-modal[hidden],.info-popup-modal[hidden]{display:none}.tide-context-dialog,.info-popup-dialog{width:min(640px,calc(100vw - 32px));max-height:min(78vh,720px);display:flex;flex-direction:column;background:#fff;border:1px solid var(--line);border-radius:20px;box-shadow:0 24px 70px rgba(7,31,49,.32);overflow:hidden}.tide-context-dialog-head,.info-popup-dialog-head{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:16px 16px 12px 20px;border-bottom:1px solid var(--line);background:#fff;flex:0 0 auto}.tide-context-dialog-head h2,.info-popup-dialog-head h2{margin:0}.tide-context-close,.info-popup-close{display:inline-flex;align-items:center;justify-content:center;width:42px;height:42px;flex:0 0 42px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--navy);font:inherit;font-size:1.55rem;font-weight:700;line-height:1;cursor:pointer}.tide-context-close:hover,.info-popup-close:hover{background:var(--paper)}.tide-context-body,.info-popup-body{overflow:auto;padding:18px 20px 22px;-webkit-overflow-scrolling:touch}.tide-context-body>:first-child,.info-popup-body>:first-child{margin-top:0}.tide-context-body>:last-child,.info-popup-body>:last-child{margin-bottom:0}@media(max-width:700px){.tide-context-modal,.info-popup-modal{align-items:flex-end;padding:0;background:rgba(7,31,49,.42)}.tide-context-dialog,.info-popup-dialog{width:100%;max-height:calc(86dvh - env(safe-area-inset-bottom));border-radius:20px 20px 0 0;border-bottom:0}.tide-context-dialog-head,.info-popup-dialog-head{padding-top:14px;padding-right:max(12px,env(safe-area-inset-right));padding-left:max(18px,env(safe-area-inset-left))}.tide-context-close,.info-popup-close{width:44px;height:44px;flex-basis:44px}.tide-context-body,.info-popup-body{padding-right:max(18px,env(safe-area-inset-right));padding-bottom:max(24px,calc(env(safe-area-inset-bottom) + 14px));padding-left:max(18px,env(safe-area-inset-left))}}.current-chart-header{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap}.current-window-inline{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin:2px 0 10px;color:var(--muted);font-size:.86rem}.current-window-inline strong{color:var(--navy);font-size:.86rem}.current-window-inline span{white-space:nowrap}.current-chart-header h2{margin-bottom:.15rem}.current-date-label{color:var(--muted);font-weight:750;font-size:.9rem}.current-range-toolbar{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin:8px 0 10px;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:var(--paper)}.current-range-toolbar .current-date-nav{display:inline-flex;align-items:center;min-height:44px;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:8px 12px;background:#fff;color:var(--blue);font-size:.86rem;font-weight:850}.current-range-toolbar .current-date-nav.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-control-label{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:.75rem;font-weight:850}.current-control-label .current-date-picker{min-height:44px;font-size:1rem}@media(max-width:640px){.current-range-toolbar{align-items:stretch}.current-control-label{flex:1 1 140px}.current-range-toolbar .current-date-nav{justify-content:center;flex:1 1 135px}}.current-date-controls{display:flex;gap:7px;flex-wrap:wrap;align-items:center}.current-date-picker{border:1px solid var(--line);border-radius:999px;padding:6px 10px;background:#fff;color:var(--navy);font:inherit;font-size:.82rem;font-weight:750;min-height:34px}.current-date-picker:focus{outline:2px solid var(--blue);outline-offset:2px}.current-refreshing{opacity:.55;transition:opacity .15s ease}.current-date-controls a{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:7px 11px;background:#fff;color:var(--blue);font-size:.82rem;font-weight:850}.current-date-controls a:hover{background:var(--paper)}.current-date-controls a.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-planning{margin:16px 0 12px;padding:14px 16px;border:1px solid var(--line);border-radius:16px;background:#fff}.current-planning-head{display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:10px}.current-planning-head strong{color:var(--navy);font-size:1rem}.current-planning-head span{color:var(--muted);font-size:.82rem}.planning-preferences{display:flex;flex-direction:column;gap:10px;margin:8px 0 12px}.planning-preferences-row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;width:100%}.planning-preferences label{display:flex;gap:5px;align-items:center;color:var(--muted);font-size:.78rem;font-weight:850}.planning-preferences input{min-height:40px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--navy);font:inherit;font-size:1rem;padding:6px 8px}.planning-preferences input[type="number"]{width:76px}.planning-preferences b{color:var(--muted);font-size:.82rem}@media(max-width:640px){.planning-preferences label{flex:1 1 130px;justify-content:space-between}.planning-preferences input[type="time"]{min-width:110px}}.planning-help{margin:2px 0 12px;padding:10px 12px;border-radius:10px;background:#f7f9fa;color:var(--ink);font-size:.82rem;line-height:1.45}.planning-help strong{color:var(--navy)}.current-planning-days{display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:8px}.planning-day{border:1px solid var(--line);border-radius:12px;padding:10px;min-width:0}.planning-day.preferred{background:#eef8f3}.planning-day.caution{background:#fff8df;border-color:#e7c978}.planning-day.redflag{background:#fff0ed;border-color:#dfa297}.planning-date{font-size:.78rem;font-weight:850;color:var(--navy)}.planning-status{font-size:.92rem;font-weight:900;margin-top:2px}.preferred .planning-status{color:#176246}.caution .planning-status{color:#775900}.redflag .planning-status{color:#9a3328}.planning-detail{font-size:.78rem;line-height:1.35;color:var(--ink);margin-top:5px}.planning-disclaimer{color:var(--muted);font-size:.75rem;margin-top:9px}@media(max-width:640px){.current-planning-days{grid-template-columns:1fr 1fr}.planning-detail{font-size:.8rem}}.current-chart-wrap .event-point,.current-chart-wrap .event-point:hover{cursor:default!important;pointer-events:none}.current-chart-wrap{margin-top:16px}.current-chart-svg{display:block;width:100%;height:auto;background:#f8fbfc;border:1px solid var(--line);border-radius:16px}.grid-line{stroke:#d9e4e8;stroke-width:1}.v-grid-line{stroke:#e6eef1;stroke-width:1}.day-grid-line{stroke:#b7cbd4;stroke-width:1.4}.zero-line{stroke:#17384a;stroke-width:2}.axis-label{fill:#657d89;font-size:11px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.y-label{text-anchor:end}.x-label{text-anchor:middle}.axis-title{fill:#657d89;font-size:11px;text-anchor:middle}.tide-y-label{text-anchor:start}.tide-range-bar{opacity:1;stroke-width:3;stroke-linecap:round;fill:none}.tide-range-bar.typical{stroke:#4a6473}.tide-range-bar.elevated{stroke:#d5ad28}.tide-range-bar.large{stroke:#d9791f}.tide-range-bar.exceptional{stroke:#c94a3f}.tide-range-value{font-size:11px;font-weight:900;text-anchor:middle;paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round;fill:#17384a}.tide-range-value.axis-adjacent{text-anchor:end}.tide-range-toggle{display:flex;align-items:center;gap:7px;color:var(--ink);font-size:.84rem;font-weight:800}.tide-range-toggle input{margin:0}.tide-range-legend{display:flex;gap:10px;flex-wrap:wrap;align-items:center;color:var(--muted);font-size:.76rem}.tide-range-key{display:inline-flex;align-items:center;gap:5px}.tide-range-swatch{width:11px;height:11px;border-radius:3px;display:inline-block}.tide-range-swatch.typical{background:#4a6473}.tide-range-swatch.elevated{background:#d5ad28}.tide-range-swatch.large{background:#d9791f}.tide-range-swatch.exceptional{background:#c94a3f}.night-window{fill:#aebdc4;opacity:.78}.sail-window{fill:#f8fbfc;opacity:.96}.preferred-window{fill:#f0d46d;opacity:.34}.flood-area{fill:#6d8fd0;opacity:.86}.ebb-area{fill:#0b9d83;opacity:.90}.current-line{fill:none;stroke:#214b62;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}.event-point{stroke:#fff;stroke-width:1.5}.event-point.flood{fill:#5478bd}.event-point.ebb{fill:#078a75}.event-point.slack{fill:#756d64}.event-time{fill:#17384a;font-size:9px;font-weight:800;text-anchor:middle;paint-order:stroke;stroke:#fff;stroke-width:2.5px;stroke-linejoin:round}.event-time.flood{fill:#294f91}.event-time.ebb{fill:#066c5d}.event-time.slack{fill:#514b46}.now-line{stroke:#c63a2b;stroke-width:2.5}.now-label{fill:#c63a2b;font-size:11px;font-weight:800}.chart-explainer{color:var(--ink);font-size:.94rem;line-height:1.45;margin:2px 0 12px}.chart-note{color:var(--muted);font-size:.82rem;margin-top:9px}.candidate-table{width:100%;border-collapse:collapse;font-size:.86rem}.candidate-table th,.candidate-table td{padding:10px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}.candidate-table th{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}.candidate-table td.num,.candidate-table th.num{text-align:right;white-space:nowrap}.candidate-good td.status{font-weight:800}.candidate-bad{opacity:.82}.candidate-selected{background:rgba(20,120,100,.08)}.candidate-selected td:first-child{font-weight:800}.candidate-note{color:var(--muted);font-size:.82rem;margin:0 0 12px}.candidate-scroll{overflow-x:auto}.candidate-link{color:var(--blue);text-decoration:none;font-weight:800}.candidate-link:hover{text-decoration:underline}.candidate-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:0 0 12px}.nearest-link{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:7px 12px;color:var(--blue);font-weight:800;text-decoration:none;background:#fff}.nearest-link:hover{background:var(--paper)}.map-card{overflow:hidden}.map-intro{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px}.map-intro-title{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.map-intro-title h2{margin:0}.map-help{color:var(--muted);font-size:.9rem;max-width:600px;margin-top:6px}.location-help{position:relative}.location-help>summary{list-style:none;display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--blue);font-size:1rem;font-weight:900;cursor:pointer;box-shadow:0 2px 8px rgba(8,43,69,.08)}.location-help>summary::-webkit-details-marker{display:none}.location-help>summary:focus{outline:2px solid var(--blue);outline-offset:2px}.location-help-panel{position:absolute;z-index:1450;top:calc(100% + 8px);left:0;width:min(430px,calc(100vw - 48px));padding:0;border:1px solid var(--line);border-radius:14px;background:#fff;box-shadow:0 14px 34px rgba(8,43,69,.20);color:var(--ink);font-size:.88rem;line-height:1.45;text-transform:none;letter-spacing:normal;font-weight:500;overflow:hidden}.location-help-header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 10px 8px 16px;border-bottom:1px solid var(--line);background:#f8fbfc}.location-help-header strong{color:var(--navy);font-size:.9rem}.location-help-body{padding:12px 16px 14px}.location-help-close{position:static;flex:0 0 auto;width:36px;height:36px;display:flex;align-items:center;justify-content:center;border:0;border-radius:999px;background:#eef5f8;color:var(--navy);font:inherit;font-size:1.35rem;font-weight:900;line-height:1;cursor:pointer}.location-help-close:hover{background:#e1edf2}.location-help-close:focus{outline:2px solid var(--blue);outline-offset:2px}.location-help-panel p{margin:0 0 9px}.location-help-panel p:last-child{margin-bottom:0}@media(max-width:640px){.location-help-panel{position:fixed;z-index:2400;top:calc(env(safe-area-inset-top,0px) + 70px);left:14px;right:14px;width:auto;max-height:calc(100dvh - env(safe-area-inset-top,0px) - env(safe-area-inset-bottom,0px) - 100px);overflow:auto;-webkit-overflow-scrolling:touch}.location-help-header{position:sticky;top:0;z-index:2}.location-help-close{width:44px;height:44px}}.map-wrap{border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#dfecef}.location-map{height:390px;width:100%}.map-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px}.map-coordinate{font-variant-numeric:tabular-nums;color:var(--muted);font-size:.9rem}.map-go{display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--blue);border-radius:999px;padding:10px 16px;background:var(--blue);color:#fff;font-weight:850;text-decoration:none;cursor:pointer;min-height:42px}.map-go[aria-disabled="true"]{opacity:.45;pointer-events:none}.map-search-area{cursor:pointer}.map-search-area[aria-disabled="true"]{opacity:.45;pointer-events:none}.map-search-area[hidden]{display:none}.map-search-status{color:var(--muted);font-size:.82rem}.map-primary-actions{display:flex;gap:12px;align-items:stretch;flex-wrap:wrap;margin-top:12px}.map-primary-actions .map-go,.map-primary-actions .map-reset{flex:1 1 220px;max-width:360px;min-height:44px;padding:10px 16px;border:1px solid var(--blue);border-radius:999px;background:var(--blue);color:#fff;font:inherit;font-weight:850;text-align:center;justify-content:center;cursor:pointer}.map-reset{display:inline-flex;align-items:center}.map-reset:disabled{opacity:.45;cursor:default}.location-map .leaflet-popup-pane{z-index:1200}.location-map .leaflet-control-attribution,.location-map .map-scale-status{pointer-events:none}@media(max-width:700px){.location-map .leaflet-bottom.leaflet-right{z-index:650}.map-primary-actions{display:grid;grid-template-columns:1fr;gap:10px}.map-primary-actions .map-go,.map-primary-actions .map-reset{width:100%;max-width:none;min-height:46px}}.map-navigation{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}.map-state-controls{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:10px}.map-current-toggle{display:inline-flex;align-items:center;gap:7px;color:var(--ink);font-weight:750;font-size:.88rem}.map-current-toggle input{margin:0}.map-overlays-menu{position:relative}.map-overlays-menu summary{list-style:none;cursor:pointer;border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;font-size:.88rem}.map-overlays-menu summary::-webkit-details-marker{display:none}.map-overlays-menu summary::after{content:" ▾";font-size:.78em}.map-overlays-menu[open] summary::after{content:" ▴"}.map-overlays-panel{position:absolute;z-index:700;top:calc(100% + 6px);left:0;min-width:270px;max-width:min(360px,88vw);padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:#fff;box-shadow:0 10px 28px rgba(7,31,49,.18);display:flex;flex-direction:column;gap:10px}.map-overlays-menu#map-overlays-menu>.map-overlays-panel{position:fixed;z-index:12000;top:24px;bottom:auto;left:50%;right:auto;transform:translateX(-50%);width:min(420px,calc(100vw - 32px));max-width:none;max-height:calc(100dvh - 48px);overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;touch-action:pan-y}.map-overlays-toolbar{display:flex;align-items:center;gap:8px;flex:0 0 auto;position:sticky;top:-12px;z-index:4;background:#fff;padding:12px 0 8px}.map-overlays-toolbar .map-overlay-clear{flex:1;min-width:0}.map-overlays-toolbar .map-menu-close{position:static;align-self:center;margin:0 0 0 auto}.map-overlay-group{border:1px solid var(--line);border-radius:10px;background:#fbfdfe;overflow:hidden}.map-overlay-group+ .map-overlay-group{margin-top:2px}.map-overlay-group>summary{list-style:none;cursor:pointer;padding:9px 10px;font-size:.78rem;font-weight:900;letter-spacing:.055em;text-transform:uppercase;color:var(--navy);display:flex;align-items:center;justify-content:space-between;gap:10px;background:#f5f9fa}.map-overlay-group>summary::-webkit-details-marker{display:none}.map-overlay-group>summary::after{content:"▸";font-size:.82rem;color:var(--muted);transition:transform .15s ease}.map-overlay-group[open]>summary::after{transform:rotate(90deg)}.map-overlay-group-body{display:flex;flex-direction:column;gap:8px;padding:9px 10px 10px;max-height:none!important;overflow:visible!important;overscroll-behavior:auto}.map-overlay-group .map-overlay-toggle{font-size:.84rem}.map-overlay-group .map-overlay-toggle span{min-width:0}.map-overlay-note{max-height:150px;overflow:auto;padding-right:3px}.map-overlay-toggle{display:flex;align-items:flex-start;gap:8px;color:var(--ink);font-weight:750;font-size:.88rem;line-height:1.3}.map-overlay-toggle input{margin-top:2px}.map-overlay-note{color:var(--muted);font-size:.76rem;line-height:1.35;padding-top:2px;border-top:1px solid var(--line)}.map-overlay-help{margin-top:8px;color:var(--muted);font-size:.78rem;line-height:1.4}.map-overlay-help summary{cursor:pointer;color:var(--blue);font-weight:800}.map-overlay-help-body{margin-top:6px;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#f8fbfc}
+url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text-shadow:0 2px 12px rgba(0,0,0,.45)}.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-weight:800;font-size:.76rem;opacity:.8}.photo-tag{margin-top:14px;font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;opacity:.72}h1{font-size:clamp(1.8rem,6vw,3.2rem);line-height:1.05;margin:.4rem 0 .6rem;letter-spacing:-.035em}.sub{opacity:.82}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}.full{grid-column:1/-1}h2{font-size:.82rem;letter-spacing:.13em;text-transform:uppercase;color:var(--blue);margin:0 0 16px}.bottom{font-size:1.13rem}.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.wind-card .metric{min-width:0}.wind-card .value{white-space:nowrap}@media(max-width:640px){.wind-card .metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}.metric{background:var(--paper);border-radius:15px;padding:14px}.label{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700}.value{font-size:1.55rem;font-weight:800;color:var(--navy)}.meta{color:var(--muted);font-size:.88rem;margin-top:12px}.station{font-weight:800;font-size:1.1rem;color:var(--navy)}.wind-distance-warning{margin-top:10px;padding:10px 12px;border:1px solid #e7c978;border-radius:12px;background:#fff8df;color:#654d08;font-size:.9rem}.wind-distance-warning strong{color:#4e3a00}.wind-summary{white-space:pre-line;margin-top:14px;padding:13px 14px;background:#eef7fa;border-left:4px solid var(--sea);border-radius:10px;color:var(--ink);font-size:.92rem}.event{display:grid;grid-template-columns:88px 12px 1fr;gap:12px;align-items:center;min-height:58px}.time{font-weight:800;color:var(--navy)}.dot{width:12px;height:12px;border-radius:50%;background:var(--slack);box-shadow:0 0 0 5px #edf3f5}.flood .dot{background:var(--flood)}.ebb .dot{background:var(--ebb)}.eventbody{border-left:2px solid var(--line);padding:8px 0 8px 18px}.eventlabel{font-weight:800}.eventdata{color:var(--muted);font-size:.9rem}.badge{display:inline-block;border-radius:999px;padding:5px 10px;background:#e9f6fb;color:var(--blue);font-size:.75rem;font-weight:800;margin-top:12px}.footer{text-align:center;color:var(--muted);font-size:.78rem;margin-top:22px}.hero .yogiism{margin:18px 0 0;max-width:720px;color:#fff;font-style:italic;font-size:.96rem;line-height:1.4;opacity:.96}.full-report{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:.88rem;line-height:1.55;background:#071f31;color:#e7f4f8;border-radius:14px;padding:18px;overflow-x:auto}.wind-readings{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}.wind-readings-header{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:8px}.wind-readings-title{font-weight:850;color:var(--navy)}.wind-reading-control{display:flex;align-items:flex-end;gap:7px;flex-wrap:wrap}.wind-reading-control label{display:flex;flex-direction:column;gap:3px;color:var(--muted);font-size:.72rem;font-weight:850;text-transform:uppercase;letter-spacing:.04em}.wind-reading-control select{min-width:76px;padding:6px 28px 6px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;font:inherit}.wind-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap}.wind-card-head h2{margin-bottom:16px}.wind-unit-control{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:.72rem;font-weight:850;text-transform:uppercase;letter-spacing:.04em}.wind-unit-control select{padding:6px 28px 6px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;font:inherit;color:var(--ink)}.wind-reading-chart{margin:4px 0 12px;border:1px solid var(--line);border-radius:10px;background:#fff;padding:8px}.wind-reading-chart svg{display:block;width:100%;height:auto;min-height:260px;max-height:320px}.wind-chart-grid{stroke:#dce6e9;stroke-width:1}.wind-chart-axis{stroke:#8aa0a8;stroke-width:1}.wind-chart-wind{fill:none;stroke:#126b91;stroke-width:2.5;stroke-linejoin:round;stroke-linecap:round}.wind-chart-gust{fill:none;stroke:#a95a24;stroke-width:1.7;stroke-linejoin:round;stroke-linecap:round}.wind-chart-label{fill:#60747c;font-size:12px;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}@media(max-width:640px){.wind-chart-label{font-size:13px}.wind-chart-readout{font-size:.9rem}.wind-chart-legend{font-size:.86rem}}.wind-chart-legend{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin:0 0 6px;color:var(--muted);font-size:.78rem;font-weight:750}.wind-chart-key{display:inline-flex;align-items:center;gap:6px}.wind-chart-key-line{display:inline-block;width:22px;border-top:3px solid #126b91}.wind-chart-key-line.gust{border-top-color:#a95a24;border-top-width:2px;border-top-style:solid}.wind-chart-empty{padding:34px 12px;text-align:center;color:var(--muted);font-size:.85rem}.wind-chart-cursor{stroke:#263b46;stroke-width:1.4;pointer-events:none}.wind-chart-cursor-dot{fill:#fff;stroke-width:2;pointer-events:none}.wind-chart-cursor-dot.wind{stroke:#126b91}.wind-chart-cursor-dot.gust{stroke:#a95a24}.wind-chart-hit{fill:transparent;cursor:crosshair;touch-action:none}.wind-chart-readout{margin:-2px 0 8px;color:var(--ink);font-size:.82rem;font-weight:750;min-height:1.2em}.wind-readings-scroll-shell{position:relative}.wind-readings-wrap{max-height:132px;overflow:auto;border:1px solid var(--line);border-radius:10px;-webkit-overflow-scrolling:touch}.wind-readings-scroll-cue{display:none}@media(max-width:640px){.wind-readings-scroll-shell.has-more::after{content:"";position:absolute;left:1px;right:1px;bottom:1px;height:40px;border-radius:0 0 9px 9px;background:linear-gradient(to bottom,rgba(255,255,255,0),rgba(255,255,255,.94));pointer-events:none}.wind-readings-scroll-cue{position:absolute;z-index:3;left:50%;bottom:6px;transform:translateX(-50%);display:none;padding:3px 8px;border-radius:999px;background:rgba(255,255,255,.94);box-shadow:0 1px 5px rgba(7,31,49,.16);color:var(--muted);font-size:.68rem;font-weight:850;letter-spacing:.03em;white-space:nowrap;pointer-events:none}.wind-readings-scroll-shell.has-more .wind-readings-scroll-cue{display:block}}.wind-readings-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.84rem}.wind-readings-table th,.wind-readings-table td{padding:7px 9px;border-top:1px solid var(--line);text-align:left;white-space:nowrap}.wind-readings-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc;color:var(--muted);font-size:.7rem;text-transform:uppercase;letter-spacing:.05em}.wind-readings-table tbody tr:first-child td{border-top:0}.card-action-row{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}#current-summary-card,.wind-card{min-width:0}.timeline-scope-note{margin:.15rem 0 1rem;color:var(--muted);font-size:.88rem}.current-events-integrated{margin:14px 0 4px;padding:10px 0 0;border-top:1px solid var(--line)}.current-events-head{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:8px}.current-events-head strong{color:var(--navy);font-size:.92rem}.current-events-head span{color:var(--muted);font-size:.78rem}.current-key-times{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:28px;row-gap:2px}.current-key-time{display:grid;grid-template-columns:76px minmax(0,1fr);gap:10px;align-items:baseline;padding:5px 0;border-bottom:1px solid #edf2f3;font-size:.86rem}.current-key-time-time{font-weight:800;color:var(--navy);white-space:nowrap}.current-key-time-label{color:var(--ink)}.current-key-time-label strong{font-weight:800}.current-key-time-meta{color:var(--muted);margin-left:6px;white-space:nowrap}@media(max-width:640px){.current-key-times{grid-template-columns:1fr}.current-key-time{grid-template-columns:72px minmax(0,1fr)}}.details-link-card{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap}.details-link-card h2{margin-bottom:.2rem}.details-link{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;white-space:nowrap}.details-note{color:var(--muted);font-size:.88rem;margin:-4px 0 14px}.info-popup-row{display:flex;justify-content:flex-end;margin:8px 0 12px}.map-info-popup-row{gap:8px;flex-wrap:wrap}.info-popup-open{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);border-radius:999px;padding:8px 12px;background:#fff;color:var(--blue);font:inherit;font-size:.84rem;font-weight:850;cursor:pointer}.info-popup-open:hover{background:var(--paper)}.info-popup-open:focus-visible{outline:2px solid var(--blue);outline-offset:2px}.tide-context-launcher{grid-column:1/-1}.tide-context-open{width:100%;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px 18px;border:1px solid var(--line);border-radius:16px;background:#fff;color:var(--blue);box-shadow:var(--shadow);font:inherit;font-weight:850;cursor:pointer;text-align:left}.tide-context-open:hover{background:var(--paper)}.tide-context-open:focus-visible{outline:2px solid var(--blue);outline-offset:2px}.tide-context-modal,.info-popup-modal{position:fixed;inset:0;z-index:3000;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(7,31,49,.38)}.tide-context-modal[hidden],.info-popup-modal[hidden]{display:none}.tide-context-dialog,.info-popup-dialog{width:min(640px,calc(100vw - 32px));max-height:min(78vh,720px);display:flex;flex-direction:column;background:#fff;border:1px solid var(--line);border-radius:20px;box-shadow:0 24px 70px rgba(7,31,49,.32);overflow:hidden}.tide-context-dialog-head,.info-popup-dialog-head{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:16px 16px 12px 20px;border-bottom:1px solid var(--line);background:#fff;flex:0 0 auto}.tide-context-dialog-head h2,.info-popup-dialog-head h2{margin:0}.tide-context-close,.info-popup-close{display:inline-flex;align-items:center;justify-content:center;width:42px;height:42px;flex:0 0 42px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--navy);font:inherit;font-size:1.55rem;font-weight:700;line-height:1;cursor:pointer}.tide-context-close:hover,.info-popup-close:hover{background:var(--paper)}.tide-context-body,.info-popup-body{overflow:auto;padding:18px 20px 22px;-webkit-overflow-scrolling:touch}.tide-context-body>:first-child,.info-popup-body>:first-child{margin-top:0}.tide-context-body>:last-child,.info-popup-body>:last-child{margin-bottom:0}@media(max-width:700px){.tide-context-modal,.info-popup-modal{align-items:flex-end;padding:0;background:rgba(7,31,49,.42)}.tide-context-dialog,.info-popup-dialog{width:100%;max-height:calc(86dvh - env(safe-area-inset-bottom));border-radius:20px 20px 0 0;border-bottom:0}.tide-context-dialog-head,.info-popup-dialog-head{padding-top:14px;padding-right:max(12px,env(safe-area-inset-right));padding-left:max(18px,env(safe-area-inset-left))}.tide-context-close,.info-popup-close{width:44px;height:44px;flex-basis:44px}.tide-context-body,.info-popup-body{padding-right:max(18px,env(safe-area-inset-right));padding-bottom:max(24px,calc(env(safe-area-inset-bottom) + 14px));padding-left:max(18px,env(safe-area-inset-left))}}.current-chart-header{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap}.current-window-inline{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin:2px 0 10px;color:var(--muted);font-size:.86rem}.current-window-inline strong{color:var(--navy);font-size:.86rem}.current-window-inline span{white-space:nowrap}.current-chart-header h2{margin-bottom:.15rem}.current-date-label{color:var(--muted);font-weight:750;font-size:.9rem}.current-range-toolbar{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin:8px 0 10px;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:var(--paper)}.current-range-toolbar .current-date-nav{display:inline-flex;align-items:center;min-height:44px;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:8px 12px;background:#fff;color:var(--blue);font-size:.86rem;font-weight:850}.current-range-toolbar .current-date-nav.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-control-label{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:.75rem;font-weight:850}.current-control-label .current-date-picker{min-height:44px;font-size:1rem}@media(max-width:640px){.current-range-toolbar{align-items:stretch}.current-control-label{flex:1 1 140px}.current-range-toolbar .current-date-nav{justify-content:center;flex:1 1 135px}}.current-date-controls{display:flex;gap:7px;flex-wrap:wrap;align-items:center}.current-date-picker{border:1px solid var(--line);border-radius:999px;padding:6px 10px;background:#fff;color:var(--navy);font:inherit;font-size:.82rem;font-weight:750;min-height:34px}.current-date-picker:focus{outline:2px solid var(--blue);outline-offset:2px}.current-refreshing{opacity:.55;transition:opacity .15s ease}.current-date-controls a{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:7px 11px;background:#fff;color:var(--blue);font-size:.82rem;font-weight:850}.current-date-controls a:hover{background:var(--paper)}.current-date-controls a.is-current{background:var(--navy);border-color:var(--navy);color:#fff}.current-planning{margin:16px 0 12px;padding:14px 16px;border:1px solid var(--line);border-radius:16px;background:#fff}.current-planning-head{display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:10px}.current-planning-head strong{color:var(--navy);font-size:1rem}.current-planning-head span{color:var(--muted);font-size:.82rem}.planning-preferences{display:flex;flex-direction:column;gap:10px;margin:8px 0 12px}.planning-preferences-row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;width:100%}.planning-preferences label{display:flex;gap:5px;align-items:center;color:var(--muted);font-size:.78rem;font-weight:850}.planning-preferences input{min-height:40px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--navy);font:inherit;font-size:1rem;padding:6px 8px}.planning-preferences input[type="number"]{width:76px}.planning-preferences b{color:var(--muted);font-size:.82rem}@media(max-width:640px){.planning-preferences label{flex:1 1 130px;justify-content:space-between}.planning-preferences input[type="time"]{min-width:110px}}.planning-help{margin:2px 0 12px;padding:10px 12px;border-radius:10px;background:#f7f9fa;color:var(--ink);font-size:.82rem;line-height:1.45}.planning-help strong{color:var(--navy)}.current-planning-days{display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:8px}.planning-day{border:1px solid var(--line);border-radius:12px;padding:10px;min-width:0}.planning-day.preferred{background:#eef8f3}.planning-day.caution{background:#fff8df;border-color:#e7c978}.planning-day.redflag{background:#fff0ed;border-color:#dfa297}.planning-date{font-size:.78rem;font-weight:850;color:var(--navy)}.planning-status{font-size:.92rem;font-weight:900;margin-top:2px}.preferred .planning-status{color:#176246}.caution .planning-status{color:#775900}.redflag .planning-status{color:#9a3328}.planning-detail{font-size:.78rem;line-height:1.35;color:var(--ink);margin-top:5px}.planning-disclaimer{color:var(--muted);font-size:.75rem;margin-top:9px}@media(max-width:640px){.current-planning-days{grid-template-columns:1fr 1fr}.planning-detail{font-size:.8rem}}.current-chart-wrap .event-point,.current-chart-wrap .event-point:hover{cursor:default!important;pointer-events:none}.current-chart-wrap{margin-top:16px}.current-chart-svg{display:block;width:100%;height:auto;background:#f8fbfc;border:1px solid var(--line);border-radius:16px}.grid-line{stroke:#d9e4e8;stroke-width:1}.v-grid-line{stroke:#e6eef1;stroke-width:1}.day-grid-line{stroke:#b7cbd4;stroke-width:1.4}.zero-line{stroke:#17384a;stroke-width:2}.axis-label{fill:#657d89;font-size:11px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.y-label{text-anchor:end}.x-label{text-anchor:middle}.axis-title{fill:#657d89;font-size:11px;text-anchor:middle}.tide-y-label{text-anchor:start}.tide-range-bar{opacity:1;stroke-width:3;stroke-linecap:round;fill:none}.tide-range-bar.typical{stroke:#4a6473}.tide-range-bar.elevated{stroke:#d5ad28}.tide-range-bar.large{stroke:#d9791f}.tide-range-bar.exceptional{stroke:#c94a3f}.tide-range-value{font-size:11px;font-weight:900;text-anchor:middle;paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round;fill:#17384a}.tide-range-value.axis-adjacent{text-anchor:end}.tide-range-toggle{display:flex;align-items:center;gap:7px;color:var(--ink);font-size:.84rem;font-weight:800}.tide-range-toggle input{margin:0}.tide-range-legend{display:flex;gap:10px;flex-wrap:wrap;align-items:center;color:var(--muted);font-size:.76rem}.tide-range-key{display:inline-flex;align-items:center;gap:5px}.tide-range-swatch{width:11px;height:11px;border-radius:3px;display:inline-block}.tide-range-swatch.typical{background:#4a6473}.tide-range-swatch.elevated{background:#d5ad28}.tide-range-swatch.large{background:#d9791f}.tide-range-swatch.exceptional{background:#c94a3f}.night-window{fill:#aebdc4;opacity:.78}.sail-window{fill:#f8fbfc;opacity:.96}.preferred-window{fill:#f0d46d;opacity:.34}.flood-area{fill:#6d8fd0;opacity:.86}.ebb-area{fill:#0b9d83;opacity:.90}.current-line{fill:none;stroke:#214b62;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}.event-point{stroke:#fff;stroke-width:1.5}.event-point.flood{fill:#5478bd}.event-point.ebb{fill:#078a75}.event-point.slack{fill:#756d64}.event-time{fill:#17384a;font-size:9px;font-weight:800;text-anchor:middle;paint-order:stroke;stroke:#fff;stroke-width:2.5px;stroke-linejoin:round}.event-time.flood{fill:#294f91}.event-time.ebb{fill:#066c5d}.event-time.slack{fill:#514b46}.now-line{stroke:#c63a2b;stroke-width:2.5}.now-label{fill:#c63a2b;font-size:11px;font-weight:800}.chart-explainer{color:var(--ink);font-size:.94rem;line-height:1.45;margin:2px 0 12px}.chart-note{color:var(--muted);font-size:.82rem;margin-top:9px}.candidate-table{width:100%;border-collapse:collapse;font-size:.86rem}.candidate-table th,.candidate-table td{padding:10px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}.candidate-table th{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}.candidate-table td.num,.candidate-table th.num{text-align:right;white-space:nowrap}.candidate-good td.status{font-weight:800}.candidate-bad{opacity:.82}.candidate-selected{background:rgba(20,120,100,.08)}.candidate-selected td:first-child{font-weight:800}.candidate-note{color:var(--muted);font-size:.82rem;margin:0 0 12px}.candidate-scroll{overflow-x:auto}.candidate-link{color:var(--blue);text-decoration:none;font-weight:800}.candidate-link:hover{text-decoration:underline}.candidate-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:0 0 12px}.nearest-link{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:7px 12px;color:var(--blue);font-weight:800;text-decoration:none;background:#fff}.nearest-link:hover{background:var(--paper)}.map-card{overflow:hidden}.map-intro{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px}.map-intro-title{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.map-intro-title h2{margin:0}.map-help{color:var(--muted);font-size:.9rem;max-width:600px;margin-top:6px}.location-help{position:relative}.location-help>summary{list-style:none;display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--blue);font-size:1rem;font-weight:900;cursor:pointer;box-shadow:0 2px 8px rgba(8,43,69,.08)}.location-help>summary::-webkit-details-marker{display:none}.location-help>summary:focus{outline:2px solid var(--blue);outline-offset:2px}.location-help-panel{position:absolute;z-index:1450;top:calc(100% + 8px);left:0;width:min(430px,calc(100vw - 48px));padding:0;border:1px solid var(--line);border-radius:14px;background:#fff;box-shadow:0 14px 34px rgba(8,43,69,.20);color:var(--ink);font-size:.88rem;line-height:1.45;text-transform:none;letter-spacing:normal;font-weight:500;overflow:hidden}.location-help-header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 10px 8px 16px;border-bottom:1px solid var(--line);background:#f8fbfc}.location-help-header strong{color:var(--navy);font-size:.9rem}.location-help-body{padding:12px 16px 14px}.location-help-close{position:static;flex:0 0 auto;width:36px;height:36px;display:flex;align-items:center;justify-content:center;border:0;border-radius:999px;background:#eef5f8;color:var(--navy);font:inherit;font-size:1.35rem;font-weight:900;line-height:1;cursor:pointer}.location-help-close:hover{background:#e1edf2}.location-help-close:focus{outline:2px solid var(--blue);outline-offset:2px}.location-help-panel p{margin:0 0 9px}.location-help-panel p:last-child{margin-bottom:0}@media(max-width:640px){.location-help-panel{position:fixed;z-index:2400;top:calc(env(safe-area-inset-top,0px) + 70px);left:14px;right:14px;width:auto;max-height:calc(100dvh - env(safe-area-inset-top,0px) - env(safe-area-inset-bottom,0px) - 100px);overflow:auto;-webkit-overflow-scrolling:touch}.location-help-header{position:sticky;top:0;z-index:2}.location-help-close{width:44px;height:44px}}.map-wrap{border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#dfecef}.location-map{height:390px;width:100%}.map-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px}.map-coordinate{font-variant-numeric:tabular-nums;color:var(--muted);font-size:.9rem}.map-go{display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--blue);border-radius:999px;padding:10px 16px;background:var(--blue);color:#fff;font-weight:850;text-decoration:none;cursor:pointer;min-height:42px}.map-go[aria-disabled="true"]{opacity:.45;pointer-events:none}.map-search-area{cursor:pointer}.map-search-area[aria-disabled="true"]{opacity:.45;pointer-events:none}.map-search-area[hidden]{display:none}.map-search-status{color:var(--muted);font-size:.82rem}.map-primary-actions{display:flex;gap:12px;align-items:stretch;flex-wrap:wrap;margin-top:12px}.map-primary-actions .map-go,.map-primary-actions .map-reset{flex:1 1 220px;max-width:360px;min-height:44px;padding:10px 16px;border:1px solid var(--blue);border-radius:999px;background:var(--blue);color:#fff;font:inherit;font-weight:850;text-align:center;justify-content:center;cursor:pointer}.map-reset{display:inline-flex;align-items:center}.map-reset:disabled{opacity:.45;cursor:default}.location-map .leaflet-popup-pane{z-index:1200}.location-map .leaflet-control-attribution,.location-map .map-scale-status{pointer-events:none}@media(max-width:700px){.location-map .leaflet-bottom.leaflet-right{z-index:650}.map-primary-actions{display:grid;grid-template-columns:1fr;gap:10px}.map-primary-actions .map-go,.map-primary-actions .map-reset{width:100%;max-width:none;min-height:46px}}.map-navigation{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}.map-state-controls{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:10px}.map-current-toggle{display:inline-flex;align-items:center;gap:7px;color:var(--ink);font-weight:750;font-size:.88rem}.map-current-toggle input{margin:0}.map-overlays-menu{position:relative}.map-overlays-menu summary{list-style:none;cursor:pointer;border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#fff;color:var(--blue);font-weight:850;font-size:.88rem}.map-overlays-menu summary::-webkit-details-marker{display:none}.map-overlays-menu summary::after{content:" ▾";font-size:.78em}.map-overlays-menu[open] summary::after{content:" ▴"}.map-overlays-panel{position:absolute;z-index:700;top:calc(100% + 6px);left:0;min-width:270px;max-width:min(360px,88vw);padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:#fff;box-shadow:0 10px 28px rgba(7,31,49,.18);display:flex;flex-direction:column;gap:10px}.map-overlays-menu#map-overlays-menu>.map-overlays-panel{position:fixed;z-index:12000;top:24px;bottom:auto;left:50%;right:auto;transform:translateX(-50%);width:min(420px,calc(100vw - 32px));max-width:none;max-height:calc(100dvh - 48px);overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;touch-action:pan-y}.map-overlays-toolbar{display:flex;align-items:center;gap:8px;flex:0 0 auto;position:sticky;top:-12px;z-index:4;background:#fff;padding:12px 0 8px}.map-overlays-toolbar .map-overlay-clear{flex:1;min-width:0}.map-overlays-toolbar .map-menu-close{position:static;align-self:center;margin:0 0 0 auto}.map-overlay-group{border:1px solid var(--line);border-radius:10px;background:#fbfdfe;overflow:visible}.map-overlay-group+ .map-overlay-group{margin-top:2px}.map-overlay-group>summary{list-style:none;cursor:pointer;padding:9px 10px;font-size:.78rem;font-weight:900;letter-spacing:.055em;text-transform:uppercase;color:var(--navy);display:flex;align-items:center;justify-content:space-between;gap:10px;background:#f5f9fa}.map-overlay-group>summary::-webkit-details-marker{display:none}.map-overlay-group>summary::after{content:"▸";font-size:.82rem;color:var(--muted);transition:transform .15s ease}.map-overlay-group[open]>summary::after{transform:rotate(90deg)}.map-overlay-group-body{display:flex;flex-direction:column;gap:8px;padding:9px 10px 10px;max-height:none!important;overflow:visible!important;overscroll-behavior:auto}.map-overlay-group .map-overlay-toggle{font-size:.84rem}.map-overlay-group .map-overlay-toggle span{min-width:0}.map-overlay-note{max-height:150px;overflow:auto;padding-right:3px}.map-overlay-toggle{display:flex;align-items:flex-start;gap:8px;color:var(--ink);font-weight:750;font-size:.88rem;line-height:1.3}.map-overlay-toggle input{margin-top:2px}.map-overlay-note{color:var(--muted);font-size:.76rem;line-height:1.35;padding-top:2px;border-top:1px solid var(--line)}.map-overlay-help{margin-top:8px;color:var(--muted);font-size:.78rem;line-height:1.4}.map-overlay-help summary{cursor:pointer;color:var(--blue);font-weight:800}.map-overlay-help-body{margin-top:6px;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#f8fbfc}
 .map-menu-close{display:inline-flex;align-items:center;justify-content:center;position:relative;top:auto;align-self:flex-end;z-index:2;width:36px;height:36px;margin:0;border:0;border-radius:999px;background:#edf4f6;color:var(--navy);font:inherit;font-size:1.35rem;font-weight:900;line-height:1;cursor:pointer;flex:0 0 auto}
 .map-menu-close:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
 @media(max-width:700px){
@@ -7449,7 +8027,7 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 @media(max-width:600px){.map-resize-handle{height:22px}}
 .map-location-info-grid{display:grid;grid-template-columns:1fr;gap:12px;margin-top:10px}.map-location-info-grid .map-coordinate-entry{margin-top:0;align-self:start}.selected-location-weather{margin-top:0;padding:14px 16px;border:1px solid var(--line);border-radius:14px;background:var(--paper);min-height:128px}.selected-location-weather-empty{min-height:98px;display:flex;flex-direction:column;justify-content:center;gap:7px;color:var(--muted)}.selected-location-weather-empty[hidden]{display:none}.selected-location-weather-empty strong{color:var(--navy);font-size:1rem}.selected-location-weather-empty span{line-height:1.4}.selected-location-weather-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;margin:0 0 4px}.selected-location-weather-head strong{color:var(--navy);font-size:1rem}.selected-location-weather-place{font-size:.86rem;font-weight:750;color:var(--ink);margin:0 0 10px}.selected-location-weather-columns{display:grid;grid-template-columns:minmax(240px,.78fr) minmax(0,1.32fr);gap:18px;align-items:start}.selected-location-weather-point-column{min-width:0}.selected-location-weather-updated{color:var(--muted);font-size:.75rem}.selected-location-weather-metrics{display:flex;gap:14px;flex-wrap:wrap;align-items:baseline}.selected-location-weather-metric{font-size:.88rem;color:var(--ink)}.selected-location-weather-metric b{color:var(--navy)}.selected-location-weather-forecast{margin:7px 0 0;color:var(--ink);font-size:.9rem}.selected-location-weather-note{margin:6px 0 0;color:var(--muted);font-size:.75rem}.selected-location-weather-error{margin:6px 0 0;color:#8b2c2c;font-size:.82rem}.selected-location-weather-detail{margin:0;padding:0 0 0 18px;border-left:1px solid var(--line);min-width:0;align-self:start}.selected-location-weather-detail-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:8px}.selected-location-weather-detail-head strong{color:var(--navy);font-size:.92rem}.selected-location-point-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:7px}.selected-location-point-head strong{color:var(--navy);font-size:.88rem}.selected-location-weather-context{margin:7px 0 0;color:var(--muted);font-size:.82rem;line-height:1.4}@media(max-width:760px){.selected-location-weather{min-height:0}.selected-location-weather-columns{grid-template-columns:1fr;gap:12px}.selected-location-weather-detail{padding:12px 0 0;border-left:0;border-top:1px solid var(--line)}}.map-coordinate-entry{display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-top:10px}.map-coordinate-field{display:flex;flex-direction:column;gap:3px}.map-coordinate-field label{font-size:.72rem;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}.map-coordinate-field input{width:132px;padding:7px 9px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--ink);font:inherit}.map-coordinate-use{padding:8px 12px;border:1px solid #126b91;border-radius:9px;background:#126b91;color:#fff;font-weight:850;cursor:pointer}.map-coordinate-use:hover{filter:brightness(.97)}.map-coordinate-error{font-size:.8rem;color:#9b3027;min-height:1.2em}
-.map-station-list{margin-top:12px}.map-station-list-title{font-weight:850;color:var(--navy);margin:0 0 8px}.map-station-table-wrap{max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:14px;background:#fff}.map-station-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.86rem}.map-station-table th,.map-station-table td{padding:8px 10px;border-top:1px solid var(--line);text-align:left;vertical-align:top;background:#fff}.map-station-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc}.map-station-table th{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}.map-station-table tbody tr:first-child td{border-top:0}.map-station-table a{color:var(--blue);font-weight:800;text-decoration:none}.map-station-table a:hover{text-decoration:underline}.map-scale-status{color:var(--muted);font-size:.78rem;font-weight:800;line-height:1.25;white-space:nowrap}.map-nautical-zoom-note{position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:850;background:rgba(7,31,49,.92);color:#fff;border-radius:999px;padding:7px 12px;font-size:.78rem;font-weight:850;box-shadow:0 2px 8px rgba(0,0,0,.2);pointer-events:none;white-space:nowrap;max-width:calc(100% - 32px);overflow:hidden;text-overflow:ellipsis}.map-overlay-toggle.is-unavailable{opacity:.5}.map-structure-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-structure-status[hidden]{display:none}.map-saildrone-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-saildrone-status[hidden]{display:none}.map-alertcalifornia-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-alertcalifornia-status[hidden]{display:none}.map-swell-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-swell-status[hidden]{display:none}.map-swell-controls{margin:2px 0 8px 26px;padding:8px 10px;border-left:2px solid var(--line);font-size:.78rem;color:var(--muted)}.map-swell-controls[hidden]{display:none}.map-swell-control-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.map-swell-control-row input[type=range]{flex:1 1 150px;min-width:120px}.map-swell-time{font-weight:850;color:var(--navy)}.map-swell-slider-wrap{flex:1 1 220px;min-width:180px}.map-swell-slider-wrap input[type=range]{width:100%;min-width:0;height:34px;margin:0;touch-action:pan-y;cursor:pointer}.map-swell-slider-wrap input[type=range]::-webkit-slider-thumb{cursor:pointer}.map-swell-slider-wrap input[type=range]::-moz-range-thumb{cursor:pointer}.map-swell-slider-labels{display:flex;justify-content:space-between;gap:12px;margin-top:2px;color:var(--muted);font-size:.72rem;font-weight:800}.map-swell-selected-time{margin-top:6px;color:var(--navy);font-size:.79rem;font-weight:850;line-height:1.35}.map-swell-control-note{margin-top:5px;line-height:1.35}.map-swell-legend{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:6px;color:var(--muted);font-size:.76rem}.map-swell-legend[hidden]{display:none}.map-swell-gradient{width:170px;height:10px;border-radius:999px;background:linear-gradient(90deg,#123a8c,#006fc4,#00a8b5,#34b34a,#f0cf22,#f07818,#c91515);border:1px solid rgba(16,47,68,.35)}.swell-arrow-icon{background:transparent!important;border:0!important;pointer-events:auto!important;cursor:pointer}.swell-arrow-wrap{position:relative;width:28px;height:24px;transform-origin:14px 12px;opacity:.68}.swell-arrow-glyph{position:absolute;left:7px;top:2px;font-size:15px;line-height:17px;color:#062838;text-shadow:0 1px 1px rgba(255,255,255,.72)}.swell-info-panel{position:absolute;top:14px;right:14px;z-index:905;width:min(300px,calc(100% - 76px));max-height:calc(100% - 28px);display:flex;flex-direction:column;background:#fff;border:1px solid rgba(16,47,68,.22);border-radius:14px;box-shadow:0 12px 30px rgba(7,31,49,.28);overflow:hidden}.swell-info-panel[hidden]{display:none}.swell-info-panel-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 11px 8px;border-bottom:1px solid var(--line);background:#f8fbfc}.swell-info-panel-title{min-width:0;color:var(--navy);font-weight:900;line-height:1.2}.swell-info-panel-close{flex:0 0 auto;width:30px;height:30px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--blue);font:inherit;font-size:1.25rem;line-height:1;cursor:pointer}.swell-info-panel-close:hover{background:var(--paper)}.swell-info-panel-body{padding:10px 11px 12px;overflow:auto;-webkit-overflow-scrolling:touch;font-size:.82rem;line-height:1.35}.swell-info-row{display:flex;justify-content:space-between;gap:14px;margin-top:5px}.swell-info-label{color:var(--muted)}@media(max-width:600px){.swell-info-panel{top:10px;right:10px;width:min(280px,calc(100% - 64px));max-height:calc(100% - 20px)}}.alertcalifornia-panel{position:absolute;top:14px;right:14px;z-index:900;width:min(330px,calc(100% - 76px));max-height:calc(100% - 28px);display:flex;flex-direction:column;background:#fff;border:1px solid rgba(16,47,68,.22);border-radius:14px;box-shadow:0 12px 30px rgba(7,31,49,.28);overflow:hidden}.alertcalifornia-panel[hidden]{display:none}.alertcalifornia-panel-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 11px 8px;border-bottom:1px solid var(--line);background:#f8fbfc}.alertcalifornia-panel-title{min-width:0;color:var(--navy);font-weight:900;line-height:1.2;overflow-wrap:anywhere}.alertcalifornia-panel-close{flex:0 0 auto;width:30px;height:30px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--blue);font:inherit;font-size:1.25rem;line-height:1;cursor:pointer}.alertcalifornia-panel-close:hover{background:var(--paper)}.alertcalifornia-panel-body{padding:10px 11px 12px;overflow:auto;-webkit-overflow-scrolling:touch}.alertcalifornia-panel img{display:block;width:100%;height:auto;max-height:190px;object-fit:contain;margin:8px 0 7px;border-radius:8px;background:#eef3f5}.alertcalifornia-panel .camera-meta{margin-top:4px;color:#5f7380;font-size:.78rem}.alertcalifornia-panel .camera-link{display:inline-block;margin-top:7px;font-weight:850;color:#126b91;text-decoration:none}.alertcalifornia-panel .camera-link:hover{text-decoration:underline}@media(max-width:600px){.alertcalifornia-panel{top:10px;right:10px;width:min(290px,calc(100% - 64px));max-height:calc(100% - 20px)}.alertcalifornia-panel img{max-height:150px}}.map-windbarb-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-windbarb-status[hidden]{display:none}.wind-barb-icon{background:transparent!important;border:0!important}.wind-barb-icon svg{overflow:visible;filter:drop-shadow(0 1px 1px rgba(255,255,255,.95))}.wind-barb-icon .barb-stroke{stroke:#102f44;stroke-width:2;fill:none;stroke-linecap:round;stroke-linejoin:round}.wind-barb-icon .barb-flag{fill:#102f44;stroke:#102f44;stroke-width:1}.wind-barb-icon.stale{opacity:.48}.map-undersea-feature-label{background:transparent!important;border:0!important;box-shadow:none!important;white-space:nowrap;pointer-events:none}.map-undersea-feature-label .undersea-dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;background:#ffd166;border:1px solid #20323c;vertical-align:1px;box-shadow:0 0 0 1px rgba(255,255,255,.75)}.map-undersea-feature-label .undersea-name{font-size:13px;font-weight:850;letter-spacing:.01em;color:#fff7d1;text-shadow:-2px -2px 0 #102a38,2px -2px 0 #102a38,-2px 2px 0 #102a38,2px 2px 0 #102a38,0 2px 3px rgba(0,0,0,.85)}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#2f855a}.map-dot.current{background:#7d55a6}.map-dot.saildrone{width:12px;height:12px;background:#8d3fb0;border:2px solid #fff;box-shadow:0 0 0 1px #8d3fb0}.map-dot.alertcalifornia{width:12px;height:12px;background:#c74634;border:2px solid #fff;box-shadow:0 0 0 1px #a93628}.map-dot.marine{width:12px;height:12px;border:2px solid #fff;box-shadow:0 0 0 1px rgba(16,47,68,.35)}.map-dot.marina{background:#126b91}.map-dot.boatyard{background:#7a4a21}.map-dot.fuel{background:#347a4b}.map-dot.ramp{background:#376f9c}.map-dot.ferry{background:#247f8f}.map-dot.supply{background:#805f2f}.map-dot.club{background:#6c4a91}.map-dot.restaurant{background:#a45135}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}
+.map-station-list{margin-top:12px}.map-station-list-title{font-weight:850;color:var(--navy);margin:0 0 8px}.map-station-table-wrap{max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:14px;background:#fff}.map-station-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.86rem}.map-station-table th,.map-station-table td{padding:8px 10px;border-top:1px solid var(--line);text-align:left;vertical-align:top;background:#fff}.map-station-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc}.map-station-table th{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}.map-station-table tbody tr:first-child td{border-top:0}.map-station-table a{color:var(--blue);font-weight:800;text-decoration:none}.map-station-table a:hover{text-decoration:underline}.map-scale-status{color:var(--muted);font-size:.78rem;font-weight:800;line-height:1.25;white-space:nowrap}.map-nautical-zoom-note{position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:850;background:rgba(7,31,49,.92);color:#fff;border-radius:999px;padding:7px 12px;font-size:.78rem;font-weight:850;box-shadow:0 2px 8px rgba(0,0,0,.2);pointer-events:none;white-space:nowrap;max-width:calc(100% - 32px);overflow:hidden;text-overflow:ellipsis}.map-overlay-toggle.is-unavailable{opacity:.5}.map-structure-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-structure-status[hidden]{display:none}.map-saildrone-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-saildrone-status[hidden]{display:none}.map-alertcalifornia-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-alertcalifornia-status[hidden]{display:none}.map-swell-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-swell-status[hidden]{display:none}.map-swell-controls{margin:2px 0 8px 26px;padding:8px 10px;border-left:2px solid var(--line);font-size:.78rem;color:var(--muted)}.map-swell-controls[hidden]{display:none}.map-swell-control-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.map-swell-control-row input[type=range]{flex:1 1 150px;min-width:120px}.map-swell-time{font-weight:850;color:var(--navy)}.map-swell-slider-wrap{flex:1 1 220px;min-width:180px}.map-swell-slider-wrap input[type=range]{width:100%;min-width:0;height:34px;margin:0;touch-action:pan-y;cursor:pointer}.map-swell-slider-wrap input[type=range]::-webkit-slider-thumb{cursor:pointer}.map-swell-slider-wrap input[type=range]::-moz-range-thumb{cursor:pointer}.map-swell-slider-labels{display:flex;justify-content:space-between;gap:12px;margin-top:2px;color:var(--muted);font-size:.72rem;font-weight:800}.map-swell-selected-time{margin-top:6px;color:var(--navy);font-size:.79rem;font-weight:850;line-height:1.35}.map-swell-control-note{margin-top:5px;line-height:1.35}.map-swell-legend{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:6px;color:var(--muted);font-size:.76rem}.map-swell-legend[hidden]{display:none}.map-swell-gradient{width:170px;height:10px;border-radius:999px;background:linear-gradient(90deg,#123a8c,#006fc4,#00a8b5,#34b34a,#f0cf22,#f07818,#c91515);border:1px solid rgba(16,47,68,.35)}.map-air-temperature-legend{margin-top:12px;padding:10px 11px;border:1px solid var(--line);border-radius:12px;background:#f8fbfc;color:var(--muted);font-size:.76rem}.map-air-temperature-legend[hidden]{display:none}.map-air-temperature-legend-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap}.map-air-temperature-legend-head strong{color:var(--navy)}.map-air-temperature-legend-context{font-size:.72rem;font-weight:800}.map-air-temperature-scale{display:grid;grid-template-columns:auto minmax(150px,1fr) auto;align-items:center;gap:8px;margin-top:7px}.map-air-temperature-gradient{width:100%;height:12px;border-radius:999px;background:linear-gradient(90deg,#5b2ca3 0%,#203f9a 8.3%,#2b78c5 25%,#3fb7db 35%,#2aa89a 50%,#42a94b 62.5%,#8bc34a 70.8%,#e6d84b 79.2%,#f3a63a 87.5%,#df4b32 95.8%,#8f1d2c 100%);border:1px solid rgba(16,47,68,.35)}.air-temperature-map-tooltip{background:rgba(7,31,49,.94);border:0;border-radius:9px;color:#fff;box-shadow:0 3px 12px rgba(0,0,0,.28);font-size:.78rem;font-weight:850;padding:6px 8px;white-space:nowrap}.air-temperature-map-tooltip:before{border-top-color:rgba(7,31,49,.94)!important}.map-air-temperature-map-time{position:absolute;left:12px;bottom:12px;z-index:845;max-width:calc(100% - 90px);padding:7px 10px;border-radius:999px;background:rgba(7,31,49,.90);color:#fff;box-shadow:0 2px 8px rgba(0,0,0,.22);font-size:.78rem;font-weight:850;line-height:1.2;pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.map-air-temperature-map-time[hidden]{display:none}.map-air-temperature-map-time.is-playing{background:rgba(7,31,49,.94)}.map-air-temperature-transport{position:absolute;left:12px;bottom:52px;z-index:846;display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:6px 8px;border-radius:12px;background:rgba(255,255,255,.94);box-shadow:0 2px 9px rgba(0,0,0,.24);font-size:.75rem;font-weight:800}.map-air-temperature-transport[hidden]{display:none}.map-air-temperature-transport button,.map-air-temperature-transport select{min-height:30px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--navy);font:inherit;font-weight:850}.map-air-temperature-transport button{padding:4px 8px;cursor:pointer}.map-air-temperature-transport label{display:flex;align-items:center;gap:4px;color:var(--navy)}.map-air-temperature-transport select{padding:3px 5px}.map-air-temperature-controls{margin:0 0 2px 26px;padding:5px 8px;border-left:2px solid var(--line);font-size:.78rem;color:var(--muted);min-height:28px}.map-air-temperature-controls[hidden]{display:block}.map-air-temperature-controls.is-disabled{opacity:.58}.map-air-temperature-control-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.map-air-temperature-control-row>label{font-weight:850;color:var(--navy)}.map-air-temperature-play{flex:0 0 auto;min-width:78px;min-height:34px;padding:6px 10px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--blue);font:inherit;font-weight:850;cursor:pointer}.map-air-temperature-play:hover,.map-air-temperature-play:focus-visible{background:var(--paper);outline:none}.map-air-temperature-play:disabled{opacity:.48;cursor:default}.map-air-temperature-play.is-playing{background:var(--accent-soft);color:var(--navy)}.map-air-temperature-slider-wrap{flex:1 1 240px;min-width:200px}.map-air-temperature-slider-wrap input[type=range]{width:100%;min-width:0;height:34px;margin:0;touch-action:pan-y;cursor:pointer}.map-air-temperature-slider-labels{display:grid;grid-template-columns:repeat(5,1fr);gap:4px;margin-top:1px;color:var(--muted);font-size:.68rem;font-weight:800}.map-air-temperature-slider-labels span{text-align:center}.map-air-temperature-slider-labels span:first-child{text-align:left}.map-air-temperature-slider-labels span:last-child{text-align:right}.map-air-temperature-selected-time{margin-top:5px;color:var(--navy);font-size:.79rem;font-weight:850;line-height:1.35}.map-air-temperature-control-note{margin-top:4px;line-height:1.35}.swell-arrow-icon{background:transparent!important;border:0!important;pointer-events:auto!important;cursor:pointer}.swell-arrow-wrap{position:relative;width:28px;height:24px;transform-origin:14px 12px;opacity:.68}.swell-arrow-glyph{position:absolute;left:7px;top:2px;font-size:15px;line-height:17px;color:#062838;text-shadow:0 1px 1px rgba(255,255,255,.72)}.swell-info-panel{position:absolute;top:14px;right:14px;z-index:905;width:min(300px,calc(100% - 76px));max-height:calc(100% - 28px);display:flex;flex-direction:column;background:#fff;border:1px solid rgba(16,47,68,.22);border-radius:14px;box-shadow:0 12px 30px rgba(7,31,49,.28);overflow:hidden}.swell-info-panel[hidden]{display:none}.swell-info-panel-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 11px 8px;border-bottom:1px solid var(--line);background:#f8fbfc}.swell-info-panel-title{min-width:0;color:var(--navy);font-weight:900;line-height:1.2}.swell-info-panel-close{flex:0 0 auto;width:30px;height:30px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--blue);font:inherit;font-size:1.25rem;line-height:1;cursor:pointer}.swell-info-panel-close:hover{background:var(--paper)}.swell-info-panel-body{padding:10px 11px 12px;overflow:auto;-webkit-overflow-scrolling:touch;font-size:.82rem;line-height:1.35}.swell-info-row{display:flex;justify-content:space-between;gap:14px;margin-top:5px}.swell-info-label{color:var(--muted)}@media(max-width:600px){.swell-info-panel{top:10px;right:10px;width:min(280px,calc(100% - 64px));max-height:calc(100% - 20px)}}.alertcalifornia-panel{position:absolute;top:14px;right:14px;z-index:900;width:min(330px,calc(100% - 76px));max-height:calc(100% - 28px);display:flex;flex-direction:column;background:#fff;border:1px solid rgba(16,47,68,.22);border-radius:14px;box-shadow:0 12px 30px rgba(7,31,49,.28);overflow:hidden}.alertcalifornia-panel[hidden]{display:none}.alertcalifornia-panel-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 11px 8px;border-bottom:1px solid var(--line);background:#f8fbfc}.alertcalifornia-panel-title{min-width:0;color:var(--navy);font-weight:900;line-height:1.2;overflow-wrap:anywhere}.alertcalifornia-panel-close{flex:0 0 auto;width:30px;height:30px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--blue);font:inherit;font-size:1.25rem;line-height:1;cursor:pointer}.alertcalifornia-panel-close:hover{background:var(--paper)}.alertcalifornia-panel-body{padding:10px 11px 12px;overflow:auto;-webkit-overflow-scrolling:touch}.alertcalifornia-panel img{display:block;width:100%;height:auto;max-height:190px;object-fit:contain;margin:8px 0 7px;border-radius:8px;background:#eef3f5}.alertcalifornia-panel .camera-meta{margin-top:4px;color:#5f7380;font-size:.78rem}.alertcalifornia-panel .camera-link{display:inline-block;margin-top:7px;font-weight:850;color:#126b91;text-decoration:none}.alertcalifornia-panel .camera-link:hover{text-decoration:underline}@media(max-width:600px){.alertcalifornia-panel{top:10px;right:10px;width:min(290px,calc(100% - 64px));max-height:calc(100% - 20px)}.alertcalifornia-panel img{max-height:150px}}.map-windbarb-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-windbarb-status[hidden]{display:none}.wind-barb-icon{background:transparent!important;border:0!important}.wind-barb-icon svg{overflow:visible;filter:drop-shadow(0 1px 1px rgba(255,255,255,.95))}.wind-barb-icon .barb-stroke{stroke:#102f44;stroke-width:2;fill:none;stroke-linecap:round;stroke-linejoin:round}.wind-barb-icon .barb-flag{fill:#102f44;stroke:#102f44;stroke-width:1}.wind-barb-icon.stale{opacity:.48}.map-undersea-feature-label{background:transparent!important;border:0!important;box-shadow:none!important;white-space:nowrap;pointer-events:none}.map-undersea-feature-label .undersea-dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;background:#ffd166;border:1px solid #20323c;vertical-align:1px;box-shadow:0 0 0 1px rgba(255,255,255,.75)}.map-undersea-feature-label .undersea-name{font-size:13px;font-weight:850;letter-spacing:.01em;color:#fff7d1;text-shadow:-2px -2px 0 #102a38,2px -2px 0 #102a38,-2px 2px 0 #102a38,2px 2px 0 #102a38,0 2px 3px rgba(0,0,0,.85)}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#2f855a}.map-dot.current{background:#7d55a6}.map-dot.saildrone{width:12px;height:12px;background:#8d3fb0;border:2px solid #fff;box-shadow:0 0 0 1px #8d3fb0}.map-dot.alertcalifornia{width:12px;height:12px;background:#c74634;border:2px solid #fff;box-shadow:0 0 0 1px #a93628}.map-dot.marine{width:12px;height:12px;border:2px solid #fff;box-shadow:0 0 0 1px rgba(16,47,68,.35)}.map-dot.marina{background:#126b91}.map-dot.boatyard{background:#7a4a21}.map-dot.fuel{background:#347a4b}.map-dot.ramp{background:#376f9c}.map-dot.ferry{background:#247f8f}.map-dot.supply{background:#805f2f}.map-dot.club{background:#6c4a91}.map-dot.restaurant{background:#a45135}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}
 .offshore-trip-card{border-left:5px solid #126b91}.offshore-trip-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap}.offshore-trip-coords{color:var(--muted);font-size:.82rem;font-weight:750}.offshore-trip-summary{margin:10px 0 12px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:#f7fbfc}.offshore-trip-summary strong{color:var(--navy)}.offshore-trip-metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:10px 0}.offshore-trip-metric{padding:9px 10px;border:1px solid var(--line);border-radius:11px;background:#fff}.offshore-trip-metric .label{font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:850}.offshore-trip-metric .value{margin-top:3px;color:var(--navy);font-weight:900;font-size:1rem}.offshore-trip-buoy{margin:4px 0 8px;color:var(--ink);font-size:.86rem}.offshore-trip-watch{margin:8px 0 0;padding-left:20px;color:var(--ink)}.offshore-trip-watch li{margin:3px 0}.offshore-trip-forecast{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px}.offshore-trip-period{padding:10px 12px;border:1px solid var(--line);border-radius:11px;background:#fbfdfe}.offshore-trip-period strong{display:block;color:var(--navy);margin-bottom:3px}.offshore-trip-period p{margin:0;line-height:1.42;font-size:.88rem}.offshore-trip-note{margin:9px 0 0;color:var(--muted);font-size:.78rem;line-height:1.45}.offshore-trip-error{color:#8b2c2c;font-size:.88rem}.offshore-trip-loading{color:var(--muted);font-weight:750}.fishing-planning{margin-top:18px;padding-top:16px;border-top:2px solid #dce8ed}.fishing-planning-head{display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap}.fishing-planning-head h3{margin:0;color:var(--navy);font-size:1.05rem}.fishing-planning-status{color:var(--muted);font-size:.78rem}.fishing-planning-summary{margin:10px 0;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:#fffdf5;line-height:1.45}.fishing-planning-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.fishing-planning-item{padding:10px 11px;border:1px solid var(--line);border-radius:11px;background:#fff}.fishing-planning-item .label{font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:850}.fishing-planning-item .value{margin-top:3px;color:var(--navy);font-weight:900;line-height:1.25}.fishing-planning-item .detail{margin-top:4px;color:var(--muted);font-size:.77rem;line-height:1.35}.fishing-planning-error{margin:8px 0 0;color:#8b2c2c;font-size:.82rem}@media(max-width:850px){.fishing-planning-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:520px){.fishing-planning-grid{grid-template-columns:1fr}}@media(max-width:800px){.offshore-trip-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:640px){.offshore-trip-forecast{grid-template-columns:1fr}}.marine-forecast-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap}
 .marine-forecast-zone{color:var(--muted);font-size:.84rem;font-weight:750}
 .marine-alerts{margin:8px 0 14px;display:flex;gap:7px;flex-wrap:wrap}
@@ -7471,7 +8049,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 <section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Open the full planning dashboard for location, wind, currents, forecasts, map layers, and customization controls.</p></div><a id="planning-page-link" class="planning-page-link" href="{{.PlanningDetailsURL}}">Planning and Details →</a></section>
 {{else}}
 <section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Full planning dashboard and customization controls.</p></div><a id="conditions-page-link" class="planning-page-link" href="{{.ConditionsURL}}">← Back to Conditions Now</a></section>
-<section class="card full map-card"><div class="map-intro"><div><div class="map-intro-title"><h2>Location</h2><details class="location-help"><summary aria-label="About location selection" title="About location selection">ⓘ</summary><div class="location-help-panel"><div class="location-help-header"><strong>About location selection</strong><button type="button" class="location-help-close" aria-label="Close location information" title="Close">×</button></div><div class="location-help-body"><p><strong>Selected location</strong> is the point used for selected-location weather and nearby-station searches. Click the map to set or change it.</p><p>Panning, zooming, My location, and Center Map only change the map view. The latitude/longitude fields show the map center; editing them and choosing <strong>Center Map → Latitude &amp; Longitude</strong> does not change the selected location.</p><p><strong>Find nearby stations</strong> searches around the selected location. Open a candidate station on the map to review it and commit it as the wind source; the associated currents station is previewed with it.</p></div></div></details></div><div class="map-help">Click the map to select a location for weather and nearby stations.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-alertcalifornia-panel" class="alertcalifornia-panel" hidden role="dialog" aria-modal="false" aria-labelledby="map-alertcalifornia-panel-title"><div class="alertcalifornia-panel-head"><div id="map-alertcalifornia-panel-title" class="alertcalifornia-panel-title">ALERTCalifornia camera</div><button id="map-alertcalifornia-panel-close" class="alertcalifornia-panel-close" type="button" aria-label="Close ALERTCalifornia camera" title="Close">×</button></div><div id="map-alertcalifornia-panel-body" class="alertcalifornia-panel-body"></div></div><div id="map-swell-info-panel" class="swell-info-panel" hidden role="dialog" aria-modal="false" aria-labelledby="map-swell-info-panel-title"><div class="swell-info-panel-head"><div id="map-swell-info-panel-title" class="swell-info-panel-title">Swell Forecast</div><button id="map-swell-info-panel-close" class="swell-info-panel-close" type="button" aria-label="Close swell forecast information" title="Close">×</button></div><div id="map-swell-info-panel-body" class="swell-info-panel-body"></div></div><div id="map-nautical-zoom-note" class="map-nautical-zoom-note" hidden aria-live="polite">Nautical chart available at Zoom 9+.</div><div id="map-resize-handle" class="map-resize-handle" role="separator" aria-label="Resize map vertically" aria-orientation="horizontal" aria-valuemin="260" aria-valuemax="900" aria-valuenow="390" aria-grabbed="false" tabindex="0" title="Drag up or down to resize map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-scale-row" aria-label="Map scale"><span id="map-scale-status" class="map-scale-status" role="status" aria-live="polite"></span></div><div class="map-state-controls" aria-label="Map controls"><details id="map-types-menu" class="map-overlays-menu"><summary>Map Types</summary><div class="map-overlays-panel"><button type="button" class="map-menu-close" aria-label="Close Map Types" title="Close">×</button><label class="map-overlay-toggle"><input type="radio" name="map-type" value="map"> <span>Street Map</span></label><label id="map-type-nautical-label" class="map-overlay-toggle"><input id="map-type-nautical" type="radio" name="map-type" value="nautical"> <span>Nautical Chart <small>(Zoom 9+)</small></span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="satellite"> <span>Satellite</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="hybrid"> <span>Hybrid</span></label></div></details><details id="map-overlays-menu" class="map-overlays-menu"><summary>Map Overlays</summary><div class="map-overlays-panel"><div class="map-overlays-toolbar"><button type="button" id="map-overlays-clear" class="map-overlay-clear">Clear all overlays</button><button type="button" class="map-menu-close" aria-label="Close Map Overlays" title="Close">×</button></div><details class="map-overlay-group"><summary>Weather &amp; Hazards</summary><div class="map-overlay-group-body"><label id="map-marine-zone-control" class="map-overlay-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-smoke"> <span>Satellite smoke (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-fire-perimeters"> <span>Active fire perimeters (NIFC/WFIGS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-fire-detections"> <span>Satellite fire detections (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-clouds"> <span>Satellite Cloud Cover (NOAA)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-radar"> <span>Weather radar (NOAA/NWS)</span></label></div></details><details class="map-overlay-group"><summary>Wind &amp; Pressure</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-wind-barbs"> <span>Marine / Bay Wind Barbs (NOAA/NDBC)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-inland-wind-barbs"> <span>Land / Inland Wind Barbs (METAR)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-pressure"> <span>Surface Pressure / Isobars (NOAA/NWS METAR)</span></label></div></details><details class="map-overlay-group"><summary>Surf &amp; Swell</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-swell"> <span>Global Swell Forecast (PacIOOS / NOAA WW3)</span></label><div id="map-swell-controls" class="map-swell-controls" hidden><div class="map-swell-control-row"><label for="map-swell-hours">Forecast time</label><div class="map-swell-slider-wrap"><input id="map-swell-hours" type="range" min="0" max="120" step="6" value="0" aria-label="Swell forecast time, from now through 120 hours in the future"><div class="map-swell-slider-labels"><span>Now</span><span>+120h (5 days)</span></div></div></div><div id="map-swell-time" class="map-swell-selected-time">Selected: Now</div><div class="map-swell-control-note">Smooth color = swell height · arrows = swell travel direction. Forecast range: Now to +120h (5 days). Tap/click the colored swell field or an arrow for details.</div></div></div></details><details class="map-overlay-group"><summary>Terrain &amp; Seafloor</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-structure"> <span>Topography &amp; Bathymetry (NOAA ETOPO + offshore feature names)</span></label></div></details><details class="map-overlay-group"><summary>Marine Places</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marinas"> <span>Marinas <small id="map-marine-count-marinas"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="boatyards"> <span>Boatyards &amp; Repair <small id="map-marine-count-boatyards"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="fuel_docks"> <span>Fuel Docks <small id="map-marine-count-fuel_docks"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="launch_ramps"> <span>Launch Ramps <small id="map-marine-count-launch_ramps"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="ferry_terminals"> <span>Ferry Terminals <small id="map-marine-count-ferry_terminals"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marine_supply"> <span>Marine Supply <small id="map-marine-count-marine_supply"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="yacht_clubs"> <span>Yacht Clubs <small id="map-marine-count-yacht_clubs"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="waterfront_restaurants"> <span>Waterfront Restaurants <small id="map-marine-count-waterfront_restaurants"></small></span></label></div></details><details class="map-overlay-group"><summary>Observations</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-saildrone"> <span>Saildrone Observations (NOAA PMEL)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-alertcalifornia"> <span>ALERTCalifornia Cameras (UC San Diego)</span></label></div></details></div></details><details id="map-center-menu" class="map-overlays-menu"><summary>Center Map</summary><div class="map-overlays-panel map-center-panel"><button type="button" class="map-menu-close" aria-label="Close Center Map" title="Close">×</button><button type="button" id="map-geolocate" class="map-center-action" title="Center the map on your device location without changing the selected location">My location</button><button type="button" id="map-nav-coordinates" class="map-center-action" title="Center the map on the latitude and longitude shown below">Latitude &amp; Longitude</button><button type="button" id="map-nav-selected" class="map-center-action" {{if not .MapHasRequest}}disabled{{end}}>Selected location</button><button type="button" id="map-nav-wind" class="map-center-action" {{if not .MapHasWind}}disabled{{end}}>Selected wind station</button><button type="button" id="map-nav-current" class="map-center-action" {{if not .MapHasCurrent}}disabled{{end}}>Selected currents station</button></div></details></div><div class="map-primary-actions" aria-label="Location and station actions"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Find nearby stations</span><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates}}false{{else}}true{{end}}" {{if not (or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates)}}disabled{{end}}>Clear location &amp; stations</button></div><div class="map-location-info-grid"><div class="map-coordinate-entry" aria-label="Map center coordinates"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLat}}" aria-label="Map center latitude"></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLon}}" aria-label="Map center longitude"></div><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div id="selected-location-weather" class="selected-location-weather" aria-live="polite"><div id="selected-location-weather-empty" class="selected-location-weather-empty" {{if .MapHasRequest}}hidden{{end}}><strong>Selected Location Weather</strong><span>Select a location on the map to view current weather and forecast information.</span></div><div id="selected-location-weather-content" {{if not .MapHasRequest}}hidden{{end}}><div class="selected-location-weather-columns"><div class="selected-location-weather-point-column"><div class="selected-location-weather-head"><strong>Selected Location Weather</strong></div><div id="selected-location-weather-place" class="selected-location-weather-place">{{if .MapHasRequest}}{{if .SelectedWeatherLocation}}Near {{.SelectedWeatherLocation}}{{else}}Selected location{{end}}{{else}}Select a location for weather{{end}}</div><div id="selected-location-point-forecast" {{if and .MarineForecastPeriods .SelectedWeatherError}}hidden{{end}}><div class="selected-location-point-head"><strong>NWS Point Forecast</strong><span id="selected-location-weather-updated" class="selected-location-weather-updated">{{if .SelectedWeatherUpdated}}Updated {{.SelectedWeatherUpdated}}{{end}}</span></div><div class="selected-location-weather-metrics"><span class="selected-location-weather-metric"><b>Forecast temp:</b> <span id="selected-location-weather-air">{{if .SelectedWeatherAirTemp}}{{.SelectedWeatherAirTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>High:</b> <span id="selected-location-weather-high">{{if .SelectedWeatherHighTemp}}{{.SelectedWeatherHighTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>Low:</b> <span id="selected-location-weather-low">{{if .SelectedWeatherLowTemp}}{{.SelectedWeatherLowTemp}}{{else}}—{{end}}</span></span></div><p id="selected-location-weather-forecast" class="selected-location-weather-forecast" {{if not .SelectedWeatherShortForecast}}hidden{{end}}>{{.SelectedWeatherShortForecast}}</p><p id="selected-location-weather-error" class="selected-location-weather-error" {{if or (not .SelectedWeatherError) .MarineForecastPeriods}}hidden{{end}}>{{.SelectedWeatherError}}</p><p class="selected-location-weather-note">NWS point forecast for the selected map point. Forecast temperature is the current-hour forecast, not a direct observation.</p></div><p id="selected-location-weather-context" class="selected-location-weather-context" {{if not (and .MarineForecastPeriods .SelectedWeatherError)}}hidden{{end}}>NWS point-forecast temperature data is unavailable here; the applicable marine-zone forecast is shown in the Marine Forecast section.</p></div><div id="selected-location-weather-detail" class="selected-location-weather-detail" {{if not (or .MarineForecastPeriods .MarineForecastAlerts .MarineForecastError)}}hidden{{end}}><div class="selected-location-weather-detail-head"><strong id="marine-forecast-heading">{{if .MarineForecastPeriods}}NWS Marine Forecast{{else}}NWS Forecast Zone / Alerts{{end}}</strong><span id="marine-forecast-zone" class="marine-forecast-zone" {{if not .MarineForecastZone}}hidden{{end}}>{{if .MarineForecastPeriods}}Marine zone{{else}}NWS forecast zone{{end}} {{.MarineForecastZone}}{{if .MarineForecastUpdated}} · Updated {{.MarineForecastUpdated}}{{end}}</span></div><div id="marine-forecast-alerts" class="marine-alerts" aria-label="Active National Weather Service alerts" {{if not .MarineForecastAlerts}}hidden{{end}}>{{range .MarineForecastAlerts}}<span class="marine-alert">⚠ NWS alert — {{.}}</span>{{end}}</div><div id="marine-forecast-periods" class="marine-periods" {{if not .MarineForecastPeriods}}hidden{{end}}>{{range .MarineForecastPeriods}}<div class="marine-period">{{if .Name}}<strong>{{.Name}}</strong>{{end}}{{if .Forecast}}<p>{{.Forecast}}</p>{{end}}</div>{{end}}</div><p id="marine-forecast-note" class="marine-forecast-note" {{if not .MarineForecastPeriods}}hidden{{end}}>Official NWS coastal marine-zone forecast for the zone containing the selected point. It applies to the broader marine zone, not specifically to the selected point.</p><p id="marine-forecast-error" class="marine-forecast-error" {{if not .MarineForecastError}}hidden{{end}}>{{if .MarineForecastError}}{{.MarineForecastError}}{{end}}</p></div></div></div></div><div class="map-controls"><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><details class="map-overlay-help"><summary>Map overlay details</summary><div class="map-overlay-help-body">Topography & Bathymetry combines NOAA/NCEI ETOPO land topography and seafloor bathymetry with NOAA Marine Cadastre official named offshore features. Fishing-relevant features such as seamounts, banks, ridges, hills, knolls, shoals, reefs, rises, plateaus, pinnacles, and escarpments are labeled locally for better contrast. It is intended for fishing-planning context, not navigation; smaller pinnacles may not appear in the global relief model. Marine / Bay Wind Barbs uses live NOAA/NDBC station observations from all active stations with usable wind inside the buffered map viewport; standard meteorological barbs show wind-from direction and speed, and stale observations are faded. Land / Inland Wind Barbs is a separate optional layer sourced from Aviation Weather Center’s complete current-METAR cache and filtered locally to the buffered viewport, including many ASOS/AWOS airport sites. Both controls are display-only and do not change the selected wind station or selected location. Wind-barb tooltips follow the shared page Wind units preference; barb geometry remains based on standard knot increments. Saildrone Observations uses NOAA PMEL public ERDDAP mission data and plots the latest reported position and met-ocean readings from configured 2026 NOAA Saildrone missions; availability is mission-dependent and these moving platforms are not a fixed station network. ALERTCalifornia Cameras uses the official UC San Diego/ALERTCalifornia ArcGIS camera layer, requests only cameras in the current map viewport, and shows the current camera image plus a link to the official live camera page. Camera imagery is displayed unmodified with ALERTCalifornia | UC San Diego attribution. Exact positions are plotted only when the source provides them; fisherman shorthand such as “20×20” is shown as a derived approximate position with an uncertainty circle, and broad reports such as “Cordell to Monterey” are shown as regional zones rather than fake point coordinates. Satellite Cloud Cover uses NOAA/NESDIS GOES imagery rendered for the current map view; daylight areas appear natural-color-like and nighttime areas use infrared imagery. Radar uses Iowa State IEM's Web-Mercator CONUS NEXRAD N0Q WMS layer; a clear/transparent radar layer can simply mean no precipitation echoes are present. Surface Pressure / Isobars uses current NOAA/NWS Aviation Weather Center METAR mean sea-level-pressure observations. The browser interpolates those point observations into contour lines at a zoom-appropriate interval; it is useful pressure-gradient context but is not an official analyzed surface chart. Global Swell Forecast uses the public PacIOOS WaveWatch III global model for basin-scale swell tracking. The browser renders a padded, geographically anchored forecast field and reuses that loaded buffer during short pans; replacement buffers are swapped in only after enough new data are available. Wide-area views use a globally aligned coarser WW3 sampling stride for responsiveness, while closer views retain finer model sampling. The display uses interpolation and periodic dateline handling to present the gridded model smoothly; these display techniques do not increase the underlying model resolution. Sparse clickable arrows show swell travel direction, and the colored swell field or an arrow can be tapped for height, peak period, swell-from direction, travel direction, and forecast-valid time. It is intended for ocean-basin swell tracking and travel planning, not break-specific surf height.</div></details><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-fire-perimeter-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-fire-detection-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-weather-overlay-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-pressure-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div id="map-structure-status" class="map-structure-status" hidden></div><div id="map-windbarb-status" class="map-windbarb-status" hidden></div><div id="map-saildrone-status" class="map-saildrone-status" hidden></div><div id="map-alertcalifornia-status" class="map-alertcalifornia-status" hidden aria-live="polite"></div><div id="map-swell-status" class="map-swell-status" hidden aria-live="polite"></div><div id="map-swell-legend" class="map-swell-legend" hidden><strong>Swell height</strong><span>0</span><span class="map-swell-gradient" aria-hidden="true"></span><span>20+ ft</span><span>· arrows: swell travel direction</span></div><div class="map-layer-note">Drag the handle directly below the map to make the map taller or shorter. Keyboard users can focus the handle and use ↑/↓ (Shift for larger steps).</div><div class="info-popup-row map-info-popup-row"><button id="map-legend-open" class="info-popup-open" type="button" aria-haspopup="dialog" aria-controls="map-legend-modal">ⓘ Map legend</button><button id="map-sources-open" class="info-popup-open" type="button" aria-haspopup="dialog" aria-controls="map-sources-modal">ⓘ Map &amp; data sources</button></div><div id="map-legend-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-legend-title"><div class="info-popup-dialog-head"><h2 id="map-legend-title">Map Legend</h2><button id="map-legend-close" class="info-popup-close" type="button" aria-label="Close map legend" title="Close">×</button></div><div class="info-popup-body"><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span><span class="map-key"><span class="map-dot saildrone" aria-hidden="true"></span>Saildrone latest position</span><span class="map-key"><span class="map-dot alertcalifornia" aria-hidden="true"></span>ALERTCalifornia camera</span></div><div class="map-legend"><span class="map-key"><span class="map-dot marine marina" aria-hidden="true"></span>Marina</span><span class="map-key"><span class="map-dot marine boatyard" aria-hidden="true"></span>Boatyard &amp; repair</span><span class="map-key"><span class="map-dot marine fuel" aria-hidden="true"></span>Fuel dock</span><span class="map-key"><span class="map-dot marine ramp" aria-hidden="true"></span>Launch ramp</span><span class="map-key"><span class="map-dot marine ferry" aria-hidden="true"></span>Ferry terminal</span><span class="map-key"><span class="map-dot marine supply" aria-hidden="true"></span>Marine supply</span><span class="map-key"><span class="map-dot marine club" aria-hidden="true"></span>Yacht club</span><span class="map-key"><span class="map-dot marine restaurant" aria-hidden="true"></span>Waterfront restaurant</span></div></div></div></div><div id="map-sources-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-sources-title"><div class="info-popup-dialog-head"><h2 id="map-sources-title">Map &amp; Data Sources</h2><button id="map-sources-close" class="info-popup-close" type="button" aria-label="Close map and data sources" title="Close">×</button></div><div class="info-popup-body"><p class="map-sources-note">Base maps: <strong>Street Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service and is available at Zoom 9 or closer; <strong>Satellite</strong> uses Esri World Imagery; <strong>Hybrid</strong> combines Esri imagery with place/boundary labels. NWS forecast-zone, NOAA smoke, <strong>Active Fire Perimeters</strong>, <strong>Satellite Fire Detections</strong>, <strong>Sea Surface Temp</strong>, <strong>Global Swell Forecast</strong>, <strong>Satellite Cloud Cover</strong>, radar, and <strong>ALERTCalifornia Cameras</strong> remain independent overlays. Active Fire Perimeters use the National Interagency Fire Center WFIGS current perimeter service. Satellite Fire Detections use NOAA Hazard Mapping System active-fire detections. Global Swell Forecast uses PacIOOS public ERDDAP access to the NOAA/NCEP WaveWatch III global model. ALERTCalifornia camera locations and current imagery come from the official UC San Diego/ALERTCalifornia ArcGIS feed. The nautical chart layer is for planning/reference and does not replace official navigation products.</p></div></div></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
+<section class="card full map-card"><div class="map-intro"><div><div class="map-intro-title"><h2>Location</h2><details class="location-help"><summary aria-label="About location selection" title="About location selection">ⓘ</summary><div class="location-help-panel"><div class="location-help-header"><strong>About location selection</strong><button type="button" class="location-help-close" aria-label="Close location information" title="Close">×</button></div><div class="location-help-body"><p><strong>Selected location</strong> is the point used for selected-location weather and nearby-station searches. Click the map to set or change it.</p><p>Panning, zooming, My location, and Center Map only change the map view. The latitude/longitude fields show the map center; editing them and choosing <strong>Center Map → Latitude &amp; Longitude</strong> does not change the selected location.</p><p><strong>Find nearby stations</strong> searches around the selected location. Open a candidate station on the map to review it and commit it as the wind source; the associated currents station is previewed with it.</p></div></div></details></div><div class="map-help">Click the map to select a location for weather and nearby stations.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-air-temperature-time" class="map-air-temperature-map-time" hidden role="status" aria-live="polite">Air Temperature · NOW · Observed</div><div id="map-air-temperature-transport" class="map-air-temperature-transport" hidden aria-label="Air temperature playback controls"><button type="button" id="map-air-temperature-now" aria-label="Return air temperature to NOW" title="Return to NOW">NOW</button><button type="button" id="map-air-temperature-prev" aria-label="Previous 15 minutes" title="Previous 15 minutes">◀</button><button type="button" id="map-air-temperature-map-play" aria-pressed="false" aria-label="Play air temperature timeline">▶ Play</button><button type="button" id="map-air-temperature-next" aria-label="Next 15 minutes" title="Next 15 minutes">▶</button><label>Speed <select id="map-air-temperature-speed" aria-label="Air temperature playback speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select></label><label>Range <select id="map-air-temperature-range" aria-label="Air temperature playback range"><option value="6">6h</option><option value="12">12h</option><option value="24" selected>24h</option></select></label></div><div id="map-alertcalifornia-panel" class="alertcalifornia-panel" hidden role="dialog" aria-modal="false" aria-labelledby="map-alertcalifornia-panel-title"><div class="alertcalifornia-panel-head"><div id="map-alertcalifornia-panel-title" class="alertcalifornia-panel-title">ALERTCalifornia camera</div><button id="map-alertcalifornia-panel-close" class="alertcalifornia-panel-close" type="button" aria-label="Close ALERTCalifornia camera" title="Close">×</button></div><div id="map-alertcalifornia-panel-body" class="alertcalifornia-panel-body"></div></div><div id="map-swell-info-panel" class="swell-info-panel" hidden role="dialog" aria-modal="false" aria-labelledby="map-swell-info-panel-title"><div class="swell-info-panel-head"><div id="map-swell-info-panel-title" class="swell-info-panel-title">Swell Forecast</div><button id="map-swell-info-panel-close" class="swell-info-panel-close" type="button" aria-label="Close swell forecast information" title="Close">×</button></div><div id="map-swell-info-panel-body" class="swell-info-panel-body"></div></div><div id="map-nautical-zoom-note" class="map-nautical-zoom-note" hidden aria-live="polite">Nautical chart available at Zoom 9+.</div><div id="map-resize-handle" class="map-resize-handle" role="separator" aria-label="Resize map vertically" aria-orientation="horizontal" aria-valuemin="260" aria-valuemax="900" aria-valuenow="390" aria-grabbed="false" tabindex="0" title="Drag up or down to resize map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-scale-row" aria-label="Map scale"><span id="map-scale-status" class="map-scale-status" role="status" aria-live="polite"></span></div><div class="map-state-controls" aria-label="Map controls"><details id="map-types-menu" class="map-overlays-menu"><summary>Map Types</summary><div class="map-overlays-panel"><button type="button" class="map-menu-close" aria-label="Close Map Types" title="Close">×</button><label class="map-overlay-toggle"><input type="radio" name="map-type" value="map"> <span>Street Map</span></label><label id="map-type-nautical-label" class="map-overlay-toggle"><input id="map-type-nautical" type="radio" name="map-type" value="nautical"> <span>Nautical Chart <small>(Zoom 9+)</small></span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="satellite"> <span>Satellite</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="hybrid"> <span>Hybrid</span></label></div></details><details id="map-overlays-menu" class="map-overlays-menu"><summary>Map Overlays</summary><div class="map-overlays-panel"><div class="map-overlays-toolbar"><button type="button" id="map-overlays-clear" class="map-overlay-clear">Clear all overlays</button><button type="button" class="map-menu-close" aria-label="Close Map Overlays" title="Close">×</button></div><details class="map-overlay-group"><summary>Weather &amp; Hazards</summary><div class="map-overlay-group-body"><label id="map-marine-zone-control" class="map-overlay-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-smoke"> <span>Satellite smoke (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-fire-perimeters"> <span>Active fire perimeters (NIFC/WFIGS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-fire-detections"> <span>Satellite fire detections (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-air-temperature"> <span>Air Temperature Heat Map (CONUS)</span></label><div id="map-air-temperature-controls" class="map-air-temperature-controls"><div class="map-air-temperature-control-row"><label for="map-air-temperature-hours">Time</label><button type="button" id="map-air-temperature-play" class="map-air-temperature-play" aria-pressed="false" aria-label="Play air temperature timeline">▶ Play</button><div class="map-air-temperature-slider-wrap"><input id="map-air-temperature-hours" type="range" min="0" max="24" step="0.25" value="0" aria-label="Air temperature time: NOW observed, then forecast through 24 hours"><div class="map-air-temperature-slider-labels"><span>NOW</span><span>+6h</span><span>+12h</span><span>+18h</span><span>+24h</span></div></div></div><div class="map-air-temperature-control-note">NOW uses current observations. Future times use NOAA/NWS NDFD forecast guidance. Play loops NOW through +24h; the live interpolated time is shown on the map. CONUS only · Zoom 4+.</div></div><label class="map-overlay-toggle"><input type="checkbox" id="map-show-clouds"> <span>Satellite Cloud Cover (NOAA)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-radar"> <span>Weather radar (NOAA/NWS)</span></label></div></details><details class="map-overlay-group"><summary>Wind &amp; Pressure</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-wind-barbs"> <span>Marine / Bay Wind Barbs (NOAA/NDBC)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-inland-wind-barbs"> <span>Land / Inland Wind Barbs (METAR)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-pressure"> <span>Surface Pressure / Isobars (NOAA/NWS METAR)</span></label></div></details><details class="map-overlay-group"><summary>Surf &amp; Swell</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-swell"> <span>Global Swell Forecast (PacIOOS / NOAA WW3)</span></label><div id="map-swell-controls" class="map-swell-controls" hidden><div class="map-swell-control-row"><label for="map-swell-hours">Forecast time</label><div class="map-swell-slider-wrap"><input id="map-swell-hours" type="range" min="0" max="120" step="6" value="0" aria-label="Swell forecast time, from now through 120 hours in the future"><div class="map-swell-slider-labels"><span>Now</span><span>+120h (5 days)</span></div></div></div><div id="map-swell-time" class="map-swell-selected-time">Selected: Now</div><div class="map-swell-control-note">Smooth color = swell height · arrows = swell travel direction. Forecast range: Now to +120h (5 days). Tap/click the colored swell field or an arrow for details.</div></div></div></details><details class="map-overlay-group"><summary>Terrain &amp; Seafloor</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-structure"> <span>Topography &amp; Bathymetry (NOAA ETOPO + offshore feature names)</span></label></div></details><details class="map-overlay-group"><summary>Marine Places</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marinas"> <span>Marinas <small id="map-marine-count-marinas"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="boatyards"> <span>Boatyards &amp; Repair <small id="map-marine-count-boatyards"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="fuel_docks"> <span>Fuel Docks <small id="map-marine-count-fuel_docks"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="launch_ramps"> <span>Launch Ramps <small id="map-marine-count-launch_ramps"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="ferry_terminals"> <span>Ferry Terminals <small id="map-marine-count-ferry_terminals"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marine_supply"> <span>Marine Supply <small id="map-marine-count-marine_supply"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="yacht_clubs"> <span>Yacht Clubs <small id="map-marine-count-yacht_clubs"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="waterfront_restaurants"> <span>Waterfront Restaurants <small id="map-marine-count-waterfront_restaurants"></small></span></label></div></details><details class="map-overlay-group"><summary>Observations</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-saildrone"> <span>Saildrone Observations (NOAA PMEL)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-alertcalifornia"> <span>ALERTCalifornia Cameras (UC San Diego)</span></label></div></details></div></details><details id="map-center-menu" class="map-overlays-menu"><summary>Center Map</summary><div class="map-overlays-panel map-center-panel"><button type="button" class="map-menu-close" aria-label="Close Center Map" title="Close">×</button><button type="button" id="map-geolocate" class="map-center-action" title="Center the map on your device location without changing the selected location">My location</button><button type="button" id="map-nav-coordinates" class="map-center-action" title="Center the map on the latitude and longitude shown below">Latitude &amp; Longitude</button><button type="button" id="map-nav-selected" class="map-center-action" {{if not .MapHasRequest}}disabled{{end}}>Selected location</button><button type="button" id="map-nav-wind" class="map-center-action" {{if not .MapHasWind}}disabled{{end}}>Selected wind station</button><button type="button" id="map-nav-current" class="map-center-action" {{if not .MapHasCurrent}}disabled{{end}}>Selected currents station</button></div></details></div><div class="map-primary-actions" aria-label="Location and station actions"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Find nearby stations</span><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates}}false{{else}}true{{end}}" {{if not (or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates)}}disabled{{end}}>Clear location &amp; stations</button></div><div class="map-location-info-grid"><div class="map-coordinate-entry" aria-label="Map center coordinates"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLat}}" aria-label="Map center latitude"></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLon}}" aria-label="Map center longitude"></div><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div id="selected-location-weather" class="selected-location-weather" aria-live="polite"><div id="selected-location-weather-empty" class="selected-location-weather-empty" {{if .MapHasRequest}}hidden{{end}}><strong>Selected Location Weather</strong><span>Select a location on the map to view current weather and forecast information.</span></div><div id="selected-location-weather-content" {{if not .MapHasRequest}}hidden{{end}}><div class="selected-location-weather-columns"><div class="selected-location-weather-point-column"><div class="selected-location-weather-head"><strong>Selected Location Weather</strong></div><div id="selected-location-weather-place" class="selected-location-weather-place">{{if .MapHasRequest}}{{if .SelectedWeatherLocation}}Near {{.SelectedWeatherLocation}}{{else}}Selected location{{end}}{{else}}Select a location for weather{{end}}</div><div id="selected-location-point-forecast" {{if and .MarineForecastPeriods .SelectedWeatherError}}hidden{{end}}><div class="selected-location-point-head"><strong>NWS Point Forecast</strong><span id="selected-location-weather-updated" class="selected-location-weather-updated">{{if .SelectedWeatherUpdated}}Updated {{.SelectedWeatherUpdated}}{{end}}</span></div><div class="selected-location-weather-metrics"><span class="selected-location-weather-metric"><b>Forecast temp:</b> <span id="selected-location-weather-air">{{if .SelectedWeatherAirTemp}}{{.SelectedWeatherAirTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>High:</b> <span id="selected-location-weather-high">{{if .SelectedWeatherHighTemp}}{{.SelectedWeatherHighTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>Low:</b> <span id="selected-location-weather-low">{{if .SelectedWeatherLowTemp}}{{.SelectedWeatherLowTemp}}{{else}}—{{end}}</span></span></div><p id="selected-location-weather-forecast" class="selected-location-weather-forecast" {{if not .SelectedWeatherShortForecast}}hidden{{end}}>{{.SelectedWeatherShortForecast}}</p><p id="selected-location-weather-error" class="selected-location-weather-error" {{if or (not .SelectedWeatherError) .MarineForecastPeriods}}hidden{{end}}>{{.SelectedWeatherError}}</p><p class="selected-location-weather-note">NWS point forecast for the selected map point. Forecast temperature is the current-hour forecast, not a direct observation.</p></div><p id="selected-location-weather-context" class="selected-location-weather-context" {{if not (and .MarineForecastPeriods .SelectedWeatherError)}}hidden{{end}}>NWS point-forecast temperature data is unavailable here; the applicable marine-zone forecast is shown in the Marine Forecast section.</p></div><div id="selected-location-weather-detail" class="selected-location-weather-detail" {{if not (or .MarineForecastPeriods .MarineForecastAlerts .MarineForecastError)}}hidden{{end}}><div class="selected-location-weather-detail-head"><strong id="marine-forecast-heading">{{if .MarineForecastPeriods}}NWS Marine Forecast{{else}}NWS Forecast Zone / Alerts{{end}}</strong><span id="marine-forecast-zone" class="marine-forecast-zone" {{if not .MarineForecastZone}}hidden{{end}}>{{if .MarineForecastPeriods}}Marine zone{{else}}NWS forecast zone{{end}} {{.MarineForecastZone}}{{if .MarineForecastUpdated}} · Updated {{.MarineForecastUpdated}}{{end}}</span></div><div id="marine-forecast-alerts" class="marine-alerts" aria-label="Active National Weather Service alerts" {{if not .MarineForecastAlerts}}hidden{{end}}>{{range .MarineForecastAlerts}}<span class="marine-alert">⚠ NWS alert — {{.}}</span>{{end}}</div><div id="marine-forecast-periods" class="marine-periods" {{if not .MarineForecastPeriods}}hidden{{end}}>{{range .MarineForecastPeriods}}<div class="marine-period">{{if .Name}}<strong>{{.Name}}</strong>{{end}}{{if .Forecast}}<p>{{.Forecast}}</p>{{end}}</div>{{end}}</div><p id="marine-forecast-note" class="marine-forecast-note" {{if not .MarineForecastPeriods}}hidden{{end}}>Official NWS coastal marine-zone forecast for the zone containing the selected point. It applies to the broader marine zone, not specifically to the selected point.</p><p id="marine-forecast-error" class="marine-forecast-error" {{if not .MarineForecastError}}hidden{{end}}>{{if .MarineForecastError}}{{.MarineForecastError}}{{end}}</p></div></div></div></div><div class="map-controls"><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><details class="map-overlay-help"><summary>Map overlay details</summary><div class="map-overlay-help-body">Topography & Bathymetry combines NOAA/NCEI ETOPO land topography and seafloor bathymetry with NOAA Marine Cadastre official named offshore features. Fishing-relevant features such as seamounts, banks, ridges, hills, knolls, shoals, reefs, rises, plateaus, pinnacles, and escarpments are labeled locally for better contrast. It is intended for fishing-planning context, not navigation; smaller pinnacles may not appear in the global relief model. Marine / Bay Wind Barbs uses live NOAA/NDBC station observations from all active stations with usable wind inside the buffered map viewport; standard meteorological barbs show wind-from direction and speed, and stale observations are faded. Land / Inland Wind Barbs is a separate optional layer sourced from Aviation Weather Center’s complete current-METAR cache and filtered locally to the buffered viewport, including many ASOS/AWOS airport sites. Both controls are display-only and do not change the selected wind station or selected location. Wind-barb tooltips follow the shared page Wind units preference; barb geometry remains based on standard knot increments. Saildrone Observations uses NOAA PMEL public ERDDAP mission data and plots the latest reported position and met-ocean readings from configured 2026 NOAA Saildrone missions; availability is mission-dependent and these moving platforms are not a fixed station network. ALERTCalifornia Cameras uses the official UC San Diego/ALERTCalifornia ArcGIS camera layer, requests only cameras in the current map viewport, and shows the current camera image plus a link to the official live camera page. Camera imagery is displayed unmodified with ALERTCalifornia | UC San Diego attribution. Exact positions are plotted only when the source provides them; fisherman shorthand such as “20×20” is shown as a derived approximate position with an uncertainty circle, and broad reports such as “Cordell to Monterey” are shown as regional zones rather than fake point coordinates. Satellite Cloud Cover uses NOAA/NESDIS GOES imagery rendered for the current map view; daylight areas appear natural-color-like and nighttime areas use infrared imagery. Radar uses Iowa State IEM's Web-Mercator CONUS NEXRAD N0Q WMS layer; a clear/transparent radar layer can simply mean no precipitation echoes are present. Air Temperature Heat Map uses one time slider and is intentionally limited to the contiguous U.S. at Zoom 4 or closer to avoid unnecessary world-scale interpolation and repaint work. NOW combines current NOAA/NDBC marine observations and NOAA/NWS Aviation Weather Center METAR observations, excludes reports older than 90 minutes, and interpolates the remaining station temperatures from the nearest local observations using a fixed −10°F to 110°F color scale. Moving the slider to any future step switches to the NOAA/NWS National Digital Forecast Database (NDFD) temperature raster for that forecast hour. The fixed −10°F to 110°F scale is shown in the Map Legend card, moving the pointer over the map reports the interpolated observed temperature at NOW or the NDFD forecast temperature at the selected future hour, and the Play control loops the timeline from NOW through +24h while waiting for each frame to load. The observed interpolation is planning context rather than an official analyzed temperature field. Surface Pressure / Isobars uses current NOAA/NWS Aviation Weather Center METAR mean sea-level-pressure observations. The browser interpolates those point observations into contour lines at a zoom-appropriate interval; it is useful pressure-gradient context but is not an official analyzed surface chart. Global Swell Forecast uses the public PacIOOS WaveWatch III global model for basin-scale swell tracking. The browser renders a padded, geographically anchored forecast field and reuses that loaded buffer during short pans; replacement buffers are swapped in only after enough new data are available. Wide-area views use a globally aligned coarser WW3 sampling stride for responsiveness, while closer views retain finer model sampling. The display uses interpolation and periodic dateline handling to present the gridded model smoothly; these display techniques do not increase the underlying model resolution. Sparse clickable arrows show swell travel direction, and the colored swell field or an arrow can be tapped for height, peak period, swell-from direction, travel direction, and forecast-valid time. It is intended for ocean-basin swell tracking and travel planning, not break-specific surf height.</div></details><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-fire-perimeter-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-fire-detection-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-weather-overlay-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-air-temperature-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-pressure-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div id="map-structure-status" class="map-structure-status" hidden></div><div id="map-windbarb-status" class="map-windbarb-status" hidden></div><div id="map-saildrone-status" class="map-saildrone-status" hidden></div><div id="map-alertcalifornia-status" class="map-alertcalifornia-status" hidden aria-live="polite"></div><div id="map-swell-status" class="map-swell-status" hidden aria-live="polite"></div><div id="map-swell-legend" class="map-swell-legend" hidden><strong>Swell height</strong><span>0</span><span class="map-swell-gradient" aria-hidden="true"></span><span>20+ ft</span><span>· arrows: swell travel direction</span></div><div class="map-layer-note">Drag the handle directly below the map to make the map taller or shorter. Keyboard users can focus the handle and use ↑/↓ (Shift for larger steps).</div><div class="info-popup-row map-info-popup-row"><button id="map-legend-open" class="info-popup-open" type="button" aria-haspopup="dialog" aria-controls="map-legend-modal">ⓘ Map legend</button><button id="map-sources-open" class="info-popup-open" type="button" aria-haspopup="dialog" aria-controls="map-sources-modal">ⓘ Map &amp; data sources</button></div><div id="map-legend-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-legend-title"><div class="info-popup-dialog-head"><h2 id="map-legend-title">Map Legend</h2><button id="map-legend-close" class="info-popup-close" type="button" aria-label="Close map legend" title="Close">×</button></div><div class="info-popup-body"><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span><span class="map-key"><span class="map-dot saildrone" aria-hidden="true"></span>Saildrone latest position</span><span class="map-key"><span class="map-dot alertcalifornia" aria-hidden="true"></span>ALERTCalifornia camera</span></div><div class="map-legend"><span class="map-key"><span class="map-dot marine marina" aria-hidden="true"></span>Marina</span><span class="map-key"><span class="map-dot marine boatyard" aria-hidden="true"></span>Boatyard &amp; repair</span><span class="map-key"><span class="map-dot marine fuel" aria-hidden="true"></span>Fuel dock</span><span class="map-key"><span class="map-dot marine ramp" aria-hidden="true"></span>Launch ramp</span><span class="map-key"><span class="map-dot marine ferry" aria-hidden="true"></span>Ferry terminal</span><span class="map-key"><span class="map-dot marine supply" aria-hidden="true"></span>Marine supply</span><span class="map-key"><span class="map-dot marine club" aria-hidden="true"></span>Yacht club</span><span class="map-key"><span class="map-dot marine restaurant" aria-hidden="true"></span>Waterfront restaurant</span></div><div id="map-air-temperature-legend" class="map-air-temperature-legend" hidden><div class="map-air-temperature-legend-head"><strong>Air temperature</strong><span id="map-air-temperature-legend-context" class="map-air-temperature-legend-context">NOW · Observed · NDBC + METAR</span></div><div class="map-air-temperature-scale"><span>−10°F</span><span class="map-air-temperature-gradient" aria-hidden="true"></span><span>110°F</span></div></div></div></div></div><div id="map-sources-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-sources-title"><div class="info-popup-dialog-head"><h2 id="map-sources-title">Map &amp; Data Sources</h2><button id="map-sources-close" class="info-popup-close" type="button" aria-label="Close map and data sources" title="Close">×</button></div><div class="info-popup-body"><p class="map-sources-note">Base maps: <strong>Street Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service and is available at Zoom 9 or closer; <strong>Satellite</strong> uses Esri World Imagery; <strong>Hybrid</strong> combines Esri imagery with place/boundary labels. NWS forecast-zone, NOAA smoke, <strong>Active Fire Perimeters</strong>, <strong>Satellite Fire Detections</strong>, <strong>Air Temperature Heat Map (CONUS: NOW observations + NOAA/NWS NDFD future forecast)</strong>, <strong>Global Swell Forecast</strong>, <strong>Satellite Cloud Cover</strong>, radar, and <strong>ALERTCalifornia Cameras</strong> remain independent overlays. Active Fire Perimeters use the National Interagency Fire Center WFIGS current perimeter service. Satellite Fire Detections use NOAA Hazard Mapping System active-fire detections. Global Swell Forecast uses PacIOOS public ERDDAP access to the NOAA/NCEP WaveWatch III global model. ALERTCalifornia camera locations and current imagery come from the official UC San Diego/ALERTCalifornia ArcGIS feed. The nautical chart layer is for planning/reference and does not replace official navigation products.</p></div></div></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
 {{if .WindError}}<section class="card full error-card"><h2>Wind station selection unavailable</h2><p class="error-message">{{.WindError}}</p><p class="error-help">The page is still available so you can inspect the request and nearby station diagnostics. Try nearby coordinates or an explicit NDBC station ID.</p></section>{{end}}
 <section class="card full wind-card"><div class="wind-card-head"><h2>Wind</h2></div>
 <div class="metrics">
@@ -7749,6 +8327,10 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   map.createPane("radarOverlayPane");
   map.getPane("radarOverlayPane").style.zIndex = 440;
   map.getPane("radarOverlayPane").style.pointerEvents = "none";
+
+  map.createPane("airTemperaturePane");
+  map.getPane("airTemperaturePane").style.zIndex = 435;
+  map.getPane("airTemperaturePane").style.pointerEvents = "none";
 
   map.createPane("pressureOverlayPane");
   map.getPane("pressureOverlayPane").style.zIndex = 445;
@@ -8250,6 +8832,27 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     }
   );
 
+  var airTemperatureLayer = null;
+  var airTemperatureForecastLayer = null;
+  var airTemperatureRequestSerial = 0;
+  var airTemperatureRefreshTimer = null;
+  var airTemperatureLoadedBounds = null;
+  var airTemperatureObservedSamples = [];
+  var airTemperatureMapTooltip = null;
+  var airTemperatureTooltipTimer = null;
+  var airTemperatureTooltipSerial = 0;
+  var airTemperatureLastPointerLatLng = null;
+  var airTemperaturePlaybackTimer = null;
+  var airTemperaturePlaybackActive = false;
+  var airTemperaturePlaybackRAF = null;
+  var airTemperaturePlaybackSpeed = 1;
+  var airTemperaturePlaybackRangeHours = 24;
+  var airTemperatureForecastGridCache = {};
+  var airTemperatureForecastGridCurrent = null;
+  var airTemperatureForecastGridNext = null;
+  var airTemperatureForecastGridBlendAlpha = 0;
+  var airTemperatureForecastDisplayHours = 0;
+  var airTemperatureManualTargetSerial = 0;
   var pressureLineLayer = L.layerGroup();
   var pressureLabelLayer = L.layerGroup();
   var pressureRequestSerial = 0;
@@ -9169,6 +9772,906 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   });
 
 
+  function setAirTemperatureStatus(message, isError) {
+    var status = document.getElementById("map-air-temperature-status");
+    if (!status) return;
+    message = String(message || "").trim();
+    status.hidden = !message;
+    status.textContent = message;
+    status.style.color = isError ? "#9a352f" : "";
+  }
+
+  function updateAirTemperatureLegendContext(previewHours) {
+    var context = document.getElementById("map-air-temperature-legend-context");
+    if (!context) return;
+    var hours = Number.isFinite(Number(previewHours)) ? Number(previewHours) : Number(mapState.airTemperatureForecastHours||0);
+    var hourText = Math.abs(hours-Math.round(hours)) < 0.001 ? String(Math.round(hours)) : hours.toFixed(1);
+    context.textContent = hours === 0
+      ? "NOW · Observed · NDBC + METAR"
+      : "+"+hourText+"h · Forecast · NOAA/NWS NDFD";
+  }
+
+  function showAirTemperatureLegend(show) {
+    var legend = document.getElementById("map-air-temperature-legend");
+    if (legend) legend.hidden = !show;
+    if (show) updateAirTemperatureLegendContext();
+  }
+
+  function showAirTemperatureControls(show) {
+    var controls = document.getElementById("map-air-temperature-controls");
+    if (controls) {
+      controls.hidden = false;
+      controls.classList.toggle("is-disabled", !show);
+    }
+    var slider = document.getElementById("map-air-temperature-hours");
+    if (slider) slider.disabled = !show;
+    var playButton = document.getElementById("map-air-temperature-play");
+    if (playButton) playButton.disabled = !show;
+    var transport = document.getElementById("map-air-temperature-transport");
+    if (transport) transport.hidden = !show;
+  }
+
+  function updateAirTemperaturePlaybackButton() {
+    [document.getElementById("map-air-temperature-play"), document.getElementById("map-air-temperature-map-play")].forEach(function(button) {
+      if (!button) return;
+      button.textContent = airTemperaturePlaybackActive ? "❚❚ Pause" : "▶ Play";
+      button.setAttribute("aria-pressed", airTemperaturePlaybackActive ? "true" : "false");
+      button.setAttribute("aria-label", airTemperaturePlaybackActive ? "Pause air temperature timeline" : "Play air temperature timeline");
+      button.classList.toggle("is-playing", airTemperaturePlaybackActive);
+    });
+  }
+
+  function stopAirTemperaturePlayback() {
+    airTemperaturePlaybackActive = false;
+    if (airTemperaturePlaybackTimer) {
+      window.clearTimeout(airTemperaturePlaybackTimer);
+      airTemperaturePlaybackTimer = null;
+    }
+    if (airTemperaturePlaybackRAF) {
+      window.cancelAnimationFrame(airTemperaturePlaybackRAF);
+      airTemperaturePlaybackRAF = null;
+    }
+    airTemperatureForecastGridNext = null;
+    airTemperatureForecastGridBlendAlpha = 0;
+    updateAirTemperaturePlaybackButton();
+    updateAirTemperatureForecastTimeLabel(airTemperatureForecastDisplayHours);
+  }
+
+  function scheduleAirTemperaturePlaybackAdvance() {
+    if (!airTemperaturePlaybackActive || !mapState.airTemperatureOverlayVisible) return;
+    if (airTemperaturePlaybackTimer) window.clearTimeout(airTemperaturePlaybackTimer);
+    var current = Math.max(0, Number(airTemperatureForecastDisplayHours || mapState.airTemperatureForecastHours || 0));
+    var delay = current > 0.001 ? 0 : Math.max(80, 350 / Math.max(0.5, Number(airTemperaturePlaybackSpeed) || 1));
+    airTemperaturePlaybackTimer = window.setTimeout(function() {
+      airTemperaturePlaybackTimer = null;
+      if (!airTemperaturePlaybackActive || !mapState.airTemperatureOverlayVisible) return;
+      var current = Math.max(0, Number(airTemperatureForecastDisplayHours || mapState.airTemperatureForecastHours || 0));
+      var range = Math.max(3, Math.min(24, Number(airTemperaturePlaybackRangeHours) || 24));
+      if (current >= range - 0.001) {
+        mapState.airTemperatureForecastHours = 0;
+        airTemperatureForecastDisplayHours = 0;
+        var resetSlider = document.getElementById("map-air-temperature-hours");
+        if (resetSlider) resetSlider.value = "0";
+        hideAirTemperaturePointerTooltip();
+        updateAirTemperatureForecastTimeLabel(0);
+        loadObservedAirTemperature(true);
+        return;
+      }
+      var nextAnchor = current <= 0.001
+        ? Math.min(range, 3)
+        : Math.min(range, (Math.floor(current / 3 + 1e-7) + 1) * 3);
+      if (nextAnchor <= current + 0.001) nextAnchor = Math.min(range, current + 3);
+      animateAirTemperatureForecastStep(current, nextAnchor);
+    }, delay);
+  }
+
+  function airTemperaturePlaybackFrameSettled(success) {
+    if (!airTemperaturePlaybackActive) return;
+    if (!success) {
+      stopAirTemperaturePlayback();
+      return;
+    }
+    scheduleAirTemperaturePlaybackAdvance();
+  }
+
+  function startAirTemperaturePlayback() {
+    if (!mapState.airTemperatureOverlayVisible) return;
+    var slider = document.getElementById("map-air-temperature-hours");
+    var current = slider ? Number(slider.value) : Number(airTemperatureForecastDisplayHours || mapState.airTemperatureForecastHours || 0);
+    if (!Number.isFinite(current)) current = 0;
+    var range = Math.max(3, Math.min(24, Number(airTemperaturePlaybackRangeHours) || 24));
+    current = Math.max(0, Math.min(range, Math.round(current * 4) / 4));
+    if (current >= range - 0.001) current = 0;
+    mapState.airTemperatureForecastHours = current;
+    airTemperatureForecastDisplayHours = current;
+    if (slider) slider.value = String(current);
+    airTemperaturePlaybackActive = true;
+    updateAirTemperaturePlaybackButton();
+    if (airTemperaturePlaybackTimer) {
+      window.clearTimeout(airTemperaturePlaybackTimer);
+      airTemperaturePlaybackTimer = null;
+    }
+    hideAirTemperaturePointerTooltip();
+    updateAirTemperatureForecastTimeLabel(current);
+    scheduleAirTemperaturePlaybackAdvance();
+  }
+
+  function airTemperatureColor(tempF) {
+    var stops = [
+      [-10,[91,44,163]], [0,[32,63,154]], [20,[43,120,197]], [32,[63,183,219]],
+      [45,[41,171,166]], [55,[45,157,111]], [65,[70,168,77]], [75,[142,193,65]],
+      [85,[224,209,63]], [95,[242,157,49]], [105,[217,68,46]], [110,[128,24,38]]
+    ];
+    var t = Math.max(-10, Math.min(110, Number(tempF)));
+    for (var i = 1; i < stops.length; i++) {
+      if (t <= stops[i][0]) {
+        var a = stops[i-1], b = stops[i];
+        var f = (t-a[0]) / (b[0]-a[0]);
+        return [
+          Math.round(a[1][0] + (b[1][0]-a[1][0])*f),
+          Math.round(a[1][1] + (b[1][1]-a[1][1])*f),
+          Math.round(a[1][2] + (b[1][2]-a[1][2])*f)
+        ];
+      }
+    }
+    return stops[stops.length-1][1];
+  }
+
+  var airTemperatureMinZoom = 4;
+  var airTemperatureCONUS = {south:20, north:55, west:-130, east:-60};
+
+  function airTemperatureBoundsContain(outer, inner) {
+    if (!outer || !inner) return false;
+    return outer.getSouth() <= inner.getSouth() && outer.getNorth() >= inner.getNorth() &&
+      outer.getWest() <= inner.getWest() && outer.getEast() >= inner.getEast();
+  }
+
+  function airTemperatureVisibleCONUSBounds() {
+    if (map.getZoom() < airTemperatureMinZoom) return null;
+    var raw = map.getBounds();
+    if (!raw || !raw.isValid()) return null;
+    var center = map.wrapLatLng(map.getCenter());
+    var span = Math.min(359, Math.abs(raw.getEast()-raw.getWest()));
+    var west = center.lng - span/2;
+    var east = center.lng + span/2;
+    var south = Math.max(raw.getSouth(), airTemperatureCONUS.south);
+    var north = Math.min(raw.getNorth(), airTemperatureCONUS.north);
+    west = Math.max(west, airTemperatureCONUS.west);
+    east = Math.min(east, airTemperatureCONUS.east);
+    if (!(south < north && west < east)) return null;
+    return L.latLngBounds([south,west],[north,east]);
+  }
+
+  function bufferedAirTemperatureBounds(bounds) {
+    var latPad = Math.max(0.30, (bounds.getNorth()-bounds.getSouth()) * 0.35);
+    var lonPad = Math.max(0.30, (bounds.getEast()-bounds.getWest()) * 0.35);
+    return L.latLngBounds(
+      [Math.max(airTemperatureCONUS.south,bounds.getSouth()-latPad), Math.max(airTemperatureCONUS.west,bounds.getWest()-lonPad)],
+      [Math.min(airTemperatureCONUS.north,bounds.getNorth()+latPad), Math.min(airTemperatureCONUS.east,bounds.getEast()+lonPad)]
+    );
+  }
+
+  function airTemperatureURL(bounds) {
+    return "/air-temperature-overlay?min_lat=" + encodeURIComponent(bounds.getSouth().toFixed(5)) +
+      "&max_lat=" + encodeURIComponent(bounds.getNorth().toFixed(5)) +
+      "&min_lon=" + encodeURIComponent(bounds.getWest().toFixed(5)) +
+      "&max_lon=" + encodeURIComponent(bounds.getEast().toFixed(5));
+  }
+
+  function interpolateAirTemperatureAt(observations, lat, lon, maxRadiusMiles, neighborCount) {
+    if (!Array.isArray(observations) || !observations.length || !Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+    var cosLat = Math.max(0.20, Math.cos(lat*Math.PI/180));
+    var nearest = [];
+    for (var i=0; i<observations.length; i++) {
+      var oLat=Number(observations[i].lat), oLon=Number(observations[i].lon), oTemp=Number(observations[i].temp_f !== undefined ? observations[i].temp_f : observations[i].temp);
+      if (!Number.isFinite(oLat) || !Number.isFinite(oLon) || !Number.isFinite(oTemp)) continue;
+      var dyMiles=(lat-oLat)*69.0;
+      var dxMiles=(lon-oLon)*69.0*cosLat;
+      var miles=Math.sqrt(dxMiles*dxMiles+dyMiles*dyMiles);
+      if (miles > maxRadiusMiles) continue;
+      var insertAt=nearest.length;
+      while (insertAt>0 && miles < nearest[insertAt-1].miles) insertAt--;
+      nearest.splice(insertAt,0,{miles:miles,temp:oTemp});
+      if (nearest.length > neighborCount) nearest.pop();
+    }
+    if (!nearest.length) return null;
+    if (nearest[0].miles <= 4) return {temp:nearest[0].temp, nearestMiles:nearest[0].miles};
+    var weighted=0, total=0;
+    for (var n=0; n<nearest.length; n++) {
+      var weight=1/Math.pow(Math.max(6,nearest[n].miles),2.15);
+      weighted += nearest[n].temp*weight;
+      total += weight;
+    }
+    if (!total) return null;
+    return {temp:weighted/total, nearestMiles:nearest[0].miles};
+  }
+
+  function renderAirTemperatureHeatMap(observations, bounds) {
+    if (!Array.isArray(observations) || observations.length < 2) return null;
+
+    // L.imageOverlay is laid out in Leaflet's EPSG:3857 map plane. Build the
+    // interpolation raster on that same projected grid so latitude is not
+    // sampled linearly inside a Web-Mercator rectangle. This keeps coastlines,
+    // state boundaries, and regional temperature features aligned at CONUS scale.
+    var projectedSW = map.options.crs.project(bounds.getSouthWest());
+    var projectedNE = map.options.crs.project(bounds.getNorthEast());
+    var projectedWidth = Math.max(1, projectedNE.x - projectedSW.x);
+    var projectedHeight = Math.max(1, projectedNE.y - projectedSW.y);
+    var aspect = Math.max(0.45, Math.min(2.8, projectedWidth / projectedHeight));
+    var h = 110;
+    var w = Math.round(h * aspect);
+    w = Math.max(90, Math.min(260, w));
+    var canvas = document.createElement("canvas");
+    canvas.width = w; canvas.height = h;
+    var ctx = canvas.getContext("2d");
+    var image = ctx.createImageData(w,h);
+    var prepared = [];
+    observations.forEach(function(o) {
+      var lat = Number(o.lat), lon = Number(o.lon), temp = Number(o.temp_f);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon) || !Number.isFinite(temp)) return;
+      if (lat < bounds.getSouth() || lat > bounds.getNorth() || lon < bounds.getWest() || lon > bounds.getEast()) return;
+      prepared.push({lat:lat,lon:lon,temp:temp});
+    });
+    if (prepared.length < 2) return null;
+
+    // Use only nearby observations for each cell. v309 stopped abruptly at a
+    // hard maximum station radius, producing blocky holes and polygon-like edges
+    // where station coverage became sparse. v310 samples a modestly larger outer
+    // radius and fades opacity smoothly with distance from the nearest report.
+    // The tighter core radius also avoids implying precise observed air
+    // temperature far offshore where the station network is sparse.
+    var zoom = map.getZoom();
+    var coreRadiusMiles = Math.max(75, Math.min(240, 300 / Math.pow(1.45, Math.max(0, zoom-4))));
+    var outerRadiusMiles = Math.min(320, coreRadiusMiles * 1.35);
+    var fullOpacityRadiusMiles = coreRadiusMiles * 0.58;
+    var neighborCount = 8;
+
+    for (var y=0; y<h; y++) {
+      var projectedY = projectedNE.y - (y/(h-1))*projectedHeight;
+      for (var x=0; x<w; x++) {
+        var projectedX = projectedSW.x + (x/(w-1))*projectedWidth;
+        var sample = map.options.crs.unproject(L.point(projectedX, projectedY));
+        var lat = sample.lat;
+        var lon = sample.lng;
+        var interpolated=interpolateAirTemperatureAt(prepared,lat,lon,outerRadiusMiles,neighborCount);
+        if (!interpolated) continue;
+        var temp=interpolated.temp;
+        var rgb=airTemperatureColor(temp);
+        var nearest=interpolated.nearestMiles;
+        var opacity=1;
+        if (nearest > fullOpacityRadiusMiles) {
+          var t=(nearest-fullOpacityRadiusMiles)/Math.max(1,outerRadiusMiles-fullOpacityRadiusMiles);
+          t=Math.max(0,Math.min(1,t));
+          // Smoothstep fade: no hard coverage edge, but sparse distant reports
+          // quickly lose visual authority.
+          opacity=1-(t*t*(3-2*t));
+        }
+        var alpha=Math.round(180*Math.max(0,Math.min(1,opacity)));
+        if (alpha <= 2) continue;
+        var off=(y*w+x)*4;
+        image.data[off]=rgb[0]; image.data[off+1]=rgb[1]; image.data[off+2]=rgb[2]; image.data[off+3]=alpha;
+      }
+    }
+    ctx.putImageData(image,0,0);
+    return canvas.toDataURL("image/png");
+  }
+
+  function removeAirTemperatureObservedLayer() {
+    if (airTemperatureLayer && map.hasLayer(airTemperatureLayer)) map.removeLayer(airTemperatureLayer);
+    airTemperatureLayer = null;
+    airTemperatureLoadedBounds = null;
+  }
+
+  function removeAirTemperatureForecastLayer() {
+    if (airTemperatureForecastLayer && map.hasLayer(airTemperatureForecastLayer)) map.removeLayer(airTemperatureForecastLayer);
+    airTemperatureForecastLayer = null;
+  }
+
+  function transitionAirTemperatureLayer(nextLayer, targetOpacity, nextKind, nextBounds, settledCallback) {
+    var oldObserved = airTemperatureLayer;
+    var oldForecast = airTemperatureForecastLayer;
+    var durationMS = 320;
+    var oldLayerVisible = (oldObserved && map.hasLayer(oldObserved)) || (oldForecast && map.hasLayer(oldForecast));
+    var waitForNextLoad = oldLayerVisible && !nextLayer._airTemperatureCanvasReady;
+    var transitionStarted = false;
+
+    nextLayer.setOpacity(0);
+
+    if (nextKind === "observed") {
+      airTemperatureLayer = nextLayer;
+      airTemperatureLoadedBounds = nextBounds || null;
+    } else {
+      airTemperatureForecastLayer = nextLayer;
+    }
+
+    function applyTransition(layer) {
+      if (!layer || !layer.getElement) return;
+      var el = layer.getElement();
+      if (el) el.style.transition = "opacity " + durationMS + "ms ease";
+    }
+
+    function beginTransition() {
+      if (transitionStarted) return;
+      transitionStarted = true;
+      applyTransition(nextLayer);
+      applyTransition(oldObserved);
+      applyTransition(oldForecast);
+
+      window.requestAnimationFrame(function() {
+        window.requestAnimationFrame(function() {
+          if (!map.hasLayer(nextLayer)) return;
+          nextLayer.setOpacity(targetOpacity);
+          if (oldObserved && oldObserved !== nextLayer && map.hasLayer(oldObserved)) oldObserved.setOpacity(0);
+          if (oldForecast && oldForecast !== nextLayer && map.hasLayer(oldForecast)) oldForecast.setOpacity(0);
+        });
+      });
+
+      window.setTimeout(function() {
+        if (oldObserved && oldObserved !== nextLayer && map.hasLayer(oldObserved)) map.removeLayer(oldObserved);
+        if (oldForecast && oldForecast !== nextLayer && map.hasLayer(oldForecast)) map.removeLayer(oldForecast);
+        if (nextKind === "observed") {
+          if (airTemperatureForecastLayer === oldForecast) airTemperatureForecastLayer = null;
+        } else {
+          if (airTemperatureLayer === oldObserved) {
+            airTemperatureLayer = null;
+            airTemperatureLoadedBounds = null;
+          }
+        }
+        if (typeof settledCallback === "function") settledCallback();
+      }, durationMS + 40);
+    }
+
+    if (waitForNextLoad && nextLayer.once) {
+      nextLayer.once("load", beginTransition);
+    }
+    nextLayer.addTo(map);
+    if (!waitForNextLoad) beginTransition();
+  }
+
+  function loadObservedAirTemperature(force) {
+    var visibleBounds = airTemperatureVisibleCONUSBounds();
+    if (!visibleBounds) {
+      removeAirTemperatureObservedLayer();
+      showAirTemperatureLegend(false);
+      setAirTemperatureStatus(map.getZoom() < airTemperatureMinZoom
+        ? "Air Temperature · Zoom to 4+ over the contiguous U.S. to display the heat map."
+        : "Air Temperature · This overlay is limited to the contiguous U.S.", false);
+      airTemperaturePlaybackFrameSettled(false);
+      return;
+    }
+    if (!force && airTemperatureBoundsContain(airTemperatureLoadedBounds, visibleBounds) && airTemperatureLayer) return;
+    var requestBounds = bufferedAirTemperatureBounds(visibleBounds);
+    var serial = ++airTemperatureRequestSerial;
+    setAirTemperatureStatus("Air Temperature · Observed · loading current observations…", false);
+    fetch(airTemperatureURL(requestBounds), {headers:{"Accept":"application/json"}})
+      .then(function(response){ if(!response.ok) throw new Error("HTTP "+response.status); return response.json(); })
+      .then(function(payload){
+        if (!mapState.airTemperatureOverlayVisible || Number(mapState.airTemperatureForecastHours||0) !== 0 || serial !== airTemperatureRequestSerial) return;
+        var observations = Array.isArray(payload.observations) ? payload.observations : [];
+        airTemperatureObservedSamples = observations.slice();
+        var dataURL = renderAirTemperatureHeatMap(observations, requestBounds);
+        if (!dataURL) {
+          removeAirTemperatureObservedLayer();
+          showAirTemperatureLegend(false);
+          setAirTemperatureStatus("Air Temperature · Observed · not enough current temperature observations near this view.", true);
+          airTemperaturePlaybackFrameSettled(false);
+          return;
+        }
+        var next = L.imageOverlay(dataURL, requestBounds, {pane:"airTemperaturePane", opacity:1, interactive:false});
+        transitionAirTemperatureLayer(next, 1, "observed", requestBounds, function() {
+          airTemperaturePlaybackFrameSettled(true);
+        });
+        airTemperatureForecastDisplayHours=0;
+        var slider=document.getElementById("map-air-temperature-hours");
+        if (slider) slider.value="0";
+        updateAirTemperatureForecastTimeLabel(0);
+        showAirTemperatureLegend(true);
+        var marine=0, inland=0;
+        observations.forEach(function(o){ if(String(o.source||"").indexOf("NDBC")>=0) marine++; else inland++; });
+        var updatedText="";
+        if (payload.updated) {
+          var updated=new Date(payload.updated);
+          if (!Number.isNaN(updated.getTime())) updatedText=" · latest "+updated.toLocaleTimeString([], {hour:"numeric",minute:"2-digit"});
+        }
+        var warning = Array.isArray(payload.errors) && payload.errors.length ? " · source warning"+(payload.errors.length===1?"":"s") : "";
+        setAirTemperatureStatus("Air Temperature · Observed · "+observations.length+" observations ("+marine+" NDBC, "+inland+" METAR) · local-neighbor interpolation with soft sparse-coverage fade · fixed −10°F to 110°F scale"+updatedText+warning+".", false);
+      })
+      .catch(function(err){
+        if (!mapState.airTemperatureOverlayVisible || Number(mapState.airTemperatureForecastHours||0) !== 0 || serial !== airTemperatureRequestSerial) return;
+        removeAirTemperatureObservedLayer();
+        showAirTemperatureLegend(false);
+        setAirTemperatureStatus("Air Temperature · Observed could not be loaded: "+String(err&&err.message?err.message:err||"unknown error"), true);
+        airTemperaturePlaybackFrameSettled(false);
+      });
+  }
+
+  function ndfdTemperatureLayerID(hours) {
+    var ids = {0:8,3:12,6:16,9:20,12:24,15:28,18:32,21:36,24:40};
+    return ids[Math.max(0, Math.min(24, Math.round(Number(hours)||0)))] || 8;
+  }
+
+  function airTemperatureForecastGridSpec(bounds) {
+    if (!bounds) return null;
+    var south = Math.max(airTemperatureCONUS.south, bounds.getSouth());
+    var north = Math.min(airTemperatureCONUS.north, bounds.getNorth());
+    var west = Math.max(airTemperatureCONUS.west, bounds.getWest());
+    var east = Math.min(airTemperatureCONUS.east, bounds.getEast());
+    var displayBounds = L.latLngBounds([south,west],[north,east]);
+    if (!displayBounds.isValid() || west >= east || south >= north) return null;
+    var sw = map.options.crs.project(displayBounds.getSouthWest());
+    var ne = map.options.crs.project(displayBounds.getNorthEast());
+    var aspect = Math.max(0.55, Math.min(3.2, (ne.x-sw.x)/Math.max(1,ne.y-sw.y)));
+    var height = 120;
+    var width = Math.max(96, Math.min(320, Math.round(height*aspect)));
+    return {bounds:displayBounds,width:width,height:height};
+  }
+
+  function airTemperatureForecastGridURL(spec, hours) {
+    return "/air-temperature-grid?west="+encodeURIComponent(spec.bounds.getWest().toFixed(5))+
+      "&south="+encodeURIComponent(spec.bounds.getSouth().toFixed(5))+
+      "&east="+encodeURIComponent(spec.bounds.getEast().toFixed(5))+
+      "&north="+encodeURIComponent(spec.bounds.getNorth().toFixed(5))+
+      "&hours="+encodeURIComponent(String(hours))+
+      "&width="+encodeURIComponent(String(spec.width))+
+      "&height="+encodeURIComponent(String(spec.height));
+  }
+
+  function airTemperatureForecastGridKey(spec, hours) {
+    return [hours,spec.bounds.getWest().toFixed(3),spec.bounds.getSouth().toFixed(3),
+      spec.bounds.getEast().toFixed(3),spec.bounds.getNorth().toFixed(3),spec.width,spec.height].join("|");
+  }
+
+  function decodeAirTemperatureForecastGrid(payload) {
+    var width=Number(payload.width), height=Number(payload.height);
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width<1 || height<1) throw new Error("invalid grid dimensions");
+    var raw=window.atob(String(payload.data||""));
+    if (raw.length !== width*height*2) throw new Error("invalid grid payload");
+    var temps=new Float32Array(width*height);
+    for (var i=0;i<temps.length;i++) {
+      var lo=raw.charCodeAt(i*2), hi=raw.charCodeAt(i*2+1);
+      var u=lo | (hi<<8);
+      var v=u>=0x8000 ? u-0x10000 : u;
+      temps[i]=v===-32768 ? NaN : v/10;
+    }
+    return {
+      west:Number(payload.west),south:Number(payload.south),east:Number(payload.east),north:Number(payload.north),
+      width:width,height:height,hours:Number(payload.hours),temps:temps
+    };
+  }
+
+  function fetchAirTemperatureForecastGrid(spec, hours, force) {
+    var key=airTemperatureForecastGridKey(spec,hours);
+    if (!force && airTemperatureForecastGridCache[key]) return Promise.resolve(airTemperatureForecastGridCache[key]);
+    return fetch(airTemperatureForecastGridURL(spec,hours),{headers:{"Accept":"application/json"},cache:"no-store"})
+      .then(function(response){if(!response.ok) throw new Error("HTTP "+response.status);return response.json();})
+      .then(function(payload){
+        var grid=decodeAirTemperatureForecastGrid(payload);
+        airTemperatureForecastGridCache[key]=grid;
+        var keys=Object.keys(airTemperatureForecastGridCache);
+        if (keys.length>10) delete airTemperatureForecastGridCache[keys[0]];
+        return grid;
+      });
+  }
+
+  function paintAirTemperatureForecastCanvas(canvas, grid, nextGrid, alpha) {
+    if (!canvas || !grid) return false;
+    if (canvas.width!==grid.width) canvas.width=grid.width;
+    if (canvas.height!==grid.height) canvas.height=grid.height;
+    var ctx=canvas.getContext("2d");
+    if (!ctx) return false;
+    var image=ctx.createImageData(grid.width,grid.height);
+    var blend=nextGrid && nextGrid.width===grid.width && nextGrid.height===grid.height ? nextGrid : null;
+    alpha=Math.max(0,Math.min(1,Number(alpha)||0));
+    for (var i=0;i<grid.temps.length;i++) {
+      var t0=grid.temps[i], t=t0;
+      if (blend) {
+        var t1=blend.temps[i];
+        if (Number.isFinite(t0) && Number.isFinite(t1)) t=t0+(t1-t0)*alpha;
+        else if (!Number.isFinite(t0) && Number.isFinite(t1)) t=t1;
+        else if (Number.isFinite(t0) && !Number.isFinite(t1)) t=t0;
+      }
+      if (!Number.isFinite(t)) continue;
+      var rgb=airTemperatureColor(t);
+      var off=i*4;
+      image.data[off]=rgb[0]; image.data[off+1]=rgb[1]; image.data[off+2]=rgb[2]; image.data[off+3]=198;
+    }
+    ctx.putImageData(image,0,0);
+    return true;
+  }
+
+  var AirTemperatureCanvasOverlay = L.Layer.extend({
+    initialize:function(bounds,options){
+      L.setOptions(this,options);
+      this._bounds=L.latLngBounds(bounds);
+      this._canvas=document.createElement("canvas");
+      this._canvas.className="leaflet-image-layer leaflet-zoom-animated";
+      this._canvas.style.position="absolute";
+      this._canvas.style.pointerEvents="none";
+      this._canvas.style.opacity=String(this.options.opacity==null?1:this.options.opacity);
+      this._airTemperatureCanvasReady=true;
+    },
+    onAdd:function(map){
+      this._map=map;
+      var pane=map.getPane(this.options.pane)||map.getPanes().overlayPane;
+      pane.appendChild(this._canvas);
+      map.on("zoom viewreset",this._reset,this);
+      this._reset();
+    },
+    onRemove:function(map){
+      map.off("zoom viewreset",this._reset,this);
+      if (this._canvas && this._canvas.parentNode) this._canvas.parentNode.removeChild(this._canvas);
+      this._map=null;
+    },
+    _reset:function(){
+      if (!this._map || !this._canvas) return;
+      var nw=this._map.latLngToLayerPoint(this._bounds.getNorthWest());
+      var se=this._map.latLngToLayerPoint(this._bounds.getSouthEast());
+      L.DomUtil.setPosition(this._canvas,nw);
+      this._canvas.style.width=Math.max(1,se.x-nw.x)+"px";
+      this._canvas.style.height=Math.max(1,se.y-nw.y)+"px";
+    },
+    setOpacity:function(value){
+      this.options.opacity=value;
+      if (this._canvas) this._canvas.style.opacity=String(value);
+      return this;
+    },
+    getElement:function(){return this._canvas;},
+    getCanvas:function(){return this._canvas;},
+    getBounds:function(){return this._bounds;},
+    setBounds:function(bounds){
+      this._bounds=L.latLngBounds(bounds);
+      this._reset();
+      return this;
+    }
+  });
+
+  function gridBounds(grid) {
+    return L.latLngBounds([grid.south,grid.west],[grid.north,grid.east]);
+  }
+
+  function displayAirTemperatureForecastGrid(grid, nextGrid, alpha, settledCallback) {
+    if (!grid) return false;
+    var bounds=gridBounds(grid);
+    var currentBounds = airTemperatureForecastLayer && airTemperatureForecastLayer.getBounds
+      ? airTemperatureForecastLayer.getBounds() : null;
+    var sameBounds = currentBounds &&
+      Math.abs(currentBounds.getWest()-bounds.getWest())<0.0001 &&
+      Math.abs(currentBounds.getEast()-bounds.getEast())<0.0001 &&
+      Math.abs(currentBounds.getSouth()-bounds.getSouth())<0.0001 &&
+      Math.abs(currentBounds.getNorth()-bounds.getNorth())<0.0001;
+    if (airTemperatureForecastLayer && map.hasLayer(airTemperatureForecastLayer) &&
+        airTemperatureForecastLayer.getCanvas && sameBounds) {
+      if (!paintAirTemperatureForecastCanvas(airTemperatureForecastLayer.getCanvas(),grid,nextGrid,alpha)) return false;
+      if (typeof settledCallback==="function") settledCallback();
+      return true;
+    }
+    var next=new AirTemperatureCanvasOverlay(bounds,{pane:"airTemperaturePane",opacity:0.78});
+    if (!paintAirTemperatureForecastCanvas(next.getCanvas(),grid,nextGrid,alpha)) return false;
+    transitionAirTemperatureLayer(next,0.78,"forecast",bounds,settledCallback);
+    return true;
+  }
+
+  function formatAirTemperatureOffset(hours) {
+    hours=Number(hours)||0;
+    if (hours<=0.001) return "NOW";
+    var totalMinutes=Math.max(0,Math.round(hours*60));
+    var wholeHours=Math.floor(totalMinutes/60);
+    var minutes=totalMinutes%60;
+    return "+"+wholeHours+"h"+(minutes ? " "+String(minutes).padStart(2,"0")+"m" : "");
+  }
+
+  function updateAirTemperatureForecastTimeLabel(previewHours) {
+    var el = document.getElementById("map-air-temperature-time");
+    if (!el) return;
+    var hours = Number.isFinite(Number(previewHours)) ? Number(previewHours) : Number(airTemperatureForecastDisplayHours||mapState.airTemperatureForecastHours||0);
+    el.hidden = !mapState.airTemperatureOverlayVisible;
+    el.classList.toggle("is-playing", !!airTemperaturePlaybackActive);
+    if (hours<=0.001) {
+      el.textContent = "Air Temperature · NOW · Observed";
+    } else if (airTemperaturePlaybackActive && Math.abs(hours/3-Math.round(hours/3))>0.01) {
+      el.textContent = "Air Temperature · "+formatAirTemperatureOffset(hours)+" · Interpolated forecast";
+    } else {
+      el.textContent = "Air Temperature · "+formatAirTemperatureOffset(hours)+" · Forecast";
+    }
+    updateAirTemperatureLegendContext(hours);
+  }
+
+  function animateAirTemperatureTimelineIndicator(fromHours,toHours,durationMS) {
+    if (!airTemperaturePlaybackActive) return;
+    var slider=document.getElementById("map-air-temperature-hours");
+    var started=performance.now();
+    function tick(now) {
+      if (!airTemperaturePlaybackActive) return;
+      var p=Math.max(0,Math.min(1,(now-started)/Math.max(1,durationMS||320)));
+      var eased=p*p*(3-2*p);
+      var shown=fromHours+(toHours-fromHours)*eased;
+      airTemperatureForecastDisplayHours=shown;
+      if (slider) slider.value=String(Math.round(shown*20)/20);
+      updateAirTemperatureForecastTimeLabel(shown);
+      if (p<1) window.requestAnimationFrame(tick);
+    }
+    window.requestAnimationFrame(tick);
+  }
+
+  function airTemperatureForecastAnchorPair(hours) {
+    hours=Math.max(0,Math.min(24,Number(hours)||0));
+    var lower=Math.max(0,Math.floor(hours/3)*3);
+    var upper=Math.min(24,lower+3);
+    if (hours>=24-0.001) { lower=24; upper=24; }
+    return {lower:lower,upper:upper,alpha:upper===lower?0:(hours-lower)/(upper-lower)};
+  }
+
+  function showAirTemperatureForecastAtManual(hours) {
+    var visibleBounds=airTemperatureVisibleCONUSBounds();
+    if (!visibleBounds) {
+      showAirTemperatureLegend(false);
+      setAirTemperatureStatus(map.getZoom()<airTemperatureMinZoom
+        ? "Air Temperature · Forecast · Zoom to 4+ over the contiguous U.S. to display temperature."
+        : "Air Temperature · Forecast is limited to the contiguous U.S.",false);
+      return;
+    }
+    var spec=airTemperatureForecastGridSpec(visibleBounds);
+    hours=Math.max(0,Math.min(Number(airTemperaturePlaybackRangeHours)||24,Number(hours)||0));
+    if (!spec) return;
+    var pair=airTemperatureForecastAnchorPair(hours);
+    var targetSerial=++airTemperatureManualTargetSerial;
+    showAirTemperatureLegend(true);
+    setAirTemperatureStatus("Air Temperature · Forecast · loading NOAA/NWS NDFD grid…",false);
+    Promise.all([
+      fetchAirTemperatureForecastGrid(spec,pair.lower,false),
+      pair.upper===pair.lower ? Promise.resolve(null) : fetchAirTemperatureForecastGrid(spec,pair.upper,false)
+    ]).then(function(grids){
+      if (!mapState.airTemperatureOverlayVisible || targetSerial!==airTemperatureManualTargetSerial || Math.abs(Number(mapState.airTemperatureForecastHours||0)-hours)>0.001) return;
+      var lowerGrid=grids[0], upperGrid=grids[1];
+      airTemperatureForecastGridCurrent=lowerGrid;
+      airTemperatureForecastGridNext=upperGrid;
+      airTemperatureForecastGridBlendAlpha=pair.alpha;
+      airTemperatureForecastDisplayHours=hours;
+      displayAirTemperatureForecastGrid(lowerGrid,upperGrid,pair.alpha);
+      updateAirTemperatureForecastTimeLabel(hours);
+      setAirTemperatureStatus("Air Temperature · Forecast · NOAA/NWS NDFD · "+formatAirTemperatureOffset(hours)+".",false);
+    }).catch(function(){
+      if (!mapState.airTemperatureOverlayVisible || targetSerial!==airTemperatureManualTargetSerial) return;
+      setAirTemperatureStatus("Air Temperature forecast grid could not be loaded from NOAA/NWS NDFD.",true);
+    });
+  }
+
+  function loadForecastAirTemperature() {
+    var requestedHours=Number(mapState.airTemperatureForecastHours||0);
+    if (requestedHours>0 && Math.abs(requestedHours/3-Math.round(requestedHours/3))>0.001) {
+      showAirTemperatureForecastAtManual(requestedHours);
+      return;
+    }
+    var visibleBounds=airTemperatureVisibleCONUSBounds();
+    if (!visibleBounds) {
+      showAirTemperatureLegend(false);
+      setAirTemperatureStatus(map.getZoom()<airTemperatureMinZoom
+        ? "Air Temperature · Forecast · Zoom to 4+ over the contiguous U.S. to display temperature."
+        : "Air Temperature · Forecast is limited to the contiguous U.S.",false);
+      airTemperaturePlaybackFrameSettled(false);
+      return;
+    }
+    var spec=airTemperatureForecastGridSpec(visibleBounds);
+    var hours=Number(mapState.airTemperatureForecastHours||0);
+    if (!spec || hours<=0) {airTemperaturePlaybackFrameSettled(false);return;}
+    var serial=++airTemperatureRequestSerial;
+    showAirTemperatureLegend(true);
+    setAirTemperatureStatus("Air Temperature · Forecast · loading NOAA/NWS NDFD +"+hours+"h grid…",false);
+    fetchAirTemperatureForecastGrid(spec,hours,false)
+      .then(function(grid){
+        if (!mapState.airTemperatureOverlayVisible || Number(mapState.airTemperatureForecastHours||0)!==hours || serial!==airTemperatureRequestSerial) return;
+        airTemperatureForecastGridCurrent=grid;
+        airTemperatureForecastGridNext=null;
+        airTemperatureForecastGridBlendAlpha=0;
+        var previousDisplay=airTemperatureForecastDisplayHours;
+        var slider=document.getElementById("map-air-temperature-hours");
+        if (airTemperaturePlaybackActive && previousDisplay<=0.001 && hours===3) {
+          animateAirTemperatureTimelineIndicator(0,3,360);
+        } else {
+          airTemperatureForecastDisplayHours=hours;
+          if (slider) slider.value=String(hours);
+          updateAirTemperatureForecastTimeLabel(hours);
+        }
+        displayAirTemperatureForecastGrid(grid,null,0,function(){
+          airTemperatureForecastDisplayHours=hours;
+          if (slider) slider.value=String(hours);
+          updateAirTemperatureForecastTimeLabel(hours);
+          airTemperaturePlaybackFrameSettled(true);
+        });
+        showAirTemperatureLegend(true);
+        setAirTemperatureStatus("Air Temperature · Forecast · NOAA/NWS NDFD decoded temperature grid · +"+hours+"h · client-rendered.",false);
+        var next=hours<24?hours+3:null;
+        if (next) fetchAirTemperatureForecastGrid(spec,next,false).catch(function(){});
+      })
+      .catch(function(){
+        if (!mapState.airTemperatureOverlayVisible || serial!==airTemperatureRequestSerial) return;
+        setAirTemperatureStatus("Air Temperature · Forecast grid could not be loaded from NOAA/NWS NDFD.",true);
+        airTemperaturePlaybackFrameSettled(false);
+      });
+  }
+
+  function animateAirTemperatureForecastStep(fromHours,toHours) {
+    if (!airTemperaturePlaybackActive || !mapState.airTemperatureOverlayVisible) return;
+    var visibleBounds=airTemperatureVisibleCONUSBounds();
+    var spec=airTemperatureForecastGridSpec(visibleBounds);
+    if (!spec) {stopAirTemperaturePlayback();return;}
+    fromHours=Math.max(0,Number(fromHours)||0);
+    toHours=Math.max(fromHours,Number(toHours)||0);
+    var lower=Math.max(0,Math.floor(fromHours/3)*3);
+    var upper=Math.min(24,lower+3);
+    if (fromHours>=upper-0.001) { lower=upper; upper=Math.min(24,upper+3); }
+    if (upper<=lower) {stopAirTemperaturePlayback();return;}
+    var serial=++airTemperatureRequestSerial;
+    Promise.all([
+      fetchAirTemperatureForecastGrid(spec,lower,false),
+      fetchAirTemperatureForecastGrid(spec,upper,false)
+    ]).then(function(grids){
+      if (!airTemperaturePlaybackActive || serial!==airTemperatureRequestSerial) return;
+      var lowerGrid=grids[0], upperGrid=grids[1];
+      airTemperatureForecastGridCurrent=lowerGrid;
+      airTemperatureForecastGridNext=upperGrid;
+      var nextPreload=Math.min(24,upper+3);
+      if (nextPreload>upper) fetchAirTemperatureForecastGrid(spec,nextPreload,false).catch(function(){});
+      var span=Math.max(0.001,toHours-fromHours);
+      var duration=(1350*(span/3))/Math.max(0.5,Number(airTemperaturePlaybackSpeed)||1);
+      var start=performance.now(), lastDraw=0;
+      function frame(now){
+        if (!airTemperaturePlaybackActive || serial!==airTemperatureRequestSerial) return;
+        var p=Math.max(0,Math.min(1,(now-start)/Math.max(1,duration)));
+        var shown=fromHours+(toHours-fromHours)*p;
+        var alpha=Math.max(0,Math.min(1,(shown-lower)/(upper-lower)));
+        airTemperatureForecastGridBlendAlpha=alpha;
+        airTemperatureForecastDisplayHours=shown;
+        if (now-lastDraw>=45 || p>=1) {
+          displayAirTemperatureForecastGrid(lowerGrid,upperGrid,alpha);
+          var slider=document.getElementById("map-air-temperature-hours");
+          if (slider) slider.value=String(Math.round(shown*4)/4);
+          updateAirTemperatureForecastTimeLabel(shown);
+          lastDraw=now;
+        }
+        if (p<1) {
+          airTemperaturePlaybackRAF=window.requestAnimationFrame(frame);
+          return;
+        }
+        airTemperaturePlaybackRAF=null;
+        airTemperatureForecastGridCurrent=upperGrid;
+        airTemperatureForecastGridNext=null;
+        airTemperatureForecastGridBlendAlpha=0;
+        airTemperatureForecastDisplayHours=toHours;
+        mapState.airTemperatureForecastHours=toHours;
+        var slider=document.getElementById("map-air-temperature-hours");
+        if (slider) slider.value=String(Math.round(toHours*4)/4);
+        updateAirTemperatureForecastTimeLabel(toHours);
+        setAirTemperatureStatus("Air Temperature · Forecast · NOAA/NWS NDFD decoded temperature grid · "+formatAirTemperatureOffset(toHours)+" · client-rendered.",false);
+        scheduleAirTemperaturePlaybackAdvance();
+      }
+      airTemperaturePlaybackRAF=window.requestAnimationFrame(frame);
+    }).catch(function(){stopAirTemperaturePlayback();});
+  }
+
+  function sampleAirTemperatureForecastGrid(grid, latlng) {
+    if (!grid || !latlng) return NaN;
+    var sw=map.options.crs.project(L.latLng(grid.south,grid.west));
+    var ne=map.options.crs.project(L.latLng(grid.north,grid.east));
+    var p=map.options.crs.project(latlng);
+    var fx=(p.x-sw.x)/Math.max(1,ne.x-sw.x)*(grid.width-1);
+    var fy=(ne.y-p.y)/Math.max(1,ne.y-sw.y)*(grid.height-1);
+    if (fx<0 || fy<0 || fx>grid.width-1 || fy>grid.height-1) return NaN;
+    var x=Math.max(0,Math.min(grid.width-1,Math.round(fx)));
+    var y=Math.max(0,Math.min(grid.height-1,Math.round(fy)));
+    return grid.temps[y*grid.width+x];
+  }
+
+  function airTemperaturePointerInsideCONUS(latlng) {
+    return latlng && Number.isFinite(latlng.lat) && Number.isFinite(latlng.lng) &&
+      latlng.lat >= airTemperatureCONUS.south && latlng.lat <= airTemperatureCONUS.north &&
+      latlng.lng >= airTemperatureCONUS.west && latlng.lng <= airTemperatureCONUS.east &&
+      map.getZoom() >= airTemperatureMinZoom;
+  }
+
+  function showAirTemperaturePointerTooltip(latlng, text) {
+    if (!airTemperatureMapTooltip) {
+      airTemperatureMapTooltip = L.tooltip({
+        permanent:false, direction:"top", offset:[0,-8], opacity:0.96,
+        interactive:false, className:"air-temperature-map-tooltip"
+      });
+    }
+    airTemperatureMapTooltip.setLatLng(latlng).setContent(String(text||""));
+    if (!map.hasLayer(airTemperatureMapTooltip)) airTemperatureMapTooltip.addTo(map);
+  }
+
+  function hideAirTemperaturePointerTooltip() {
+    if (airTemperatureTooltipTimer) {
+      window.clearTimeout(airTemperatureTooltipTimer);
+      airTemperatureTooltipTimer=null;
+    }
+    airTemperatureTooltipSerial++;
+    if (airTemperatureMapTooltip && map.hasLayer(airTemperatureMapTooltip)) map.removeLayer(airTemperatureMapTooltip);
+  }
+
+  function ndfdPointTemperatureURL(latlng, hours) {
+    return "/air-temperature-point?lat="+encodeURIComponent(Number(latlng.lat).toFixed(5))+
+      "&lon="+encodeURIComponent(Number(latlng.lng).toFixed(5))+
+      "&hours="+encodeURIComponent(String(hours));
+  }
+
+  function inspectAirTemperatureAt(latlng) {
+    if (!mapState.airTemperatureOverlayVisible || !airTemperaturePointerInsideCONUS(latlng)) {
+      hideAirTemperaturePointerTooltip();
+      return;
+    }
+    airTemperatureLastPointerLatLng=latlng;
+    var hours=Number(mapState.airTemperatureForecastHours||0);
+    if (hours === 0) {
+      var coreRadius=Math.max(75,Math.min(240,300/Math.pow(1.45,Math.max(0,map.getZoom()-4))));
+      var radius=Math.min(320,coreRadius*1.35);
+      var result=interpolateAirTemperatureAt(airTemperatureObservedSamples,latlng.lat,latlng.lng,radius,8);
+      if (!result) {
+        showAirTemperaturePointerTooltip(latlng,"No current temperature nearby");
+        return;
+      }
+      showAirTemperaturePointerTooltip(latlng,Math.round(result.temp)+"°F · Observed");
+      return;
+    }
+
+    var t0=sampleAirTemperatureForecastGrid(airTemperatureForecastGridCurrent,latlng);
+    var temp=t0;
+    if (airTemperatureForecastGridNext) {
+      var t1=sampleAirTemperatureForecastGrid(airTemperatureForecastGridNext,latlng);
+      if (Number.isFinite(t0) && Number.isFinite(t1)) temp=t0+(t1-t0)*airTemperatureForecastGridBlendAlpha;
+    }
+    if (!Number.isFinite(temp)) {
+      showAirTemperaturePointerTooltip(latlng,"Forecast temperature unavailable");
+      return;
+    }
+    var shownHours=airTemperatureForecastGridNext ? airTemperatureForecastDisplayHours : hours;
+    showAirTemperaturePointerTooltip(latlng,Math.round(temp)+"°F · Forecast +"+Number(shownHours).toFixed(airTemperatureForecastGridNext?1:0)+"h · NDFD");
+
+  }
+
+  function loadAirTemperatureOverlay(force) {
+    if (!mapState.airTemperatureOverlayVisible) return;
+    showAirTemperatureControls(true);
+    // Keep the currently visible frame in place until its replacement has fully
+    // loaded and cross-faded in. This prevents a blank map when switching
+    // between NOW observations and forecast frames.
+    if (Number(mapState.airTemperatureForecastHours||0) > 0) {
+      loadForecastAirTemperature();
+      return;
+    }
+    loadObservedAirTemperature(force);
+  }
+
+  function scheduleAirTemperatureRefresh() {
+    if (!mapState.airTemperatureOverlayVisible) return;
+    if (airTemperatureRefreshTimer) window.clearTimeout(airTemperatureRefreshTimer);
+    airTemperatureRefreshTimer=window.setTimeout(function(){ airTemperatureRefreshTimer=null; loadAirTemperatureOverlay(false); }, 240);
+  }
+
+  function setAirTemperatureOverlayVisible(visible) {
+    mapState.airTemperatureOverlayVisible=!!visible;
+    if (!mapState.airTemperatureOverlayVisible) {
+      stopAirTemperaturePlayback();
+      airTemperatureRequestSerial++;
+      if (airTemperatureRefreshTimer) { window.clearTimeout(airTemperatureRefreshTimer); airTemperatureRefreshTimer=null; }
+      removeAirTemperatureObservedLayer();
+      removeAirTemperatureForecastLayer();
+      airTemperatureObservedSamples=[];
+      airTemperatureForecastGridCurrent=null;
+      airTemperatureForecastGridNext=null;
+      airTemperatureForecastGridBlendAlpha=0;
+      airTemperatureForecastGridCache={};
+      hideAirTemperaturePointerTooltip();
+      showAirTemperatureControls(false);
+      var timeBadge=document.getElementById("map-air-temperature-time");
+      if (timeBadge) timeBadge.hidden=true;
+      showAirTemperatureLegend(false); setAirTemperatureStatus("",false); return;
+    }
+    showAirTemperatureControls(true);
+    updateAirTemperatureForecastTimeLabel(airTemperatureForecastDisplayHours||mapState.airTemperatureForecastHours||0);
+    loadAirTemperatureOverlay(true);
+  }
+
   function setPressureStatus(message, isError) {
     var status = document.getElementById("map-pressure-status");
     if (!status) return;
@@ -9618,6 +11121,8 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     swellForecastHours: 0,
     cloudOverlayVisible: false,
     radarOverlayVisible: false,
+    airTemperatureOverlayVisible: false,
+    airTemperatureForecastHours: 0,
     pressureOverlayVisible: false
   };
 
@@ -11781,6 +13286,143 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     });
   }
 
+  var airTemperatureCheckbox = document.getElementById("map-show-air-temperature");
+  if (airTemperatureCheckbox) {
+    airTemperatureCheckbox.checked = !!mapState.airTemperatureOverlayVisible;
+    airTemperatureCheckbox.addEventListener("change", function() {
+      setAirTemperatureOverlayVisible(!!airTemperatureCheckbox.checked);
+    });
+  }
+
+  var airTemperatureHours = document.getElementById("map-air-temperature-hours");
+
+  function commitAirTemperatureHours(next) {
+    var maxHours=Math.max(3,Number(airTemperaturePlaybackRangeHours)||24);
+    next=Math.max(0,Math.min(maxHours,Math.round(Number(next)*4)/4));
+    stopAirTemperaturePlayback();
+    if (airTemperatureHours) airTemperatureHours.value=String(next);
+    mapState.airTemperatureForecastHours=next;
+    airTemperatureForecastDisplayHours=next;
+    hideAirTemperaturePointerTooltip();
+    updateAirTemperatureForecastTimeLabel(next);
+    if (!mapState.airTemperatureOverlayVisible) return;
+    if (next<=0.001) loadObservedAirTemperature(false);
+    else showAirTemperatureForecastAtManual(next);
+  }
+
+  function stepAirTemperatureHoursFromKey(event) {
+    var key=event.key;
+    if (!key && event.keyCode===37) key="ArrowLeft";
+    if (!key && event.keyCode===39) key="ArrowRight";
+    if (!key && event.keyCode===36) key="Home";
+    if (!key && event.keyCode===35) key="End";
+    if (key!=="ArrowLeft" && key!=="ArrowRight" && key!=="Home" && key!=="End") return false;
+    var current=Number(airTemperatureHours ? airTemperatureHours.value : airTemperatureForecastDisplayHours)||0;
+    var maxHours=Math.max(3,Number(airTemperaturePlaybackRangeHours)||24);
+    var next=current;
+    if (key==="ArrowLeft") next=Math.max(0,current-0.25);
+    else if (key==="ArrowRight") next=Math.min(maxHours,current+0.25);
+    else if (key==="Home") next=0;
+    else if (key==="End") next=maxHours;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+    if (Math.abs(next-current)>0.001) commitAirTemperatureHours(next);
+    return true;
+  }
+
+  if (airTemperatureHours) {
+    airTemperatureHours.value = String(mapState.airTemperatureForecastHours || 0);
+    updateAirTemperatureForecastTimeLabel();
+    ["pointerdown","mousedown","touchstart"].forEach(function(name){
+      airTemperatureHours.addEventListener(name,function(){
+        window.setTimeout(function(){
+          try { airTemperatureHours.focus({preventScroll:true}); } catch (_) { try { airTemperatureHours.focus(); } catch (_) {} }
+        },0);
+      },{passive:true});
+    });
+    airTemperatureHours.addEventListener("input", function() {
+      stopAirTemperaturePlayback();
+      updateAirTemperatureForecastTimeLabel(Number(airTemperatureHours.value) || 0);
+    });
+    airTemperatureHours.addEventListener("change", function() {
+      commitAirTemperatureHours(Number(airTemperatureHours.value)||0);
+    });
+    airTemperatureHours.addEventListener("keydown", stepAirTemperatureHoursFromKey, true);
+    // Leaflet/Safari can intercept range-input arrow keys before the bubble
+    // phase when the control lives inside the map UI. Capture them at document
+    // level whenever the slider owns focus.
+    document.addEventListener("keydown",function(event){
+      if (document.activeElement!==airTemperatureHours && event.target!==airTemperatureHours) return;
+      stepAirTemperatureHoursFromKey(event);
+    },true);
+  }
+
+  var airTemperaturePlay = document.getElementById("map-air-temperature-play");
+  if (airTemperaturePlay) {
+    updateAirTemperaturePlaybackButton();
+    airTemperaturePlay.addEventListener("click", function() {
+      if (airTemperaturePlaybackActive) stopAirTemperaturePlayback();
+      else startAirTemperaturePlayback();
+    });
+  }
+
+  var airTemperatureNow = document.getElementById("map-air-temperature-now");
+  if (airTemperatureNow) {
+    airTemperatureNow.addEventListener("click", function() {
+      commitAirTemperatureHours(0);
+    });
+  }
+
+  var airTemperatureMapPlay = document.getElementById("map-air-temperature-map-play");
+  if (airTemperatureMapPlay) {
+    airTemperatureMapPlay.addEventListener("click", function() {
+      if (airTemperaturePlaybackActive) stopAirTemperaturePlayback();
+      else startAirTemperaturePlayback();
+    });
+  }
+
+  var airTemperaturePrev = document.getElementById("map-air-temperature-prev");
+  var airTemperatureNext = document.getElementById("map-air-temperature-next");
+  if (airTemperaturePrev) airTemperaturePrev.addEventListener("click", function() {
+    var current = Number(mapState.airTemperatureForecastHours || 0);
+    commitAirTemperatureHours(Math.max(0, current - 0.25));
+  });
+  if (airTemperatureNext) airTemperatureNext.addEventListener("click", function() {
+    var current = Number(mapState.airTemperatureForecastHours || 0);
+    commitAirTemperatureHours(Math.min(airTemperaturePlaybackRangeHours, current + 0.25));
+  });
+
+  var airTemperatureSpeed = document.getElementById("map-air-temperature-speed");
+  if (airTemperatureSpeed) airTemperatureSpeed.addEventListener("change", function() {
+    var speed = Number(airTemperatureSpeed.value);
+    airTemperaturePlaybackSpeed = speed===0.5 || speed===2 ? speed : 1;
+  });
+
+  var airTemperatureRange = document.getElementById("map-air-temperature-range");
+  if (airTemperatureRange) airTemperatureRange.addEventListener("change", function() {
+    var range = Number(airTemperatureRange.value);
+    airTemperaturePlaybackRangeHours = range===6 || range===12 ? range : 24;
+    if (Number(mapState.airTemperatureForecastHours||0) > airTemperaturePlaybackRangeHours) {
+      commitAirTemperatureHours(airTemperaturePlaybackRangeHours);
+    }
+  });
+
+  // Synchronize the temperature time control from restored map state immediately.
+  // NOW selects observations; every future slider step selects forecast guidance.
+  showAirTemperatureControls(!!mapState.airTemperatureOverlayVisible);
+
+  map.on("mousemove", function(event) {
+    if (!mapState.airTemperatureOverlayVisible) return;
+    inspectAirTemperatureAt(event.latlng);
+  });
+  map.getContainer().addEventListener("mouseleave", function() {
+    hideAirTemperaturePointerTooltip();
+  });
+  map.on("movestart", function() {
+    hideAirTemperaturePointerTooltip();
+  });
+
   var cloudCheckbox = document.getElementById("map-show-clouds");
   if (cloudCheckbox) {
     cloudCheckbox.checked = !!mapState.cloudOverlayVisible;
@@ -11818,6 +13460,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     if (mapState.structureOverlayVisible) scheduleStructureRefresh();
     if (mapState.swellOverlayVisible) scheduleSwellRefresh();
     if (mapState.cloudOverlayVisible) scheduleCloudRefresh();
+    if (mapState.airTemperatureOverlayVisible) scheduleAirTemperatureRefresh();
     if (mapState.pressureOverlayVisible) schedulePressureRefresh();
     if (mapState.windBarbsVisible || mapState.inlandWindBarbsVisible) scheduleWindBarbRefresh();
     if (mapState.saildroneVisible && saildroneLayer) updateSaildroneViewportStatus();
