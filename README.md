@@ -1,13 +1,13 @@
 # Mauri's Weather & Water Conditions
 
-A Go service for San Francisco Bay and Delta sailing conditions. It combines NOAA/NDBC wind observations, NOAA CO-OPS current predictions, National Weather Service forecast context, and optional map overlays, including recent public AIS vessel tracks, into a practical browser dashboard, text reports, JSON output, and a compact voice-oriented Bottom Line.
+A Go service for San Francisco Bay and Delta sailing conditions. It combines NOAA/NDBC wind observations, NOAA CO-OPS current predictions, National Weather Service forecast context, and optional map overlays into a practical browser dashboard, text reports, JSON output, and a compact voice-oriented Bottom Line.
 
 The default wind station is **PSBC1**.
 
 ## Current release
 
 **Public version: 1.14.0**  
-**Generated source lineage: v336**
+**Generated source lineage: v337**
 
 **Current SST status:** deferred/disabled in v195; see **Deferred SST — future approach** below.
 **Current chlorophyll status:** both Chlorophyll Field and Chlorophyll Contours are deferred/disabled in v198.
@@ -18,6 +18,16 @@ Version 1.9.2 builds on the streamlined browser workflow with clearer observatio
 
 
 
+
+## v337 / 1.14.0 AIS vessel-track feature removal
+
+- Advances the generated development build to **v337** while retaining public/application version **1.14.0**.
+- Removes the **Vessels → AIS Vessel Track (Open Waters)** overlay from the map after evaluation showed that the available public AIS feed did not provide sufficiently dependable offshore freshness for the intended circumnavigation-tracking use case.
+- Removes the Go `/ais-track` endpoint, Open Waters vessel-name/MMSI lookup, AIS response cache, and associated AIS-specific server types/helpers.
+- Removes the Leaflet AIS pane, track/marker rendering, Load track/Clear controls, status handling, AIS legend entry, Open Waters source credit, and AIS reference from the page footer.
+- Historical v334-v336 release notes remain below as development history; those AIS capabilities are no longer part of the current v337 functional baseline.
+- No temperature-playback, weather, swell, currents, Saildrone, fire/smoke, marine-place, or other map-overlay behavior is intentionally changed.
+- `main.go` candidate SHA-256 for this build: `65bc828b23927cff3b954b75b79ddb5accc9ffe846024215564212dc6c9752b9`.
 
 ## v336 / 1.14.0 AIS explicit refresh control
 
@@ -2411,17 +2421,17 @@ This section is the authoritative development handoff for this repository. A new
 <!-- PROJECT-STATE:BEGIN -->
 
 - Public app version: **1.14.0**
-- Generated source build: **v336**
-- Next generated source build: **v337**
+- Generated source build: **v337**
+- Next generated source build: **v338**
 - Authoritative repository: **https://github.com/richard-mauri/pittsburg-saildata**
 - Authoritative branch: **main**
-- Release status: **v336 / 1.14.0 development candidate — AIS Load Track explicit refresh**
+- Release status: **v337 / 1.14.0 development candidate — AIS vessel-track feature removed**
 
 ### Managed-file checkpoints
 
 | Repository file | SHA-256 |
 | --- | --- |
-| `main.go` | `9263af54e029e55f3d1c94b8bc2eecd3d299dcdc8f4136a10705d4d4a598060c` |
+| `main.go` | `65bc828b23927cff3b954b75b79ddb5accc9ffe846024215564212dc6c9752b9` |
 | `assets/yogiisms.txt` | `4ebf00217e194ee26a8e8fe38237b298800b36ead0c64accdbb82f623c142371` |
 | `assets/fishing_reports.json` | `02b01de77784153157c6a4a60d6ad21e286f7c191bbe204fed605659ea15ca5e` |
 | `check-project-state.sh` | `85fa5062e2ae4509174b6843ebc0066f4a94e2f2e90001230ca74c07aeb500dc` |
@@ -2438,7 +2448,7 @@ The generated build number is immutable. Any change to generated Go source bytes
 
 The public application version and generated build are separate identities. The current runtime identity is expected to render as:
 
-`Version 1.14.0 · Build v336`
+`Version 1.14.0 · Build v337`
 
 For future public pushes, choose the semantic version deliberately: patch for fixes/refinements, minor for backward-compatible user-facing features, and major only for incompatible changes. Existing Git release tags are immutable: never reuse or move an existing version tag.
 
