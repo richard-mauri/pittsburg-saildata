@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -18,6 +19,7 @@ import (
 	"io/ioutil"
 	"math"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -31,7 +33,7 @@ import (
 
 const (
 	appVersion                      = "1.14.0"
-	buildVersion                    = "v337"
+	buildVersion                    = "v364"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -121,7 +123,39 @@ var (
 	saildroneCacheMu      sync.Mutex
 	saildroneCacheAt      time.Time
 	saildroneCachePayload SaildroneFeed
+
+	swellUpstreamClient = &http.Client{
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           (&net.Dialer{Timeout: 8 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			MaxIdleConns:          24,
+			MaxIdleConnsPerHost:   10,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 8 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
+		Timeout: 18 * time.Second,
+	}
+
+	swellFrameCache = struct {
+		sync.RWMutex
+		items    map[string]swellFrameCacheEntry
+		inflight map[string]chan struct{}
+	}{
+		items:    make(map[string]swellFrameCacheEntry),
+		inflight: make(map[string]chan struct{}),
+	}
+
+	swellPrefetchSlots = make(chan struct{}, 2)
 )
+
+type swellFrameCacheEntry struct {
+	Raw      []byte
+	StoredAt time.Time
+}
+
+const swellFrameCacheTTL = 45 * time.Minute
 
 func saildroneFloat(v interface{}) (float64, bool) {
 	switch x := v.(type) {
@@ -1924,6 +1958,156 @@ func sampleNDFDRenderedTemperature(lat, lon float64, layerID int) (float64, erro
 	}
 	return bestTemp, nil
 }
+
+func buildSwellUpstreamURL(
+	targetText string,
+	latStart int,
+	latStop int,
+	lonStart int,
+	lonStop int,
+	stride int,
+) string {
+	subset := fmt.Sprintf(
+		"[(%s)][(0.0)][%d:%d:%d][%d:%d:%d]",
+		targetText, latStart, stride, latStop, lonStart, stride, lonStop,
+	)
+	projection := "shgt" + subset + ",sper" + subset + ",sdir" + subset
+	return "https://pae-paha.pacioos.hawaii.edu/erddap/griddap/ww3_global_lon180.json?" +
+		url.QueryEscape(projection)
+}
+
+func cachedSwellRaw(key string) ([]byte, bool) {
+	swellFrameCache.RLock()
+	entry, ok := swellFrameCache.items[key]
+	swellFrameCache.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	if time.Since(entry.StoredAt) > swellFrameCacheTTL {
+		swellFrameCache.Lock()
+		delete(swellFrameCache.items, key)
+		swellFrameCache.Unlock()
+		return nil, false
+	}
+	return append([]byte(nil), entry.Raw...), true
+}
+
+func fetchSwellRaw(ctx context.Context, upstreamURL string) ([]byte, error) {
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, upstreamURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "MauriWeatherWaterConditions/"+appVersion)
+
+		resp, err := swellUpstreamClient.Do(req)
+		if err == nil && resp != nil {
+			body, readErr := ioutil.ReadAll(io.LimitReader(resp.Body, 8<<20))
+			resp.Body.Close()
+			if readErr == nil && resp.StatusCode == http.StatusOK {
+				return body, nil
+			}
+			if readErr != nil {
+				err = readErr
+			} else {
+				detail := strings.TrimSpace(string(body))
+				if detail == "" {
+					detail = resp.Status
+				}
+				err = fmt.Errorf("PacIOOS WaveWatch III: %s", detail)
+				if resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < 500 {
+					return nil, err
+				}
+			}
+		}
+		lastErr = err
+		if attempt == 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(1500 * time.Millisecond):
+			}
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("PacIOOS WaveWatch III request failed")
+	}
+	return nil, lastErr
+}
+
+func getOrFetchSwellRaw(ctx context.Context, upstreamURL string, forceRefresh bool) ([]byte, string, error) {
+	var fallback []byte
+	if raw, ok := cachedSwellRaw(upstreamURL); ok {
+		if !forceRefresh {
+			return raw, "HIT", nil
+		}
+		fallback = raw
+	}
+
+	swellFrameCache.Lock()
+	if wait, ok := swellFrameCache.inflight[upstreamURL]; ok {
+		swellFrameCache.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		case <-wait:
+			if raw, ok := cachedSwellRaw(upstreamURL); ok {
+				return raw, "COALESCED", nil
+			}
+			if len(fallback) > 0 {
+				return append([]byte(nil), fallback...), "STALE", nil
+			}
+			return nil, "", fmt.Errorf("PacIOOS WaveWatch III shared request failed")
+		}
+	}
+	wait := make(chan struct{})
+	swellFrameCache.inflight[upstreamURL] = wait
+	swellFrameCache.Unlock()
+
+	raw, err := fetchSwellRaw(ctx, upstreamURL)
+
+	swellFrameCache.Lock()
+	if err == nil {
+		swellFrameCache.items[upstreamURL] = swellFrameCacheEntry{
+			Raw:      append([]byte(nil), raw...),
+			StoredAt: time.Now(),
+		}
+	}
+	delete(swellFrameCache.inflight, upstreamURL)
+	close(wait)
+	swellFrameCache.Unlock()
+
+	if err != nil {
+		if len(fallback) > 0 {
+			return append([]byte(nil), fallback...), "STALE", nil
+		}
+		return nil, "", err
+	}
+	if forceRefresh {
+		return raw, "REFRESH", nil
+	}
+	return raw, "MISS", nil
+}
+
+func prefetchSwellRaw(upstreamURL string) {
+	if _, ok := cachedSwellRaw(upstreamURL); ok {
+		return
+	}
+	go func() {
+		select {
+		case swellPrefetchSlots <- struct{}{}:
+			defer func() { <-swellPrefetchSlots }()
+		default:
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		defer cancel()
+		_, _, _ = getOrFetchSwellRaw(ctx, upstreamURL, false)
+	}()
+}
+
 func runServer(
 	port string,
 	defaultStation string,
@@ -2939,6 +3123,7 @@ func runServer(
 	})
 
 	// Global swell forecast used by the optional surfer-oriented map overlay.
+	// The browser may request any whole-hour forecast offset from 0 through 120.
 	// Source: PacIOOS public ERDDAP WaveWatch III global model, lon +/-180
 	// variant. The model is ~0.5 degree (~50 km) resolution and is appropriate
 	// for basin-scale swell tracking, not surf-break-scale forecasting.
@@ -3098,39 +3283,23 @@ func runServer(
 			return
 		}
 
-		target := time.Now().UTC().Truncate(time.Hour).Add(time.Duration(hoursAhead) * time.Hour)
+		forecastBase := time.Now().UTC().Truncate(time.Hour)
+		target := forecastBase.Add(time.Duration(hoursAhead) * time.Hour)
 		targetText := target.Format("2006-01-02T15:04:05Z")
-		subset := fmt.Sprintf(
-			"[(%s)][(0.0)][%d:%d:%d][%d:%d:%d]",
-			targetText, latStart, stride, latStop, lonStart, stride, lonStop,
+		upstreamURL := buildSwellUpstreamURL(
+			targetText,
+			latStart,
+			latStop,
+			lonStart,
+			lonStop,
+			stride,
 		)
-		projection := "shgt" + subset + ",sper" + subset + ",sdir" + subset
-		upstreamURL := "https://pae-paha.pacioos.hawaii.edu/erddap/griddap/ww3_global_lon180.json?" +
-			url.QueryEscape(projection)
 
-		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, upstreamURL, nil)
+		forceRefresh := strings.TrimSpace(q.Get("refresh")) == "1"
+		primeRequest := strings.TrimSpace(q.Get("prime")) == "1"
+		raw, cacheStatus, err := getOrFetchSwellRaw(r.Context(), upstreamURL, forceRefresh)
 		if err != nil {
-			http.Error(w, "could not build swell request: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		req.Header.Set("Accept", "application/json")
-		req.Header.Set("User-Agent", "MauriWeatherWaterConditions/"+appVersion)
-
-		client := &http.Client{Timeout: 18 * time.Second}
-		resp, err := client.Do(req)
-		if err != nil {
-			http.Error(w, "PacIOOS WaveWatch III request failed: "+err.Error(), http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			body, _ := ioutil.ReadAll(io.LimitReader(resp.Body, 4096))
-			detail := strings.TrimSpace(string(body))
-			if detail == "" {
-				detail = resp.Status
-			}
-			http.Error(w, "PacIOOS WaveWatch III: "+detail, http.StatusBadGateway)
+			http.Error(w, "PacIOOS WaveWatch III request failed after retry: "+err.Error(), http.StatusBadGateway)
 			return
 		}
 
@@ -3140,7 +3309,7 @@ func runServer(
 				Rows        [][]interface{} `json:"rows"`
 			} `json:"table"`
 		}
-		decoder := json.NewDecoder(io.LimitReader(resp.Body, 8<<20))
+		decoder := json.NewDecoder(bytes.NewReader(raw))
 		if err := decoder.Decode(&upstream); err != nil {
 			http.Error(w, "could not decode PacIOOS WaveWatch III response: "+err.Error(), http.StatusBadGateway)
 			return
@@ -3225,8 +3394,33 @@ func runServer(
 
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "private, max-age=300")
+		w.Header().Set("X-Swell-Cache", cacheStatus)
 		if err := json.NewEncoder(w).Encode(payload); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Ordinary interactive requests still warm a few likely neighbors. Explicit
+		// full playback-cache prime requests suppress this secondary warming so the
+		// browser's bounded prime queue remains the only source of upstream load.
+		if !primeRequest {
+			for _, delta := range []int{3, 6, 1} {
+				neighborHours := hoursAhead + delta
+				if neighborHours < 0 || neighborHours > 120 {
+					continue
+				}
+				neighborText := forecastBase.
+					Add(time.Duration(neighborHours) * time.Hour).
+					Format("2006-01-02T15:04:05Z")
+				prefetchSwellRaw(buildSwellUpstreamURL(
+					neighborText,
+					latStart,
+					latStop,
+					lonStart,
+					lonStop,
+					stride,
+				))
+			}
 		}
 	})
 
@@ -8027,7 +8221,7 @@ url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text
 body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 @media(max-width:600px){.map-resize-handle{height:22px}}
 .map-location-info-grid{display:grid;grid-template-columns:1fr;gap:12px;margin-top:10px}.map-location-info-grid .map-coordinate-entry{margin-top:0;align-self:start}.selected-location-weather{margin-top:0;padding:14px 16px;border:1px solid var(--line);border-radius:14px;background:var(--paper);min-height:128px}.selected-location-weather-empty{min-height:98px;display:flex;flex-direction:column;justify-content:center;gap:7px;color:var(--muted)}.selected-location-weather-empty[hidden]{display:none}.selected-location-weather-empty strong{color:var(--navy);font-size:1rem}.selected-location-weather-empty span{line-height:1.4}.selected-location-weather-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;margin:0 0 4px}.selected-location-weather-head strong{color:var(--navy);font-size:1rem}.selected-location-weather-place{font-size:.86rem;font-weight:750;color:var(--ink);margin:0 0 10px}.selected-location-weather-columns{display:grid;grid-template-columns:minmax(240px,.78fr) minmax(0,1.32fr);gap:18px;align-items:start}.selected-location-weather-point-column{min-width:0}.selected-location-weather-updated{color:var(--muted);font-size:.75rem}.selected-location-weather-metrics{display:flex;gap:14px;flex-wrap:wrap;align-items:baseline}.selected-location-weather-metric{font-size:.88rem;color:var(--ink)}.selected-location-weather-metric b{color:var(--navy)}.selected-location-weather-forecast{margin:7px 0 0;color:var(--ink);font-size:.9rem}.selected-location-weather-note{margin:6px 0 0;color:var(--muted);font-size:.75rem}.selected-location-weather-error{margin:6px 0 0;color:#8b2c2c;font-size:.82rem}.selected-location-weather-detail{margin:0;padding:0 0 0 18px;border-left:1px solid var(--line);min-width:0;align-self:start}.selected-location-weather-detail-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:8px}.selected-location-weather-detail-head strong{color:var(--navy);font-size:.92rem}.selected-location-point-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:7px}.selected-location-point-head strong{color:var(--navy);font-size:.88rem}.selected-location-weather-context{margin:7px 0 0;color:var(--muted);font-size:.82rem;line-height:1.4}@media(max-width:760px){.selected-location-weather{min-height:0}.selected-location-weather-columns{grid-template-columns:1fr;gap:12px}.selected-location-weather-detail{padding:12px 0 0;border-left:0;border-top:1px solid var(--line)}}.map-coordinate-entry{display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-top:10px}.map-coordinate-field{display:flex;flex-direction:column;gap:3px}.map-coordinate-field label{font-size:.72rem;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}.map-coordinate-field input{width:132px;padding:7px 9px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--ink);font:inherit}.map-coordinate-use{padding:8px 12px;border:1px solid #126b91;border-radius:9px;background:#126b91;color:#fff;font-weight:850;cursor:pointer}.map-coordinate-use:hover{filter:brightness(.97)}.map-coordinate-error{font-size:.8rem;color:#9b3027;min-height:1.2em}
-.map-station-list{margin-top:12px}.map-station-list-title{font-weight:850;color:var(--navy);margin:0 0 8px}.map-station-table-wrap{max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:14px;background:#fff}.map-station-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.86rem}.map-station-table th,.map-station-table td{padding:8px 10px;border-top:1px solid var(--line);text-align:left;vertical-align:top;background:#fff}.map-station-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc}.map-station-table th{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}.map-station-table tbody tr:first-child td{border-top:0}.map-station-table a{color:var(--blue);font-weight:800;text-decoration:none}.map-station-table a:hover{text-decoration:underline}.map-scale-status{color:var(--muted);font-size:.78rem;font-weight:800;line-height:1.25;white-space:nowrap}.map-nautical-zoom-note{position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:850;background:rgba(7,31,49,.92);color:#fff;border-radius:999px;padding:7px 12px;font-size:.78rem;font-weight:850;box-shadow:0 2px 8px rgba(0,0,0,.2);pointer-events:none;white-space:nowrap;max-width:calc(100% - 32px);overflow:hidden;text-overflow:ellipsis}.map-overlay-toggle.is-unavailable{opacity:.5}.map-structure-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-structure-status[hidden]{display:none}.map-saildrone-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-saildrone-status[hidden]{display:none}.map-alertcalifornia-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-alertcalifornia-status[hidden]{display:none}.map-swell-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-swell-status[hidden]{display:none}.map-swell-controls{margin:2px 0 8px 26px;padding:8px 10px;border-left:2px solid var(--line);font-size:.78rem;color:var(--muted)}.map-swell-controls[hidden]{display:none}.map-swell-control-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.map-swell-control-row input[type=range]{flex:1 1 150px;min-width:120px}.map-swell-time{font-weight:850;color:var(--navy)}.map-swell-slider-wrap{flex:1 1 220px;min-width:180px}.map-swell-slider-wrap input[type=range]{width:100%;min-width:0;height:34px;margin:0;touch-action:pan-y;cursor:pointer}.map-swell-slider-wrap input[type=range]::-webkit-slider-thumb{cursor:pointer}.map-swell-slider-wrap input[type=range]::-moz-range-thumb{cursor:pointer}.map-swell-slider-labels{display:flex;justify-content:space-between;gap:12px;margin-top:2px;color:var(--muted);font-size:.72rem;font-weight:800}.map-swell-selected-time{margin-top:6px;color:var(--navy);font-size:.79rem;font-weight:850;line-height:1.35}.map-swell-control-note{margin-top:5px;line-height:1.35}.map-swell-legend{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:6px;color:var(--muted);font-size:.76rem}.map-swell-legend[hidden]{display:none}.map-swell-gradient{width:170px;height:10px;border-radius:999px;background:linear-gradient(90deg,#123a8c,#006fc4,#00a8b5,#34b34a,#f0cf22,#f07818,#c91515);border:1px solid rgba(16,47,68,.35)}.map-air-temperature-legend{margin-top:12px;padding:10px 11px;border:1px solid var(--line);border-radius:12px;background:#f8fbfc;color:var(--muted);font-size:.76rem}.map-air-temperature-legend[hidden]{display:none}.map-air-temperature-legend-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap}.map-air-temperature-legend-head strong{color:var(--navy)}.map-air-temperature-legend-context{font-size:.72rem;font-weight:800}.map-air-temperature-scale{display:grid;grid-template-columns:auto minmax(150px,1fr) auto;align-items:center;gap:8px;margin-top:7px}.map-air-temperature-gradient{width:100%;height:12px;border-radius:999px;background:linear-gradient(90deg,#5b2ca3 0%,#203f9a 8.3%,#2b78c5 25%,#3fb7db 35%,#2aa89a 50%,#42a94b 62.5%,#8bc34a 70.8%,#e6d84b 79.2%,#f3a63a 87.5%,#df4b32 95.8%,#8f1d2c 100%);border:1px solid rgba(16,47,68,.35)}.air-temperature-map-tooltip{background:rgba(7,31,49,.94);border:0;border-radius:9px;color:#fff;box-shadow:0 3px 12px rgba(0,0,0,.28);font-size:.78rem;font-weight:850;padding:6px 8px;white-space:nowrap}.air-temperature-map-tooltip:before{border-top-color:rgba(7,31,49,.94)!important}.map-air-temperature-map-time{position:absolute;left:12px;bottom:12px;z-index:845;max-width:calc(100% - 90px);padding:7px 10px;border-radius:999px;background:rgba(7,31,49,.90);color:#fff;box-shadow:0 2px 8px rgba(0,0,0,.22);font-size:.78rem;font-weight:850;line-height:1.2;pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.map-air-temperature-map-time[hidden]{display:none}.map-air-temperature-map-time.is-playing{background:rgba(7,31,49,.94)}.map-air-temperature-transport{position:absolute;left:12px;bottom:52px;z-index:846;display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:6px 8px;border-radius:12px;background:rgba(255,255,255,.94);box-shadow:0 2px 9px rgba(0,0,0,.24);font-size:.75rem;font-weight:800}.map-air-temperature-transport[hidden]{display:none}.map-air-temperature-transport button,.map-air-temperature-transport select{min-height:30px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--navy);font:inherit;font-weight:850}.map-air-temperature-transport button{padding:4px 8px;cursor:pointer}.map-air-temperature-transport label{display:flex;align-items:center;gap:4px;color:var(--navy)}.map-air-temperature-transport select{padding:3px 5px}.map-air-temperature-controls{margin:0 0 2px 26px;padding:5px 8px;border-left:2px solid var(--line);font-size:.78rem;color:var(--muted);min-height:28px}.map-air-temperature-controls[hidden]{display:block}.map-air-temperature-controls.is-disabled{opacity:.58}.map-air-temperature-control-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.map-air-temperature-control-row>label{font-weight:850;color:var(--navy)}.map-air-temperature-play{flex:0 0 auto;min-width:78px;min-height:34px;padding:6px 10px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--blue);font:inherit;font-weight:850;cursor:pointer}.map-air-temperature-play:hover,.map-air-temperature-play:focus-visible{background:var(--paper);outline:none}.map-air-temperature-play:disabled{opacity:.48;cursor:default}.map-air-temperature-play.is-playing{background:var(--accent-soft);color:var(--navy)}.map-air-temperature-slider-wrap{flex:1 1 240px;min-width:200px}.map-air-temperature-slider-wrap input[type=range]{width:100%;min-width:0;height:34px;margin:0;touch-action:pan-y;cursor:pointer}.map-air-temperature-slider-labels{display:grid;grid-template-columns:repeat(5,1fr);gap:4px;margin-top:1px;color:var(--muted);font-size:.68rem;font-weight:800}.map-air-temperature-slider-labels span{text-align:center}.map-air-temperature-slider-labels span:first-child{text-align:left}.map-air-temperature-slider-labels span:last-child{text-align:right}.map-air-temperature-selected-time{margin-top:5px;color:var(--navy);font-size:.79rem;font-weight:850;line-height:1.35}.map-air-temperature-control-note{margin-top:4px;line-height:1.35}.swell-arrow-icon{background:transparent!important;border:0!important;pointer-events:auto!important;cursor:pointer}.swell-arrow-wrap{position:relative;width:28px;height:24px;transform-origin:14px 12px;opacity:.68}.swell-arrow-glyph{position:absolute;left:7px;top:2px;font-size:15px;line-height:17px;color:#062838;text-shadow:0 1px 1px rgba(255,255,255,.72)}.swell-info-panel{position:absolute;top:14px;right:14px;z-index:905;width:min(300px,calc(100% - 76px));max-height:calc(100% - 28px);display:flex;flex-direction:column;background:#fff;border:1px solid rgba(16,47,68,.22);border-radius:14px;box-shadow:0 12px 30px rgba(7,31,49,.28);overflow:hidden}.swell-info-panel[hidden]{display:none}.swell-info-panel-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 11px 8px;border-bottom:1px solid var(--line);background:#f8fbfc}.swell-info-panel-title{min-width:0;color:var(--navy);font-weight:900;line-height:1.2}.swell-info-panel-close{flex:0 0 auto;width:30px;height:30px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--blue);font:inherit;font-size:1.25rem;line-height:1;cursor:pointer}.swell-info-panel-close:hover{background:var(--paper)}.swell-info-panel-body{padding:10px 11px 12px;overflow:auto;-webkit-overflow-scrolling:touch;font-size:.82rem;line-height:1.35}.swell-info-row{display:flex;justify-content:space-between;gap:14px;margin-top:5px}.swell-info-label{color:var(--muted)}@media(max-width:600px){.swell-info-panel{top:10px;right:10px;width:min(280px,calc(100% - 64px));max-height:calc(100% - 20px)}}.alertcalifornia-panel{position:absolute;top:14px;right:14px;z-index:900;width:min(330px,calc(100% - 76px));max-height:calc(100% - 28px);display:flex;flex-direction:column;background:#fff;border:1px solid rgba(16,47,68,.22);border-radius:14px;box-shadow:0 12px 30px rgba(7,31,49,.28);overflow:hidden}.alertcalifornia-panel[hidden]{display:none}.alertcalifornia-panel-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 11px 8px;border-bottom:1px solid var(--line);background:#f8fbfc}.alertcalifornia-panel-title{min-width:0;color:var(--navy);font-weight:900;line-height:1.2;overflow-wrap:anywhere}.alertcalifornia-panel-close{flex:0 0 auto;width:30px;height:30px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--blue);font:inherit;font-size:1.25rem;line-height:1;cursor:pointer}.alertcalifornia-panel-close:hover{background:var(--paper)}.alertcalifornia-panel-body{padding:10px 11px 12px;overflow:auto;-webkit-overflow-scrolling:touch}.alertcalifornia-panel img{display:block;width:100%;height:auto;max-height:190px;object-fit:contain;margin:8px 0 7px;border-radius:8px;background:#eef3f5}.alertcalifornia-panel .camera-meta{margin-top:4px;color:#5f7380;font-size:.78rem}.alertcalifornia-panel .camera-link{display:inline-block;margin-top:7px;font-weight:850;color:#126b91;text-decoration:none}.alertcalifornia-panel .camera-link:hover{text-decoration:underline}@media(max-width:600px){.alertcalifornia-panel{top:10px;right:10px;width:min(290px,calc(100% - 64px));max-height:calc(100% - 20px)}.alertcalifornia-panel img{max-height:150px}}.map-windbarb-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-windbarb-status[hidden]{display:none}.wind-barb-icon{background:transparent!important;border:0!important}.wind-barb-icon svg{overflow:visible;filter:drop-shadow(0 1px 1px rgba(255,255,255,.95))}.wind-barb-icon .barb-stroke{stroke:#102f44;stroke-width:2;fill:none;stroke-linecap:round;stroke-linejoin:round}.wind-barb-icon .barb-flag{fill:#102f44;stroke:#102f44;stroke-width:1}.wind-barb-icon.stale{opacity:.48}.map-undersea-feature-label{background:transparent!important;border:0!important;box-shadow:none!important;white-space:nowrap;pointer-events:none}.map-undersea-feature-label .undersea-dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;background:#ffd166;border:1px solid #20323c;vertical-align:1px;box-shadow:0 0 0 1px rgba(255,255,255,.75)}.map-undersea-feature-label .undersea-name{font-size:13px;font-weight:850;letter-spacing:.01em;color:#fff7d1;text-shadow:-2px -2px 0 #102a38,2px -2px 0 #102a38,-2px 2px 0 #102a38,2px 2px 0 #102a38,0 2px 3px rgba(0,0,0,.85)}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#2f855a}.map-dot.current{background:#7d55a6}.map-dot.saildrone{width:12px;height:12px;background:#8d3fb0;border:2px solid #fff;box-shadow:0 0 0 1px #8d3fb0}.map-dot.alertcalifornia{width:12px;height:12px;background:#c74634;border:2px solid #fff;box-shadow:0 0 0 1px #a93628}.map-dot.marine{width:12px;height:12px;border:2px solid #fff;box-shadow:0 0 0 1px rgba(16,47,68,.35)}.map-dot.marina{background:#126b91}.map-dot.boatyard{background:#7a4a21}.map-dot.fuel{background:#347a4b}.map-dot.ramp{background:#376f9c}.map-dot.ferry{background:#247f8f}.map-dot.supply{background:#805f2f}.map-dot.club{background:#6c4a91}.map-dot.restaurant{background:#a45135}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}
+.map-station-list{margin-top:12px}.map-station-list-title{font-weight:850;color:var(--navy);margin:0 0 8px}.map-station-table-wrap{max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:14px;background:#fff}.map-station-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.86rem}.map-station-table th,.map-station-table td{padding:8px 10px;border-top:1px solid var(--line);text-align:left;vertical-align:top;background:#fff}.map-station-table thead th{position:sticky;top:0;z-index:1;border-top:0;background:#f7fbfc}.map-station-table th{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}.map-station-table tbody tr:first-child td{border-top:0}.map-station-table a{color:var(--blue);font-weight:800;text-decoration:none}.map-station-table a:hover{text-decoration:underline}.map-scale-status{color:var(--muted);font-size:.78rem;font-weight:800;line-height:1.25;white-space:nowrap}.map-nautical-zoom-note{position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:850;background:rgba(7,31,49,.92);color:#fff;border-radius:999px;padding:7px 12px;font-size:.78rem;font-weight:850;box-shadow:0 2px 8px rgba(0,0,0,.2);pointer-events:none;white-space:nowrap;max-width:calc(100% - 32px);overflow:hidden;text-overflow:ellipsis}.map-overlay-toggle.is-unavailable{opacity:.5}.map-structure-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-structure-status[hidden]{display:none}.map-saildrone-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-saildrone-status[hidden]{display:none}.map-alertcalifornia-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-alertcalifornia-status[hidden]{display:none}.map-swell-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-swell-status[hidden]{display:none}.map-swell-overlay-note{margin:5px 0 0 26px;color:var(--muted);font-size:.76rem;line-height:1.3}.map-swell-prime-status{flex:1 1 auto;min-width:0;padding:0;color:var(--muted);font-size:.72rem;font-weight:850;line-height:24px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.map-swell-prime-status[data-state="ready"]{color:var(--navy)}.map-swell-prime-status[data-state="error"]{color:#9b1c1c}.map-swell-prime-status[hidden]{display:none}.map-swell-cache-reload{flex:0 0 auto;min-height:24px;padding:2px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--navy);font:inherit;font-size:.70rem;font-weight:850;cursor:pointer}.map-swell-cache-reload:hover{background:var(--paper)}.map-swell-cache-reload:disabled{opacity:.5;cursor:default}.map-swell-cache-reload[hidden]{display:none}.map-swell-controls{margin:2px 0 8px 26px;padding:8px 10px;border-left:2px solid var(--line);font-size:.78rem;color:var(--muted)}.map-swell-controls[hidden]{display:none}.map-swell-control-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.map-swell-control-row input[type=range]{flex:1 1 150px;min-width:120px}.map-swell-time{font-weight:850;color:var(--navy)}.map-swell-slider-wrap{flex:1 1 220px;min-width:180px}.map-swell-slider-wrap input[type=range]{width:100%;min-width:0;height:34px;margin:0;touch-action:pan-y;cursor:pointer}.map-swell-slider-wrap input[type=range]::-webkit-slider-thumb{cursor:pointer}.map-swell-slider-wrap input[type=range]::-moz-range-thumb{cursor:pointer}.map-swell-slider-labels{display:flex;justify-content:space-between;gap:12px;margin-top:2px;color:var(--muted);font-size:.72rem;font-weight:800}.map-swell-selected-time{margin-top:6px;color:var(--navy);font-size:.79rem;font-weight:850;line-height:1.35}.map-swell-control-note{margin-top:5px;line-height:1.35}.map-swell-legend{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:6px;color:var(--muted);font-size:.76rem}.map-swell-legend[hidden]{display:none}.map-swell-gradient{width:170px;height:10px;border-radius:999px;background:linear-gradient(90deg,#123a8c,#006fc4,#00a8b5,#34b34a,#f0cf22,#f07818,#c91515);border:1px solid rgba(16,47,68,.35)}.map-air-temperature-legend{margin-top:12px;padding:10px 11px;border:1px solid var(--line);border-radius:12px;background:#f8fbfc;color:var(--muted);font-size:.76rem}.map-air-temperature-legend[hidden]{display:none}.map-air-temperature-legend-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap}.map-air-temperature-legend-head strong{color:var(--navy)}.map-air-temperature-legend-context{font-size:.72rem;font-weight:800}.map-air-temperature-scale{display:grid;grid-template-columns:auto minmax(150px,1fr) auto;align-items:center;gap:8px;margin-top:7px}.map-air-temperature-gradient{width:100%;height:12px;border-radius:999px;background:linear-gradient(90deg,#5b2ca3 0%,#203f9a 8.3%,#2b78c5 25%,#3fb7db 35%,#2aa89a 50%,#42a94b 62.5%,#8bc34a 70.8%,#e6d84b 79.2%,#f3a63a 87.5%,#df4b32 95.8%,#8f1d2c 100%);border:1px solid rgba(16,47,68,.35)}.air-temperature-map-tooltip{background:rgba(7,31,49,.94);border:0;border-radius:9px;color:#fff;box-shadow:0 3px 12px rgba(0,0,0,.28);font-size:.78rem;font-weight:850;padding:6px 8px;white-space:nowrap}.air-temperature-map-tooltip:before{border-top-color:rgba(7,31,49,.94)!important}.map-air-temperature-map-time{background:transparent;color:var(--navy);box-shadow:none}.map-air-temperature-map-time[hidden]{display:none}.map-air-temperature-map-time.is-playing{background:transparent;color:var(--navy)}.map-air-temperature-footer-status,.map-swell-footer-status{min-height:20px;color:var(--navy);font-size:.72rem;font-weight:850;line-height:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.map-footer-row{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;min-width:0;padding-top:6px}.map-footer-transports{display:flex;flex-direction:column;align-items:stretch;gap:6px;flex:0 1 760px;width:min(760px,100%);min-width:0}.map-swell-transport{position:static;left:auto;bottom:auto;z-index:auto;flex:none;width:100%;max-width:none;height:126px;box-sizing:border-box;display:grid;grid-template-rows:30px 30px 20px 24px;gap:3px;padding:6px 8px;border:1px solid var(--line);border-radius:12px;background:#fff;box-shadow:none;font-size:.75rem;font-weight:850;overflow:hidden}.map-swell-transport[hidden]{display:none}.map-swell-transport-row{display:flex;align-items:center;gap:5px;min-width:0;flex-wrap:nowrap}.map-swell-transport button,.map-swell-transport select{min-height:28px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--navy);font:inherit;font-weight:850}.map-swell-transport button{padding:3px 7px;cursor:pointer}.map-swell-transport button:disabled,.map-swell-transport select:disabled{opacity:.48;cursor:default}.map-swell-transport button.is-playing{background:var(--accent-soft)}.map-swell-transport label{display:flex;align-items:center;gap:4px;color:var(--navy);white-space:nowrap}.map-swell-transport select{padding:2px 4px}.map-swell-transport-time{color:var(--navy)}.map-swell-map-slider-wrap{display:grid;grid-template-columns:auto minmax(180px,1fr) auto;align-items:center;gap:8px;min-width:0}.map-swell-map-slider-wrap input[type=range]{width:100%;min-width:0;height:26px;margin:0;touch-action:pan-y;cursor:pointer}.map-swell-map-slider-end{color:var(--muted);font-size:.68rem;font-weight:800;white-space:nowrap}.map-swell-map-selected[hidden]{display:none}.map-swell-cache-row{display:flex;align-items:center;gap:8px;min-width:0;border-top:1px solid var(--line);padding-top:2px}.map-swell-playback-note{display:none}.map-swell-transport.is-busy{border-color:#9bbdcc;background:#fbfdfe}.map-scale-row{display:flex;justify-content:flex-end;align-items:center;min-height:28px;padding:0 2px;color:var(--muted);font-size:.78rem;font-weight:800;flex:1 0 auto}.map-scale-row .map-scale-status{padding:0;border:0;background:transparent;box-shadow:none;white-space:nowrap}@media(max-width:760px){.map-footer-row{align-items:stretch;flex-direction:column}.map-footer-transports{width:100%;max-width:none}.map-air-temperature-transport{width:100%;height:96px;grid-template-rows:31px 31px 20px}.map-air-temperature-transport-row{gap:4px;overflow-x:auto}.map-swell-transport{width:100%;max-width:none;height:130px;grid-template-rows:31px 31px 20px 24px}.map-swell-transport-row{gap:4px;overflow-x:auto}.map-scale-row{justify-content:flex-end;width:100%}}.map-air-temperature-transport{position:static;left:auto;bottom:auto;z-index:auto;display:grid;grid-template-rows:30px 30px 20px;gap:3px;width:100%;min-width:0;height:92px;box-sizing:border-box;padding:6px 8px;border:1px solid var(--line);border-radius:12px;background:#fff;box-shadow:none;font-size:.75rem;font-weight:850;overflow:hidden}.map-air-temperature-transport[hidden]{display:none}.map-air-temperature-transport-row{display:flex;align-items:center;gap:6px;min-width:0;flex-wrap:nowrap}.map-air-temperature-transport button,.map-air-temperature-transport select{min-height:28px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--navy);font:inherit;font-weight:850}.map-air-temperature-transport button{padding:3px 7px;cursor:pointer}.map-air-temperature-transport button:disabled,.map-air-temperature-transport select:disabled{opacity:.48;cursor:default}.map-air-temperature-transport button.is-playing{background:var(--accent-soft)}.map-air-temperature-transport label{display:flex;align-items:center;gap:4px;color:var(--navy);white-space:nowrap}.map-air-temperature-transport select{padding:2px 4px}.map-air-temperature-map-slider-wrap{display:grid;grid-template-columns:auto minmax(180px,1fr) auto;align-items:center;gap:8px;min-width:0}.map-air-temperature-map-slider-wrap input[type=range]{width:100%;min-width:0;height:26px;margin:0;touch-action:pan-y;cursor:pointer}.map-air-temperature-map-slider-end{color:var(--muted);font-size:.68rem;font-weight:800;white-space:nowrap}.map-air-temperature-map-selected[hidden]{display:none}.map-air-temperature-overlay-note{margin:5px 0 0 26px;color:var(--muted);font-size:.76rem;line-height:1.3}.map-air-temperature-control-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.map-air-temperature-control-row>label{font-weight:850;color:var(--navy)}.map-air-temperature-play{flex:0 0 auto;min-width:78px;min-height:34px;padding:6px 10px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--blue);font:inherit;font-weight:850;cursor:pointer}.map-air-temperature-play:hover,.map-air-temperature-play:focus-visible{background:var(--paper);outline:none}.map-air-temperature-play:disabled{opacity:.48;cursor:default}.map-air-temperature-play.is-playing{background:var(--accent-soft);color:var(--navy)}.map-air-temperature-slider-wrap{flex:1 1 240px;min-width:200px}.map-air-temperature-slider-wrap input[type=range]{width:100%;min-width:0;height:34px;margin:0;touch-action:pan-y;cursor:pointer}.map-air-temperature-slider-labels{display:grid;grid-template-columns:repeat(5,1fr);gap:4px;margin-top:1px;color:var(--muted);font-size:.68rem;font-weight:800}.map-air-temperature-slider-labels span{text-align:center}.map-air-temperature-slider-labels span:first-child{text-align:left}.map-air-temperature-slider-labels span:last-child{text-align:right}.map-air-temperature-selected-time{margin-top:5px;color:var(--navy);font-size:.79rem;font-weight:850;line-height:1.35}.map-air-temperature-control-note{margin-top:4px;line-height:1.35}.swell-arrow-icon{background:transparent!important;border:0!important;pointer-events:auto!important;cursor:pointer}.swell-arrow-wrap{position:relative;width:28px;height:24px;transform-origin:14px 12px;opacity:.68}.swell-arrow-glyph{position:absolute;left:7px;top:2px;font-size:15px;line-height:17px;color:#062838;text-shadow:0 1px 1px rgba(255,255,255,.72)}.swell-info-panel{position:absolute;top:14px;right:14px;z-index:905;width:min(300px,calc(100% - 76px));max-height:calc(100% - 28px);display:flex;flex-direction:column;background:#fff;border:1px solid rgba(16,47,68,.22);border-radius:14px;box-shadow:0 12px 30px rgba(7,31,49,.28);overflow:hidden}.swell-info-panel[hidden]{display:none}.swell-info-panel-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 11px 8px;border-bottom:1px solid var(--line);background:#f8fbfc}.swell-info-panel-title{min-width:0;color:var(--navy);font-weight:900;line-height:1.2}.swell-info-panel-close{flex:0 0 auto;width:30px;height:30px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--blue);font:inherit;font-size:1.25rem;line-height:1;cursor:pointer}.swell-info-panel-close:hover{background:var(--paper)}.swell-info-panel-body{padding:10px 11px 12px;overflow:auto;-webkit-overflow-scrolling:touch;font-size:.82rem;line-height:1.35}.swell-info-row{display:flex;justify-content:space-between;gap:14px;margin-top:5px}.swell-info-label{color:var(--muted)}@media(max-width:600px){.swell-info-panel{top:10px;right:10px;width:min(280px,calc(100% - 64px));max-height:calc(100% - 20px)}}.alertcalifornia-panel{position:absolute;top:14px;right:14px;z-index:900;width:min(330px,calc(100% - 76px));max-height:calc(100% - 28px);display:flex;flex-direction:column;background:#fff;border:1px solid rgba(16,47,68,.22);border-radius:14px;box-shadow:0 12px 30px rgba(7,31,49,.28);overflow:hidden}.alertcalifornia-panel[hidden]{display:none}.alertcalifornia-panel-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 11px 8px;border-bottom:1px solid var(--line);background:#f8fbfc}.alertcalifornia-panel-title{min-width:0;color:var(--navy);font-weight:900;line-height:1.2;overflow-wrap:anywhere}.alertcalifornia-panel-close{flex:0 0 auto;width:30px;height:30px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--blue);font:inherit;font-size:1.25rem;line-height:1;cursor:pointer}.alertcalifornia-panel-close:hover{background:var(--paper)}.alertcalifornia-panel-body{padding:10px 11px 12px;overflow:auto;-webkit-overflow-scrolling:touch}.alertcalifornia-panel img{display:block;width:100%;height:auto;max-height:190px;object-fit:contain;margin:8px 0 7px;border-radius:8px;background:#eef3f5}.alertcalifornia-panel .camera-meta{margin-top:4px;color:#5f7380;font-size:.78rem}.alertcalifornia-panel .camera-link{display:inline-block;margin-top:7px;font-weight:850;color:#126b91;text-decoration:none}.alertcalifornia-panel .camera-link:hover{text-decoration:underline}@media(max-width:600px){.alertcalifornia-panel{top:10px;right:10px;width:min(290px,calc(100% - 64px));max-height:calc(100% - 20px)}.alertcalifornia-panel img{max-height:150px}}.map-windbarb-status{margin-top:6px;color:var(--muted);font-size:.78rem}.map-windbarb-status[hidden]{display:none}.wind-barb-icon{background:transparent!important;border:0!important}.wind-barb-icon svg{overflow:visible;filter:drop-shadow(0 1px 1px rgba(255,255,255,.95))}.wind-barb-icon .barb-stroke{stroke:#102f44;stroke-width:2;fill:none;stroke-linecap:round;stroke-linejoin:round}.wind-barb-icon .barb-flag{fill:#102f44;stroke:#102f44;stroke-width:1}.wind-barb-icon.stale{opacity:.48}.map-undersea-feature-label{background:transparent!important;border:0!important;box-shadow:none!important;white-space:nowrap;pointer-events:none}.map-undersea-feature-label .undersea-dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;background:#ffd166;border:1px solid #20323c;vertical-align:1px;box-shadow:0 0 0 1px rgba(255,255,255,.75)}.map-undersea-feature-label .undersea-name{font-size:13px;font-weight:850;letter-spacing:.01em;color:#fff7d1;text-shadow:-2px -2px 0 #102a38,2px -2px 0 #102a38,-2px 2px 0 #102a38,2px 2px 0 #102a38,0 2px 3px rgba(0,0,0,.85)}.map-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:.78rem}.map-key{display:inline-flex;align-items:center;gap:5px}.map-dot{width:10px;height:10px;border-radius:50%;display:inline-block}.map-dot.request{background:#126b91}.map-dot.wind{background:#2f855a}.map-dot.current{background:#7d55a6}.map-dot.saildrone{width:12px;height:12px;background:#8d3fb0;border:2px solid #fff;box-shadow:0 0 0 1px #8d3fb0}.map-dot.alertcalifornia{width:12px;height:12px;background:#c74634;border:2px solid #fff;box-shadow:0 0 0 1px #a93628}.map-dot.marine{width:12px;height:12px;border:2px solid #fff;box-shadow:0 0 0 1px rgba(16,47,68,.35)}.map-dot.marina{background:#126b91}.map-dot.boatyard{background:#7a4a21}.map-dot.fuel{background:#347a4b}.map-dot.ramp{background:#376f9c}.map-dot.ferry{background:#247f8f}.map-dot.supply{background:#805f2f}.map-dot.club{background:#6c4a91}.map-dot.restaurant{background:#a45135}@media(max-width:600px){.location-map{height:330px}}.candidate-state{display:flex;gap:5px;flex-wrap:wrap}.candidate-badge{display:inline-block;border-radius:999px;padding:3px 7px;font-size:.68rem;font-weight:900;letter-spacing:.04em}.badge-auto{background:#e8f0fb;color:#24538a}.badge-selected{background:#e8f5ef;color:#176246}.candidate-auto td:first-child{font-weight:800}
 .offshore-trip-card{border-left:5px solid #126b91}.offshore-trip-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap}.offshore-trip-coords{color:var(--muted);font-size:.82rem;font-weight:750}.offshore-trip-summary{margin:10px 0 12px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:#f7fbfc}.offshore-trip-summary strong{color:var(--navy)}.offshore-trip-metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:10px 0}.offshore-trip-metric{padding:9px 10px;border:1px solid var(--line);border-radius:11px;background:#fff}.offshore-trip-metric .label{font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:850}.offshore-trip-metric .value{margin-top:3px;color:var(--navy);font-weight:900;font-size:1rem}.offshore-trip-buoy{margin:4px 0 8px;color:var(--ink);font-size:.86rem}.offshore-trip-watch{margin:8px 0 0;padding-left:20px;color:var(--ink)}.offshore-trip-watch li{margin:3px 0}.offshore-trip-forecast{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px}.offshore-trip-period{padding:10px 12px;border:1px solid var(--line);border-radius:11px;background:#fbfdfe}.offshore-trip-period strong{display:block;color:var(--navy);margin-bottom:3px}.offshore-trip-period p{margin:0;line-height:1.42;font-size:.88rem}.offshore-trip-note{margin:9px 0 0;color:var(--muted);font-size:.78rem;line-height:1.45}.offshore-trip-error{color:#8b2c2c;font-size:.88rem}.offshore-trip-loading{color:var(--muted);font-weight:750}.fishing-planning{margin-top:18px;padding-top:16px;border-top:2px solid #dce8ed}.fishing-planning-head{display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap}.fishing-planning-head h3{margin:0;color:var(--navy);font-size:1.05rem}.fishing-planning-status{color:var(--muted);font-size:.78rem}.fishing-planning-summary{margin:10px 0;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:#fffdf5;line-height:1.45}.fishing-planning-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.fishing-planning-item{padding:10px 11px;border:1px solid var(--line);border-radius:11px;background:#fff}.fishing-planning-item .label{font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:850}.fishing-planning-item .value{margin-top:3px;color:var(--navy);font-weight:900;line-height:1.25}.fishing-planning-item .detail{margin-top:4px;color:var(--muted);font-size:.77rem;line-height:1.35}.fishing-planning-error{margin:8px 0 0;color:#8b2c2c;font-size:.82rem}@media(max-width:850px){.fishing-planning-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:520px){.fishing-planning-grid{grid-template-columns:1fr}}@media(max-width:800px){.offshore-trip-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:640px){.offshore-trip-forecast{grid-template-columns:1fr}}.marine-forecast-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap}
 .marine-forecast-zone{color:var(--muted);font-size:.84rem;font-weight:750}
 .marine-alerts{margin:8px 0 14px;display:flex;gap:7px;flex-wrap:wrap}
@@ -8040,7 +8234,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 .marine-forecast-error{color:var(--muted);font-size:.9rem}
 @media(max-width:640px){.marine-periods{grid-template-columns:1fr}}
 .bottom-source-context{display:grid;gap:3px;margin:0 0 12px;padding:9px 11px;border:1px solid var(--line);border-radius:12px;background:#f7fbfc;color:var(--muted);font-size:.86rem}.bottom-source-context strong{color:var(--navy)}
-.error-card{border-left:5px solid #b64735;background:#fff7f4}.error-card h2{color:#8f3025}.error-message{font-weight:650;line-height:1.5}.error-help{color:var(--muted);font-size:.9rem}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}.bottom.planning-preferred{background:#eff8f1;border-color:#b8d8c0}.bottom.planning-caution{background:#fff8e6;border-color:#e6c66a}.bottom.planning-redflag{background:#fff0ef;border-color:#e0a39d}.bottom .planning-period-status{margin:0 0 10px;font-weight:900;font-size:1.05rem}.bottom .planning-period-status.preferred{color:#176246}.bottom .planning-period-status.caution{color:#8a5a00}.bottom .planning-period-status.redflag{color:#9b3027}.bottom-wind-summary{margin:10px 0 14px}.bottom-wind-summary .metrics{margin-bottom:7px}.conditions-now-heading{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}.conditions-now-heading .conditions-now-asof{font-size:.72em;font-weight:800;color:var(--muted);letter-spacing:.01em}.page-loading-overlay{position:fixed;inset:0;z-index:6000;display:flex;align-items:center;justify-content:center;background:rgba(245,250,252,.82);backdrop-filter:blur(2px);opacity:0;visibility:hidden;pointer-events:none;transition:opacity .12s ease,visibility .12s ease}.page-loading-overlay.active{opacity:1;visibility:visible;pointer-events:auto}.page-loading-box{display:flex;align-items:center;gap:12px;padding:15px 18px;border:1px solid var(--line);border-radius:16px;background:#fff;box-shadow:0 14px 38px rgba(8,43,69,.18);color:var(--navy);font-weight:850}.page-loading-spinner{width:30px;height:30px;border:4px solid #d8e7ed;border-top-color:var(--blue);border-radius:50%;animation:page-loading-spin .8s linear infinite}@keyframes page-loading-spin{to{transform:rotate(360deg)}}@media (prefers-reduced-motion:reduce){.page-loading-spinner{animation-duration:1.8s}}.map-sources-card h2{margin-bottom:7px}.map-sources-note{margin:0;color:var(--muted);font-size:.84rem;line-height:1.5}.planning-page-link-card{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}.planning-page-link-card h2{margin-bottom:4px}.planning-page-link-card p{margin:0;color:var(--muted)}.planning-page-link{display:inline-block;padding:11px 16px;border-radius:999px;background:var(--blue);color:#fff;text-decoration:none;font-weight:900}.planning-page-link:hover{filter:brightness(1.08)}@media(max-width:640px){.planning-page-link{width:100%;text-align:center}}.page-preferences{display:flex;justify-content:flex-end;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0 0}.page-preferences .page-unit-control{display:inline-flex;align-items:center;gap:8px;padding:7px 10px;border:1px solid var(--line);border-radius:12px;background:#fff;color:var(--navy);font-size:.82rem;font-weight:850}.page-preferences .page-unit-control select{padding:5px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--ink);font:inherit;font-weight:800}.map-scale-row{display:flex;justify-content:flex-end;align-items:center;min-height:28px;padding:5px 2px 0;color:var(--muted);font-size:.78rem;font-weight:800}.map-scale-row .map-scale-status{padding:0;border:0;background:transparent;box-shadow:none;white-space:nowrap}@media(max-width:640px){.page-preferences{justify-content:stretch}.page-preferences .page-unit-control{flex:1 1 150px;justify-content:space-between}.map-scale-row{justify-content:center}}.map-overlay-clear{display:block;width:100%;margin:26px 0 10px;padding:9px 12px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--blue);font:inherit;font-size:.82rem;font-weight:850;cursor:pointer}.map-overlay-clear:hover{background:var(--paper)}.map-overlay-clear:focus-visible{outline:2px solid var(--blue);outline-offset:2px}</style></head><body><main class="shell{{if .PlanningDetails}} planning-shell{{end}}">
+.error-card{border-left:5px solid #b64735;background:#fff7f4}.error-card h2{color:#8f3025}.error-message{font-weight:650;line-height:1.5}.error-help{color:var(--muted);font-size:.9rem}@media(max-width:640px){.shell{padding:14px 12px 40px}.hero{padding:24px 20px;min-height:430px;background-position:center 42%}.grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.card{padding:18px}}.bottom.planning-preferred{background:#eff8f1;border-color:#b8d8c0}.bottom.planning-caution{background:#fff8e6;border-color:#e6c66a}.bottom.planning-redflag{background:#fff0ef;border-color:#e0a39d}.bottom .planning-period-status{margin:0 0 10px;font-weight:900;font-size:1.05rem}.bottom .planning-period-status.preferred{color:#176246}.bottom .planning-period-status.caution{color:#8a5a00}.bottom .planning-period-status.redflag{color:#9b3027}.bottom-wind-summary{margin:10px 0 14px}.bottom-wind-summary .metrics{margin-bottom:7px}.conditions-now-heading{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}.conditions-now-heading .conditions-now-asof{font-size:.72em;font-weight:800;color:var(--muted);letter-spacing:.01em}.page-loading-overlay{position:fixed;inset:0;z-index:6000;display:flex;align-items:center;justify-content:center;background:rgba(245,250,252,.82);backdrop-filter:blur(2px);opacity:0;visibility:hidden;pointer-events:none;transition:opacity .12s ease,visibility .12s ease}.page-loading-overlay.active{opacity:1;visibility:visible;pointer-events:auto}.page-loading-box{display:flex;align-items:center;gap:12px;padding:15px 18px;border:1px solid var(--line);border-radius:16px;background:#fff;box-shadow:0 14px 38px rgba(8,43,69,.18);color:var(--navy);font-weight:850}.page-loading-spinner{width:30px;height:30px;border:4px solid #d8e7ed;border-top-color:var(--blue);border-radius:50%;animation:page-loading-spin .8s linear infinite}@keyframes page-loading-spin{to{transform:rotate(360deg)}}@media (prefers-reduced-motion:reduce){.page-loading-spinner{animation-duration:1.8s}}.map-sources-card h2{margin-bottom:7px}.map-sources-note{margin:0;color:var(--muted);font-size:.84rem;line-height:1.5}.planning-page-link-card{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}.planning-page-link-card h2{margin-bottom:4px}.planning-page-link-card p{margin:0;color:var(--muted)}.planning-page-link{display:inline-block;padding:11px 16px;border-radius:999px;background:var(--blue);color:#fff;text-decoration:none;font-weight:900}.planning-page-link:hover{filter:brightness(1.08)}@media(max-width:640px){.planning-page-link{width:100%;text-align:center}}.page-preferences{display:flex;justify-content:flex-end;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0 0}.page-preferences .page-unit-control{display:inline-flex;align-items:center;gap:8px;padding:7px 10px;border:1px solid var(--line);border-radius:12px;background:#fff;color:var(--navy);font-size:.82rem;font-weight:850}.page-preferences .page-unit-control select{padding:5px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--ink);font:inherit;font-weight:800}@media(max-width:640px){.page-preferences{justify-content:stretch}.page-preferences .page-unit-control{flex:1 1 150px;justify-content:space-between}}.map-overlay-clear{display:block;width:100%;margin:26px 0 10px;padding:9px 12px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--blue);font:inherit;font-size:.82rem;font-weight:850;cursor:pointer}.map-overlay-clear:hover{background:var(--paper)}.map-overlay-clear:focus-visible{outline:2px solid var(--blue);outline-offset:2px}</style></head><body><main class="shell{{if .PlanningDetails}} planning-shell{{end}}">
 <section class="hero"><div class="eyebrow">Mauri's Weather & Water Conditions</div><h1>{{.Title}}</h1><div class="sub">{{.ReportTime}} · {{.Station}}</div>{{if .Historical}}<span class="badge">Historical · {{.RequestedTime}}</span>{{end}}{{if .Yogiism}}<div class="yogiism">“{{.Yogiism}}” — Yogi Berra</div>{{end}}</section>
 <div class="page-preferences" aria-label="Display preferences"><label class="page-unit-control" for="wind-unit-select">Wind units<select id="wind-unit-select"><option value="kts" {{if eq .WindUnit "kts"}}selected{{end}}>Knots</option><option value="mph" {{if eq .WindUnit "mph"}}selected{{end}}>MPH</option></select></label><label class="page-unit-control" for="distance-unit-select">Distance units<select id="distance-unit-select"><option value="nmi" {{if eq .DistanceUnit "nmi"}}selected{{end}}>Nautical Miles</option><option value="mi" {{if eq .DistanceUnit "mi"}}selected{{end}}>Miles</option></select></label></div>
 <div class="grid">
@@ -8049,7 +8243,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 <section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Open the full planning dashboard for location, wind, currents, forecasts, map layers, and customization controls.</p></div><a id="planning-page-link" class="planning-page-link" href="{{.PlanningDetailsURL}}">Planning and Details →</a></section>
 {{else}}
 <section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Full planning dashboard and customization controls.</p></div><a id="conditions-page-link" class="planning-page-link" href="{{.ConditionsURL}}">← Back to Conditions Now</a></section>
-<section class="card full map-card"><div class="map-intro"><div><div class="map-intro-title"><h2>Location</h2><details class="location-help"><summary aria-label="About location selection" title="About location selection">ⓘ</summary><div class="location-help-panel"><div class="location-help-header"><strong>About location selection</strong><button type="button" class="location-help-close" aria-label="Close location information" title="Close">×</button></div><div class="location-help-body"><p><strong>Selected location</strong> is the point used for selected-location weather and nearby-station searches. Click the map to set or change it.</p><p>Panning, zooming, My location, and Center Map only change the map view. The latitude/longitude fields show the map center; editing them and choosing <strong>Center Map → Latitude &amp; Longitude</strong> does not change the selected location.</p><p><strong>Find nearby stations</strong> searches around the selected location. Open a candidate station on the map to review it and commit it as the wind source; the associated currents station is previewed with it.</p></div></div></details></div><div class="map-help">Click the map to select a location for weather and nearby stations.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-air-temperature-time" class="map-air-temperature-map-time" hidden role="status" aria-live="polite">Air Temperature · NOW · Observed</div><div id="map-air-temperature-transport" class="map-air-temperature-transport" hidden aria-label="Air temperature playback controls"><button type="button" id="map-air-temperature-now" aria-label="Return air temperature to NOW" title="Return to NOW">NOW</button><button type="button" id="map-air-temperature-prev" aria-label="Previous 15 minutes" title="Previous 15 minutes">◀</button><button type="button" id="map-air-temperature-map-play" aria-pressed="false" aria-label="Play air temperature timeline">▶ Play</button><button type="button" id="map-air-temperature-next" aria-label="Next 15 minutes" title="Next 15 minutes">▶</button><label>Speed <select id="map-air-temperature-speed" aria-label="Air temperature playback speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select></label><label>Range <select id="map-air-temperature-range" aria-label="Air temperature playback range"><option value="6">6h</option><option value="12">12h</option><option value="24" selected>24h</option></select></label></div><div id="map-alertcalifornia-panel" class="alertcalifornia-panel" hidden role="dialog" aria-modal="false" aria-labelledby="map-alertcalifornia-panel-title"><div class="alertcalifornia-panel-head"><div id="map-alertcalifornia-panel-title" class="alertcalifornia-panel-title">ALERTCalifornia camera</div><button id="map-alertcalifornia-panel-close" class="alertcalifornia-panel-close" type="button" aria-label="Close ALERTCalifornia camera" title="Close">×</button></div><div id="map-alertcalifornia-panel-body" class="alertcalifornia-panel-body"></div></div><div id="map-swell-info-panel" class="swell-info-panel" hidden role="dialog" aria-modal="false" aria-labelledby="map-swell-info-panel-title"><div class="swell-info-panel-head"><div id="map-swell-info-panel-title" class="swell-info-panel-title">Swell Forecast</div><button id="map-swell-info-panel-close" class="swell-info-panel-close" type="button" aria-label="Close swell forecast information" title="Close">×</button></div><div id="map-swell-info-panel-body" class="swell-info-panel-body"></div></div><div id="map-nautical-zoom-note" class="map-nautical-zoom-note" hidden aria-live="polite">Nautical chart available at Zoom 9+.</div><div id="map-resize-handle" class="map-resize-handle" role="separator" aria-label="Resize map vertically" aria-orientation="horizontal" aria-valuemin="260" aria-valuemax="900" aria-valuenow="390" aria-grabbed="false" tabindex="0" title="Drag up or down to resize map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-scale-row" aria-label="Map scale"><span id="map-scale-status" class="map-scale-status" role="status" aria-live="polite"></span></div><div class="map-state-controls" aria-label="Map controls"><details id="map-types-menu" class="map-overlays-menu"><summary>Map Types</summary><div class="map-overlays-panel"><button type="button" class="map-menu-close" aria-label="Close Map Types" title="Close">×</button><label class="map-overlay-toggle"><input type="radio" name="map-type" value="map"> <span>Street Map</span></label><label id="map-type-nautical-label" class="map-overlay-toggle"><input id="map-type-nautical" type="radio" name="map-type" value="nautical"> <span>Nautical Chart <small>(Zoom 9+)</small></span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="satellite"> <span>Satellite</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="hybrid"> <span>Hybrid</span></label></div></details><details id="map-overlays-menu" class="map-overlays-menu"><summary>Map Overlays</summary><div class="map-overlays-panel"><div class="map-overlays-toolbar"><button type="button" id="map-overlays-clear" class="map-overlay-clear">Clear all overlays</button><button type="button" class="map-menu-close" aria-label="Close Map Overlays" title="Close">×</button></div><details class="map-overlay-group"><summary>Weather &amp; Hazards</summary><div class="map-overlay-group-body"><label id="map-marine-zone-control" class="map-overlay-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-smoke"> <span>Satellite smoke (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-fire-perimeters"> <span>Active fire perimeters (NIFC/WFIGS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-fire-detections"> <span>Satellite fire detections (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-air-temperature"> <span>Air Temperature Heat Map (CONUS)</span></label><div id="map-air-temperature-controls" class="map-air-temperature-controls"><div class="map-air-temperature-control-row"><label for="map-air-temperature-hours">Time</label><button type="button" id="map-air-temperature-play" class="map-air-temperature-play" aria-pressed="false" aria-label="Play air temperature timeline">▶ Play</button><div class="map-air-temperature-slider-wrap"><input id="map-air-temperature-hours" type="range" min="0" max="24" step="0.25" value="0" aria-label="Air temperature time: NOW observed, then forecast through 24 hours"><div class="map-air-temperature-slider-labels"><span>NOW</span><span>+6h</span><span>+12h</span><span>+18h</span><span>+24h</span></div></div></div><div class="map-air-temperature-control-note">NOW uses current observations. Future times use NOAA/NWS NDFD forecast guidance. Play loops NOW through +24h; the live interpolated time is shown on the map. CONUS only · Zoom 4+.</div></div><label class="map-overlay-toggle"><input type="checkbox" id="map-show-clouds"> <span>Satellite Cloud Cover (NOAA)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-radar"> <span>Weather radar (NOAA/NWS)</span></label></div></details><details class="map-overlay-group"><summary>Wind &amp; Pressure</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-wind-barbs"> <span>Marine / Bay Wind Barbs (NOAA/NDBC)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-inland-wind-barbs"> <span>Land / Inland Wind Barbs (METAR)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-pressure"> <span>Surface Pressure / Isobars (NOAA/NWS METAR)</span></label></div></details><details class="map-overlay-group"><summary>Surf &amp; Swell</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-swell"> <span>Global Swell Forecast (PacIOOS / NOAA WW3)</span></label><div id="map-swell-controls" class="map-swell-controls" hidden><div class="map-swell-control-row"><label for="map-swell-hours">Forecast time</label><div class="map-swell-slider-wrap"><input id="map-swell-hours" type="range" min="0" max="120" step="6" value="0" aria-label="Swell forecast time, from now through 120 hours in the future"><div class="map-swell-slider-labels"><span>Now</span><span>+120h (5 days)</span></div></div></div><div id="map-swell-time" class="map-swell-selected-time">Selected: Now</div><div class="map-swell-control-note">Smooth color = swell height · arrows = swell travel direction. Forecast range: Now to +120h (5 days). Tap/click the colored swell field or an arrow for details.</div></div></div></details><details class="map-overlay-group"><summary>Terrain &amp; Seafloor</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-structure"> <span>Topography &amp; Bathymetry (NOAA ETOPO + offshore feature names)</span></label></div></details><details class="map-overlay-group"><summary>Marine Places</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marinas"> <span>Marinas <small id="map-marine-count-marinas"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="boatyards"> <span>Boatyards &amp; Repair <small id="map-marine-count-boatyards"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="fuel_docks"> <span>Fuel Docks <small id="map-marine-count-fuel_docks"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="launch_ramps"> <span>Launch Ramps <small id="map-marine-count-launch_ramps"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="ferry_terminals"> <span>Ferry Terminals <small id="map-marine-count-ferry_terminals"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marine_supply"> <span>Marine Supply <small id="map-marine-count-marine_supply"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="yacht_clubs"> <span>Yacht Clubs <small id="map-marine-count-yacht_clubs"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="waterfront_restaurants"> <span>Waterfront Restaurants <small id="map-marine-count-waterfront_restaurants"></small></span></label></div></details><details class="map-overlay-group"><summary>Observations</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-saildrone"> <span>Saildrone Observations (NOAA PMEL)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-alertcalifornia"> <span>ALERTCalifornia Cameras (UC San Diego)</span></label></div></details></div></details><details id="map-center-menu" class="map-overlays-menu"><summary>Center Map</summary><div class="map-overlays-panel map-center-panel"><button type="button" class="map-menu-close" aria-label="Close Center Map" title="Close">×</button><button type="button" id="map-geolocate" class="map-center-action" title="Center the map on your device location without changing the selected location">My location</button><button type="button" id="map-nav-coordinates" class="map-center-action" title="Center the map on the latitude and longitude shown below">Latitude &amp; Longitude</button><button type="button" id="map-nav-selected" class="map-center-action" {{if not .MapHasRequest}}disabled{{end}}>Selected location</button><button type="button" id="map-nav-wind" class="map-center-action" {{if not .MapHasWind}}disabled{{end}}>Selected wind station</button><button type="button" id="map-nav-current" class="map-center-action" {{if not .MapHasCurrent}}disabled{{end}}>Selected currents station</button></div></details></div><div class="map-primary-actions" aria-label="Location and station actions"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Find nearby stations</span><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates}}false{{else}}true{{end}}" {{if not (or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates)}}disabled{{end}}>Clear location &amp; stations</button></div><div class="map-location-info-grid"><div class="map-coordinate-entry" aria-label="Map center coordinates"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLat}}" aria-label="Map center latitude"></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLon}}" aria-label="Map center longitude"></div><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div id="selected-location-weather" class="selected-location-weather" aria-live="polite"><div id="selected-location-weather-empty" class="selected-location-weather-empty" {{if .MapHasRequest}}hidden{{end}}><strong>Selected Location Weather</strong><span>Select a location on the map to view current weather and forecast information.</span></div><div id="selected-location-weather-content" {{if not .MapHasRequest}}hidden{{end}}><div class="selected-location-weather-columns"><div class="selected-location-weather-point-column"><div class="selected-location-weather-head"><strong>Selected Location Weather</strong></div><div id="selected-location-weather-place" class="selected-location-weather-place">{{if .MapHasRequest}}{{if .SelectedWeatherLocation}}Near {{.SelectedWeatherLocation}}{{else}}Selected location{{end}}{{else}}Select a location for weather{{end}}</div><div id="selected-location-point-forecast" {{if and .MarineForecastPeriods .SelectedWeatherError}}hidden{{end}}><div class="selected-location-point-head"><strong>NWS Point Forecast</strong><span id="selected-location-weather-updated" class="selected-location-weather-updated">{{if .SelectedWeatherUpdated}}Updated {{.SelectedWeatherUpdated}}{{end}}</span></div><div class="selected-location-weather-metrics"><span class="selected-location-weather-metric"><b>Forecast temp:</b> <span id="selected-location-weather-air">{{if .SelectedWeatherAirTemp}}{{.SelectedWeatherAirTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>High:</b> <span id="selected-location-weather-high">{{if .SelectedWeatherHighTemp}}{{.SelectedWeatherHighTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>Low:</b> <span id="selected-location-weather-low">{{if .SelectedWeatherLowTemp}}{{.SelectedWeatherLowTemp}}{{else}}—{{end}}</span></span></div><p id="selected-location-weather-forecast" class="selected-location-weather-forecast" {{if not .SelectedWeatherShortForecast}}hidden{{end}}>{{.SelectedWeatherShortForecast}}</p><p id="selected-location-weather-error" class="selected-location-weather-error" {{if or (not .SelectedWeatherError) .MarineForecastPeriods}}hidden{{end}}>{{.SelectedWeatherError}}</p><p class="selected-location-weather-note">NWS point forecast for the selected map point. Forecast temperature is the current-hour forecast, not a direct observation.</p></div><p id="selected-location-weather-context" class="selected-location-weather-context" {{if not (and .MarineForecastPeriods .SelectedWeatherError)}}hidden{{end}}>NWS point-forecast temperature data is unavailable here; the applicable marine-zone forecast is shown in the Marine Forecast section.</p></div><div id="selected-location-weather-detail" class="selected-location-weather-detail" {{if not (or .MarineForecastPeriods .MarineForecastAlerts .MarineForecastError)}}hidden{{end}}><div class="selected-location-weather-detail-head"><strong id="marine-forecast-heading">{{if .MarineForecastPeriods}}NWS Marine Forecast{{else}}NWS Forecast Zone / Alerts{{end}}</strong><span id="marine-forecast-zone" class="marine-forecast-zone" {{if not .MarineForecastZone}}hidden{{end}}>{{if .MarineForecastPeriods}}Marine zone{{else}}NWS forecast zone{{end}} {{.MarineForecastZone}}{{if .MarineForecastUpdated}} · Updated {{.MarineForecastUpdated}}{{end}}</span></div><div id="marine-forecast-alerts" class="marine-alerts" aria-label="Active National Weather Service alerts" {{if not .MarineForecastAlerts}}hidden{{end}}>{{range .MarineForecastAlerts}}<span class="marine-alert">⚠ NWS alert — {{.}}</span>{{end}}</div><div id="marine-forecast-periods" class="marine-periods" {{if not .MarineForecastPeriods}}hidden{{end}}>{{range .MarineForecastPeriods}}<div class="marine-period">{{if .Name}}<strong>{{.Name}}</strong>{{end}}{{if .Forecast}}<p>{{.Forecast}}</p>{{end}}</div>{{end}}</div><p id="marine-forecast-note" class="marine-forecast-note" {{if not .MarineForecastPeriods}}hidden{{end}}>Official NWS coastal marine-zone forecast for the zone containing the selected point. It applies to the broader marine zone, not specifically to the selected point.</p><p id="marine-forecast-error" class="marine-forecast-error" {{if not .MarineForecastError}}hidden{{end}}>{{if .MarineForecastError}}{{.MarineForecastError}}{{end}}</p></div></div></div></div><div class="map-controls"><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><details class="map-overlay-help"><summary>Map overlay details</summary><div class="map-overlay-help-body">Topography & Bathymetry combines NOAA/NCEI ETOPO land topography and seafloor bathymetry with NOAA Marine Cadastre official named offshore features. Fishing-relevant features such as seamounts, banks, ridges, hills, knolls, shoals, reefs, rises, plateaus, pinnacles, and escarpments are labeled locally for better contrast. It is intended for fishing-planning context, not navigation; smaller pinnacles may not appear in the global relief model. Marine / Bay Wind Barbs uses live NOAA/NDBC station observations from all active stations with usable wind inside the buffered map viewport; standard meteorological barbs show wind-from direction and speed, and stale observations are faded. Land / Inland Wind Barbs is a separate optional layer sourced from Aviation Weather Center’s complete current-METAR cache and filtered locally to the buffered viewport, including many ASOS/AWOS airport sites. Both controls are display-only and do not change the selected wind station or selected location. Wind-barb tooltips follow the shared page Wind units preference; barb geometry remains based on standard knot increments. Saildrone Observations uses NOAA PMEL public ERDDAP mission data and plots the latest reported position and met-ocean readings from configured 2026 NOAA Saildrone missions; availability is mission-dependent and these moving platforms are not a fixed station network. ALERTCalifornia Cameras uses the official UC San Diego/ALERTCalifornia ArcGIS camera layer, requests only cameras in the current map viewport, and shows the current camera image plus a link to the official live camera page. Camera imagery is displayed unmodified with ALERTCalifornia | UC San Diego attribution. Exact positions are plotted only when the source provides them; fisherman shorthand such as “20×20” is shown as a derived approximate position with an uncertainty circle, and broad reports such as “Cordell to Monterey” are shown as regional zones rather than fake point coordinates. Satellite Cloud Cover uses NOAA/NESDIS GOES imagery rendered for the current map view; daylight areas appear natural-color-like and nighttime areas use infrared imagery. Radar uses Iowa State IEM's Web-Mercator CONUS NEXRAD N0Q WMS layer; a clear/transparent radar layer can simply mean no precipitation echoes are present. Air Temperature Heat Map uses one time slider and is intentionally limited to the contiguous U.S. at Zoom 4 or closer to avoid unnecessary world-scale interpolation and repaint work. NOW combines current NOAA/NDBC marine observations and NOAA/NWS Aviation Weather Center METAR observations, excludes reports older than 90 minutes, and interpolates the remaining station temperatures from the nearest local observations using a fixed −10°F to 110°F color scale. Moving the slider to any future step switches to the NOAA/NWS National Digital Forecast Database (NDFD) temperature raster for that forecast hour. The fixed −10°F to 110°F scale is shown in the Map Legend card, moving the pointer over the map reports the interpolated observed temperature at NOW or the NDFD forecast temperature at the selected future hour, and the Play control loops the timeline from NOW through +24h while waiting for each frame to load. The observed interpolation is planning context rather than an official analyzed temperature field. Surface Pressure / Isobars uses current NOAA/NWS Aviation Weather Center METAR mean sea-level-pressure observations. The browser interpolates those point observations into contour lines at a zoom-appropriate interval; it is useful pressure-gradient context but is not an official analyzed surface chart. Global Swell Forecast uses the public PacIOOS WaveWatch III global model for basin-scale swell tracking. The browser renders a padded, geographically anchored forecast field and reuses that loaded buffer during short pans; replacement buffers are swapped in only after enough new data are available. Wide-area views use a globally aligned coarser WW3 sampling stride for responsiveness, while closer views retain finer model sampling. The display uses interpolation and periodic dateline handling to present the gridded model smoothly; these display techniques do not increase the underlying model resolution. Sparse clickable arrows show swell travel direction, and the colored swell field or an arrow can be tapped for height, peak period, swell-from direction, travel direction, and forecast-valid time. It is intended for ocean-basin swell tracking and travel planning, not break-specific surf height.</div></details><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-fire-perimeter-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-fire-detection-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-weather-overlay-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-air-temperature-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-pressure-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div id="map-structure-status" class="map-structure-status" hidden></div><div id="map-windbarb-status" class="map-windbarb-status" hidden></div><div id="map-saildrone-status" class="map-saildrone-status" hidden></div><div id="map-alertcalifornia-status" class="map-alertcalifornia-status" hidden aria-live="polite"></div><div id="map-swell-status" class="map-swell-status" hidden aria-live="polite"></div><div id="map-swell-legend" class="map-swell-legend" hidden><strong>Swell height</strong><span>0</span><span class="map-swell-gradient" aria-hidden="true"></span><span>20+ ft</span><span>· arrows: swell travel direction</span></div><div class="map-layer-note">Drag the handle directly below the map to make the map taller or shorter. Keyboard users can focus the handle and use ↑/↓ (Shift for larger steps).</div><div class="info-popup-row map-info-popup-row"><button id="map-legend-open" class="info-popup-open" type="button" aria-haspopup="dialog" aria-controls="map-legend-modal">ⓘ Map legend</button><button id="map-sources-open" class="info-popup-open" type="button" aria-haspopup="dialog" aria-controls="map-sources-modal">ⓘ Map &amp; data sources</button></div><div id="map-legend-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-legend-title"><div class="info-popup-dialog-head"><h2 id="map-legend-title">Map Legend</h2><button id="map-legend-close" class="info-popup-close" type="button" aria-label="Close map legend" title="Close">×</button></div><div class="info-popup-body"><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span><span class="map-key"><span class="map-dot saildrone" aria-hidden="true"></span>Saildrone latest position</span><span class="map-key"><span class="map-dot alertcalifornia" aria-hidden="true"></span>ALERTCalifornia camera</span></div><div class="map-legend"><span class="map-key"><span class="map-dot marine marina" aria-hidden="true"></span>Marina</span><span class="map-key"><span class="map-dot marine boatyard" aria-hidden="true"></span>Boatyard &amp; repair</span><span class="map-key"><span class="map-dot marine fuel" aria-hidden="true"></span>Fuel dock</span><span class="map-key"><span class="map-dot marine ramp" aria-hidden="true"></span>Launch ramp</span><span class="map-key"><span class="map-dot marine ferry" aria-hidden="true"></span>Ferry terminal</span><span class="map-key"><span class="map-dot marine supply" aria-hidden="true"></span>Marine supply</span><span class="map-key"><span class="map-dot marine club" aria-hidden="true"></span>Yacht club</span><span class="map-key"><span class="map-dot marine restaurant" aria-hidden="true"></span>Waterfront restaurant</span></div><div id="map-air-temperature-legend" class="map-air-temperature-legend" hidden><div class="map-air-temperature-legend-head"><strong>Air temperature</strong><span id="map-air-temperature-legend-context" class="map-air-temperature-legend-context">NOW · Observed · NDBC + METAR</span></div><div class="map-air-temperature-scale"><span>−10°F</span><span class="map-air-temperature-gradient" aria-hidden="true"></span><span>110°F</span></div></div></div></div></div><div id="map-sources-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-sources-title"><div class="info-popup-dialog-head"><h2 id="map-sources-title">Map &amp; Data Sources</h2><button id="map-sources-close" class="info-popup-close" type="button" aria-label="Close map and data sources" title="Close">×</button></div><div class="info-popup-body"><p class="map-sources-note">Base maps: <strong>Street Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service and is available at Zoom 9 or closer; <strong>Satellite</strong> uses Esri World Imagery; <strong>Hybrid</strong> combines Esri imagery with place/boundary labels. NWS forecast-zone, NOAA smoke, <strong>Active Fire Perimeters</strong>, <strong>Satellite Fire Detections</strong>, <strong>Air Temperature Heat Map (CONUS: NOW observations + NOAA/NWS NDFD future forecast)</strong>, <strong>Global Swell Forecast</strong>, <strong>Satellite Cloud Cover</strong>, radar, and <strong>ALERTCalifornia Cameras</strong> remain independent overlays. Active Fire Perimeters use the National Interagency Fire Center WFIGS current perimeter service. Satellite Fire Detections use NOAA Hazard Mapping System active-fire detections. Global Swell Forecast uses PacIOOS public ERDDAP access to the NOAA/NCEP WaveWatch III global model. ALERTCalifornia camera locations and current imagery come from the official UC San Diego/ALERTCalifornia ArcGIS feed. The nautical chart layer is for planning/reference and does not replace official navigation products.</p></div></div></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
+<section class="card full map-card"><div class="map-intro"><div><div class="map-intro-title"><h2>Location</h2><details class="location-help"><summary aria-label="About location selection" title="About location selection">ⓘ</summary><div class="location-help-panel"><div class="location-help-header"><strong>About location selection</strong><button type="button" class="location-help-close" aria-label="Close location information" title="Close">×</button></div><div class="location-help-body"><p><strong>Selected location</strong> is the point used for selected-location weather and nearby-station searches. Click the map to set or change it.</p><p>Panning, zooming, My location, and Center Map only change the map view. The latitude/longitude fields show the map center; editing them and choosing <strong>Center Map → Latitude &amp; Longitude</strong> does not change the selected location.</p><p><strong>Find nearby stations</strong> searches around the selected location. Open a candidate station on the map to review it and commit it as the wind source; the associated currents station is previewed with it.</p></div></div></details></div><div class="map-help">Click the map to select a location for weather and nearby stations.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-alertcalifornia-panel" class="alertcalifornia-panel" hidden role="dialog" aria-modal="false" aria-labelledby="map-alertcalifornia-panel-title"><div class="alertcalifornia-panel-head"><div id="map-alertcalifornia-panel-title" class="alertcalifornia-panel-title">ALERTCalifornia camera</div><button id="map-alertcalifornia-panel-close" class="alertcalifornia-panel-close" type="button" aria-label="Close ALERTCalifornia camera" title="Close">×</button></div><div id="map-alertcalifornia-panel-body" class="alertcalifornia-panel-body"></div></div><div id="map-swell-info-panel" class="swell-info-panel" hidden role="dialog" aria-modal="false" aria-labelledby="map-swell-info-panel-title"><div class="swell-info-panel-head"><div id="map-swell-info-panel-title" class="swell-info-panel-title">Swell Forecast</div><button id="map-swell-info-panel-close" class="swell-info-panel-close" type="button" aria-label="Close swell forecast information" title="Close">×</button></div><div id="map-swell-info-panel-body" class="swell-info-panel-body"></div></div><div id="map-nautical-zoom-note" class="map-nautical-zoom-note" hidden aria-live="polite">Nautical chart available at Zoom 9+.</div><div id="map-resize-handle" class="map-resize-handle" role="separator" aria-label="Resize map vertically" aria-orientation="horizontal" aria-valuemin="260" aria-valuemax="900" aria-valuenow="390" aria-grabbed="false" tabindex="0" title="Drag up or down to resize map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-footer-row"><div class="map-footer-transports"><div id="map-air-temperature-transport" class="map-air-temperature-transport" hidden aria-label="Air temperature playback controls"><div class="map-air-temperature-transport-row"><button type="button" id="map-air-temperature-now" aria-label="Return air temperature to NOW" title="Return to NOW">NOW</button><button type="button" id="map-air-temperature-prev" aria-label="Previous 15 minutes" title="Previous 15 minutes">◀</button><button type="button" id="map-air-temperature-map-play" aria-pressed="false" aria-label="Play air temperature timeline">▶ Play</button><button type="button" id="map-air-temperature-next" aria-label="Next 15 minutes" title="Next 15 minutes">▶</button><label>Speed <select id="map-air-temperature-speed" aria-label="Air temperature playback speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select></label><label>Range <select id="map-air-temperature-range" aria-label="Air temperature playback range"><option value="6">6h</option><option value="12">12h</option><option value="24" selected>24h</option></select></label></div><div class="map-air-temperature-map-slider-wrap"><span class="map-air-temperature-map-slider-end">NOW</span><input id="map-air-temperature-map-hours" type="range" min="0" max="24" step="0.25" value="0" aria-label="Air temperature time in the footer, from NOW through the selected playback range"><span id="map-air-temperature-map-range-end" class="map-air-temperature-map-slider-end">+24h</span></div><div id="map-air-temperature-time" class="map-air-temperature-footer-status" role="status" aria-live="polite">Air Temperature · NOW · Observed</div></div><div id="map-swell-transport" class="map-swell-transport" hidden aria-label="Swell forecast playback controls"><div class="map-swell-transport-row"><button type="button" id="map-swell-map-now" aria-label="Return swell forecast to Now" title="Return to Now">NOW</button><button type="button" id="map-swell-map-prev" aria-label="Previous swell forecast frame" title="Previous swell forecast frame">◀</button><button type="button" id="map-swell-map-play" aria-pressed="false" aria-label="Play swell forecast timeline">▶ Play</button><button type="button" id="map-swell-map-next" aria-label="Next swell forecast frame" title="Next swell forecast frame">▶</button><label>Speed <select id="map-swell-playback-speed" aria-label="Swell playback speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select></label><label>Step <select id="map-swell-playback-step" aria-label="Swell playback step"><option value="1">1h</option><option value="3" selected>3h</option><option value="6">6h</option></select></label></div><div class="map-swell-map-slider-wrap"><span class="map-swell-map-slider-end">Now</span><input id="map-swell-map-hours" type="range" min="0" max="120" step="1" value="0" aria-label="Swell forecast time on map, from now through 120 hours in the future"><span class="map-swell-map-slider-end">+120h (5 days)</span></div><div id="map-swell-map-time" class="map-swell-footer-status" aria-live="polite">Swell · Now</div><div class="map-swell-cache-row"><div id="map-swell-prime-status" class="map-swell-prime-status" hidden aria-live="polite"></div><button type="button" id="map-swell-cache-reload" class="map-swell-cache-reload" hidden>Reload swell cache</button></div><div id="map-swell-time" hidden aria-hidden="true">Selected: Now</div><div id="map-swell-map-selected" hidden aria-hidden="true"></div><div id="map-swell-playback-note" class="map-swell-playback-note" hidden aria-live="polite"></div></div></div><div class="map-scale-row" aria-label="Map scale"><span id="map-scale-status" class="map-scale-status" role="status" aria-live="polite"></span></div></div><div class="map-state-controls" aria-label="Map controls"><details id="map-types-menu" class="map-overlays-menu"><summary>Map Types</summary><div class="map-overlays-panel"><button type="button" class="map-menu-close" aria-label="Close Map Types" title="Close">×</button><label class="map-overlay-toggle"><input type="radio" name="map-type" value="map"> <span>Street Map</span></label><label id="map-type-nautical-label" class="map-overlay-toggle"><input id="map-type-nautical" type="radio" name="map-type" value="nautical"> <span>Nautical Chart <small>(Zoom 9+)</small></span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="satellite"> <span>Satellite</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="hybrid"> <span>Hybrid</span></label></div></details><details id="map-overlays-menu" class="map-overlays-menu"><summary>Map Overlays</summary><div class="map-overlays-panel"><div class="map-overlays-toolbar"><button type="button" id="map-overlays-clear" class="map-overlay-clear">Clear all overlays</button><button type="button" class="map-menu-close" aria-label="Close Map Overlays" title="Close">×</button></div><details class="map-overlay-group"><summary>Weather &amp; Hazards</summary><div class="map-overlay-group-body"><label id="map-marine-zone-control" class="map-overlay-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-smoke"> <span>Satellite smoke (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-fire-perimeters"> <span>Active fire perimeters (NIFC/WFIGS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-fire-detections"> <span>Satellite fire detections (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-air-temperature"> <span>Air Temperature Heat Map (CONUS)</span></label><div class="map-air-temperature-overlay-note">Playback, forecast time, Speed, and Range are all below the map. NOW uses current observations; future times use NOAA/NWS NDFD guidance. CONUS only · Zoom 4+.</div><label class="map-overlay-toggle"><input type="checkbox" id="map-show-clouds"> <span>Satellite Cloud Cover (NOAA)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-radar"> <span>Weather radar (NOAA/NWS)</span></label></div></details><details class="map-overlay-group"><summary>Wind &amp; Pressure</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-wind-barbs"> <span>Marine / Bay Wind Barbs (NOAA/NDBC)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-inland-wind-barbs"> <span>Land / Inland Wind Barbs (METAR)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-pressure"> <span>Surface Pressure / Isobars (NOAA/NWS METAR)</span></label></div></details><details class="map-overlay-group"><summary>Surf &amp; Swell</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-swell"> <span>Global Swell Forecast (PacIOOS / NOAA WW3)</span></label><div class="map-swell-overlay-note">Playback, forecast time, cache progress, and Reload swell cache are all below the map.</div></div></details><details class="map-overlay-group"><summary>Terrain &amp; Seafloor</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-structure"> <span>Topography &amp; Bathymetry (NOAA ETOPO + offshore feature names)</span></label></div></details><details class="map-overlay-group"><summary>Marine Places</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marinas"> <span>Marinas <small id="map-marine-count-marinas"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="boatyards"> <span>Boatyards &amp; Repair <small id="map-marine-count-boatyards"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="fuel_docks"> <span>Fuel Docks <small id="map-marine-count-fuel_docks"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="launch_ramps"> <span>Launch Ramps <small id="map-marine-count-launch_ramps"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="ferry_terminals"> <span>Ferry Terminals <small id="map-marine-count-ferry_terminals"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marine_supply"> <span>Marine Supply <small id="map-marine-count-marine_supply"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="yacht_clubs"> <span>Yacht Clubs <small id="map-marine-count-yacht_clubs"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="waterfront_restaurants"> <span>Waterfront Restaurants <small id="map-marine-count-waterfront_restaurants"></small></span></label></div></details><details class="map-overlay-group"><summary>Observations</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-saildrone"> <span>Saildrone Observations (NOAA PMEL)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-alertcalifornia"> <span>ALERTCalifornia Cameras (UC San Diego)</span></label></div></details></div></details><details id="map-center-menu" class="map-overlays-menu"><summary>Center Map</summary><div class="map-overlays-panel map-center-panel"><button type="button" class="map-menu-close" aria-label="Close Center Map" title="Close">×</button><button type="button" id="map-geolocate" class="map-center-action" title="Center the map on your device location without changing the selected location">My location</button><button type="button" id="map-nav-coordinates" class="map-center-action" title="Center the map on the latitude and longitude shown below">Latitude &amp; Longitude</button><button type="button" id="map-nav-selected" class="map-center-action" {{if not .MapHasRequest}}disabled{{end}}>Selected location</button><button type="button" id="map-nav-wind" class="map-center-action" {{if not .MapHasWind}}disabled{{end}}>Selected wind station</button><button type="button" id="map-nav-current" class="map-center-action" {{if not .MapHasCurrent}}disabled{{end}}>Selected currents station</button></div></details></div><div class="map-primary-actions" aria-label="Location and station actions"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Find nearby stations</span><button id="map-reset" class="map-reset" type="button" aria-disabled="{{if or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates}}false{{else}}true{{end}}" {{if not (or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates)}}disabled{{end}}>Clear location &amp; stations</button></div><div class="map-location-info-grid"><div class="map-coordinate-entry" aria-label="Map center coordinates"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLat}}" aria-label="Map center latitude"></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLon}}" aria-label="Map center longitude"></div><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div id="selected-location-weather" class="selected-location-weather" aria-live="polite"><div id="selected-location-weather-empty" class="selected-location-weather-empty" {{if .MapHasRequest}}hidden{{end}}><strong>Selected Location Weather</strong><span>Select a location on the map to view current weather and forecast information.</span></div><div id="selected-location-weather-content" {{if not .MapHasRequest}}hidden{{end}}><div class="selected-location-weather-columns"><div class="selected-location-weather-point-column"><div class="selected-location-weather-head"><strong>Selected Location Weather</strong></div><div id="selected-location-weather-place" class="selected-location-weather-place">{{if .MapHasRequest}}{{if .SelectedWeatherLocation}}Near {{.SelectedWeatherLocation}}{{else}}Selected location{{end}}{{else}}Select a location for weather{{end}}</div><div id="selected-location-point-forecast" {{if and .MarineForecastPeriods .SelectedWeatherError}}hidden{{end}}><div class="selected-location-point-head"><strong>NWS Point Forecast</strong><span id="selected-location-weather-updated" class="selected-location-weather-updated">{{if .SelectedWeatherUpdated}}Updated {{.SelectedWeatherUpdated}}{{end}}</span></div><div class="selected-location-weather-metrics"><span class="selected-location-weather-metric"><b>Forecast temp:</b> <span id="selected-location-weather-air">{{if .SelectedWeatherAirTemp}}{{.SelectedWeatherAirTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>High:</b> <span id="selected-location-weather-high">{{if .SelectedWeatherHighTemp}}{{.SelectedWeatherHighTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>Low:</b> <span id="selected-location-weather-low">{{if .SelectedWeatherLowTemp}}{{.SelectedWeatherLowTemp}}{{else}}—{{end}}</span></span></div><p id="selected-location-weather-forecast" class="selected-location-weather-forecast" {{if not .SelectedWeatherShortForecast}}hidden{{end}}>{{.SelectedWeatherShortForecast}}</p><p id="selected-location-weather-error" class="selected-location-weather-error" {{if or (not .SelectedWeatherError) .MarineForecastPeriods}}hidden{{end}}>{{.SelectedWeatherError}}</p><p class="selected-location-weather-note">NWS point forecast for the selected map point. Forecast temperature is the current-hour forecast, not a direct observation.</p></div><p id="selected-location-weather-context" class="selected-location-weather-context" {{if not (and .MarineForecastPeriods .SelectedWeatherError)}}hidden{{end}}>NWS point-forecast temperature data is unavailable here; the applicable marine-zone forecast is shown in the Marine Forecast section.</p></div><div id="selected-location-weather-detail" class="selected-location-weather-detail" {{if not (or .MarineForecastPeriods .MarineForecastAlerts .MarineForecastError)}}hidden{{end}}><div class="selected-location-weather-detail-head"><strong id="marine-forecast-heading">{{if .MarineForecastPeriods}}NWS Marine Forecast{{else}}NWS Forecast Zone / Alerts{{end}}</strong><span id="marine-forecast-zone" class="marine-forecast-zone" {{if not .MarineForecastZone}}hidden{{end}}>{{if .MarineForecastPeriods}}Marine zone{{else}}NWS forecast zone{{end}} {{.MarineForecastZone}}{{if .MarineForecastUpdated}} · Updated {{.MarineForecastUpdated}}{{end}}</span></div><div id="marine-forecast-alerts" class="marine-alerts" aria-label="Active National Weather Service alerts" {{if not .MarineForecastAlerts}}hidden{{end}}>{{range .MarineForecastAlerts}}<span class="marine-alert">⚠ NWS alert — {{.}}</span>{{end}}</div><div id="marine-forecast-periods" class="marine-periods" {{if not .MarineForecastPeriods}}hidden{{end}}>{{range .MarineForecastPeriods}}<div class="marine-period">{{if .Name}}<strong>{{.Name}}</strong>{{end}}{{if .Forecast}}<p>{{.Forecast}}</p>{{end}}</div>{{end}}</div><p id="marine-forecast-note" class="marine-forecast-note" {{if not .MarineForecastPeriods}}hidden{{end}}>Official NWS coastal marine-zone forecast for the zone containing the selected point. It applies to the broader marine zone, not specifically to the selected point.</p><p id="marine-forecast-error" class="marine-forecast-error" {{if not .MarineForecastError}}hidden{{end}}>{{if .MarineForecastError}}{{.MarineForecastError}}{{end}}</p></div></div></div></div><div class="map-controls"><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><details class="map-overlay-help"><summary>Map overlay details</summary><div class="map-overlay-help-body">Topography & Bathymetry combines NOAA/NCEI ETOPO land topography and seafloor bathymetry with NOAA Marine Cadastre official named offshore features. Fishing-relevant features such as seamounts, banks, ridges, hills, knolls, shoals, reefs, rises, plateaus, pinnacles, and escarpments are labeled locally for better contrast. It is intended for fishing-planning context, not navigation; smaller pinnacles may not appear in the global relief model. Marine / Bay Wind Barbs uses live NOAA/NDBC station observations from all active stations with usable wind inside the buffered map viewport; standard meteorological barbs show wind-from direction and speed, and stale observations are faded. Land / Inland Wind Barbs is a separate optional layer sourced from Aviation Weather Center’s complete current-METAR cache and filtered locally to the buffered viewport, including many ASOS/AWOS airport sites. Both controls are display-only and do not change the selected wind station or selected location. Wind-barb tooltips follow the shared page Wind units preference; barb geometry remains based on standard knot increments. Saildrone Observations uses NOAA PMEL public ERDDAP mission data and plots the latest reported position and met-ocean readings from configured 2026 NOAA Saildrone missions; availability is mission-dependent and these moving platforms are not a fixed station network. ALERTCalifornia Cameras uses the official UC San Diego/ALERTCalifornia ArcGIS camera layer, requests only cameras in the current map viewport, and shows the current camera image plus a link to the official live camera page. Camera imagery is displayed unmodified with ALERTCalifornia | UC San Diego attribution. Exact positions are plotted only when the source provides them; fisherman shorthand such as “20×20” is shown as a derived approximate position with an uncertainty circle, and broad reports such as “Cordell to Monterey” are shown as regional zones rather than fake point coordinates. Satellite Cloud Cover uses NOAA/NESDIS GOES imagery rendered for the current map view; daylight areas appear natural-color-like and nighttime areas use infrared imagery. Radar uses Iowa State IEM's Web-Mercator CONUS NEXRAD N0Q WMS layer; a clear/transparent radar layer can simply mean no precipitation echoes are present. Air Temperature Heat Map uses one time slider and is intentionally limited to the contiguous U.S. at Zoom 4 or closer to avoid unnecessary world-scale interpolation and repaint work. NOW combines current NOAA/NDBC marine observations and NOAA/NWS Aviation Weather Center METAR observations, excludes reports older than 90 minutes, and interpolates the remaining station temperatures from the nearest local observations using a fixed −10°F to 110°F color scale. Moving the slider to any future step switches to the NOAA/NWS National Digital Forecast Database (NDFD) temperature raster for that forecast hour. The fixed −10°F to 110°F scale is shown in the Map Legend card, moving the pointer over the map reports the interpolated observed temperature at NOW or the NDFD forecast temperature at the selected future hour, and the Play control loops the timeline from NOW through +24h while waiting for each frame to load. The observed interpolation is planning context rather than an official analyzed temperature field. Surface Pressure / Isobars uses current NOAA/NWS Aviation Weather Center METAR mean sea-level-pressure observations. The browser interpolates those point observations into contour lines at a zoom-appropriate interval; it is useful pressure-gradient context but is not an official analyzed surface chart. Global Swell Forecast uses the public PacIOOS WaveWatch III global model for basin-scale swell tracking. The browser renders a padded, geographically anchored forecast field and reuses that loaded buffer during short pans; replacement buffers are swapped in only after enough new data are available. Wide-area views use a globally aligned coarser WW3 sampling stride for responsiveness, while closer views retain finer model sampling. The display uses interpolation and periodic dateline handling to present the gridded model smoothly; these display techniques do not increase the underlying model resolution. Sparse clickable arrows show swell travel direction, and the colored swell field or an arrow can be tapped for height, peak period, swell-from direction, travel direction, and forecast-valid time. It is intended for ocean-basin swell tracking and travel planning, not break-specific surf height.</div></details><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-fire-perimeter-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-fire-detection-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-weather-overlay-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-air-temperature-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-pressure-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div id="map-structure-status" class="map-structure-status" hidden></div><div id="map-windbarb-status" class="map-windbarb-status" hidden></div><div id="map-saildrone-status" class="map-saildrone-status" hidden></div><div id="map-alertcalifornia-status" class="map-alertcalifornia-status" hidden aria-live="polite"></div><div id="map-swell-status" class="map-swell-status" hidden aria-hidden="true" style="display:none!important"></div><div id="map-swell-legend" class="map-swell-legend" hidden><strong>Swell height</strong><span>0</span><span class="map-swell-gradient" aria-hidden="true"></span><span>20+ ft</span><span>· arrows: swell travel direction</span></div><div class="map-layer-note">Drag the handle directly below the map to make the map taller or shorter. Keyboard users can focus the handle and use ↑/↓ (Shift for larger steps).</div><div class="info-popup-row map-info-popup-row"><button id="map-legend-open" class="info-popup-open" type="button" aria-haspopup="dialog" aria-controls="map-legend-modal">ⓘ Map legend</button><button id="map-sources-open" class="info-popup-open" type="button" aria-haspopup="dialog" aria-controls="map-sources-modal">ⓘ Map &amp; data sources</button></div><div id="map-legend-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-legend-title"><div class="info-popup-dialog-head"><h2 id="map-legend-title">Map Legend</h2><button id="map-legend-close" class="info-popup-close" type="button" aria-label="Close map legend" title="Close">×</button></div><div class="info-popup-body"><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span><span class="map-key"><span class="map-dot saildrone" aria-hidden="true"></span>Saildrone latest position</span><span class="map-key"><span class="map-dot alertcalifornia" aria-hidden="true"></span>ALERTCalifornia camera</span></div><div class="map-legend"><span class="map-key"><span class="map-dot marine marina" aria-hidden="true"></span>Marina</span><span class="map-key"><span class="map-dot marine boatyard" aria-hidden="true"></span>Boatyard &amp; repair</span><span class="map-key"><span class="map-dot marine fuel" aria-hidden="true"></span>Fuel dock</span><span class="map-key"><span class="map-dot marine ramp" aria-hidden="true"></span>Launch ramp</span><span class="map-key"><span class="map-dot marine ferry" aria-hidden="true"></span>Ferry terminal</span><span class="map-key"><span class="map-dot marine supply" aria-hidden="true"></span>Marine supply</span><span class="map-key"><span class="map-dot marine club" aria-hidden="true"></span>Yacht club</span><span class="map-key"><span class="map-dot marine restaurant" aria-hidden="true"></span>Waterfront restaurant</span></div><div id="map-air-temperature-legend" class="map-air-temperature-legend" hidden><div class="map-air-temperature-legend-head"><strong>Air temperature</strong><span id="map-air-temperature-legend-context" class="map-air-temperature-legend-context">NOW · Observed · NDBC + METAR</span></div><div class="map-air-temperature-scale"><span>−10°F</span><span class="map-air-temperature-gradient" aria-hidden="true"></span><span>110°F</span></div></div></div></div></div><div id="map-sources-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-sources-title"><div class="info-popup-dialog-head"><h2 id="map-sources-title">Map &amp; Data Sources</h2><button id="map-sources-close" class="info-popup-close" type="button" aria-label="Close map and data sources" title="Close">×</button></div><div class="info-popup-body"><p class="map-sources-note">Base maps: <strong>Street Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service and is available at Zoom 9 or closer; <strong>Satellite</strong> uses Esri World Imagery; <strong>Hybrid</strong> combines Esri imagery with place/boundary labels. NWS forecast-zone, NOAA smoke, <strong>Active Fire Perimeters</strong>, <strong>Satellite Fire Detections</strong>, <strong>Air Temperature Heat Map (CONUS: NOW observations + NOAA/NWS NDFD future forecast)</strong>, <strong>Global Swell Forecast</strong>, <strong>Satellite Cloud Cover</strong>, radar, and <strong>ALERTCalifornia Cameras</strong> remain independent overlays. Active Fire Perimeters use the National Interagency Fire Center WFIGS current perimeter service. Satellite Fire Detections use NOAA Hazard Mapping System active-fire detections. Global Swell Forecast uses PacIOOS public ERDDAP access to the NOAA/NCEP WaveWatch III global model. ALERTCalifornia camera locations and current imagery come from the official UC San Diego/ALERTCalifornia ArcGIS feed. The nautical chart layer is for planning/reference and does not replace official navigation products.</p></div></div></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
 {{if .WindError}}<section class="card full error-card"><h2>Wind station selection unavailable</h2><p class="error-message">{{.WindError}}</p><p class="error-help">The page is still available so you can inspect the request and nearby station diagnostics. Try nearby coordinates or an explicit NDBC station ID.</p></section>{{end}}
 <section class="card full wind-card"><div class="wind-card-head"><h2>Wind</h2></div>
 <div class="metrics">
@@ -10373,6 +10567,8 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     } else {
       el.textContent = "Air Temperature · "+formatAirTemperatureOffset(hours)+" · Forecast";
     }
+    syncAirTemperatureSliders(hours);
+    updateAirTemperatureFooterScale(hours);
     updateAirTemperatureLegendContext(hours);
   }
 
@@ -11156,20 +11352,256 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   var swellLoadedSegments = [];
   var swellCachedResults = null;
   var swellCachedHours = null;
+  var swellPlaybackActive = false;
+  var swellPlaybackTimer = null;
+  var swellPlaybackStepHours = 3;
+  var swellPlaybackSpeed = 1;
+  var swellPlaybackFailureCount = 0;
+  var swellManualLoadActive = false;
+  var swellManualLoadHours = null;
+  var swellMinDisplayZoom = 3;
+  var swellMinPlaybackZoom = 4;
   var radarTilesLoaded = 0;
   var radarTileErrors = 0;
 
+  var swellLoadStatusTimer = null;
+
   function setSwellStatus(message, isError) {
-    var status = document.getElementById("map-swell-status");
+    var value = String(message || "").trim();
+
+    // Preserve the old node only for compatibility/debug assertions. It is
+    // permanently hidden so users never have to scroll away from the map.
+    var legacy = document.getElementById("map-swell-status");
+    if (legacy) {
+      legacy.hidden = true;
+      legacy.textContent = value;
+      legacy.style.display = "none";
+    }
+
+    // All visible operational status belongs beside the playback controls.
+    var status = document.getElementById("map-swell-prime-status");
     if (!status) return;
-    status.hidden = !message;
-    status.textContent = message || "";
-    status.style.color = isError ? "#8b2c2c" : "";
+    status.textContent = value;
+    status.hidden = !value;
+    if (value) {
+      status.setAttribute("data-state", isError ? "error" : "working");
+    } else {
+      status.removeAttribute("data-state");
+    }
+  }
+
+  function scheduleSwellLoadStatus(message) {
+    if (swellLoadStatusTimer) window.clearTimeout(swellLoadStatusTimer);
+    swellLoadStatusTimer = window.setTimeout(function() {
+      swellLoadStatusTimer = null;
+      if (!mapState.swellOverlayVisible || swellPreparationBusy()) return;
+      setSwellStatus(message || "Loading swell frame…", false);
+    }, 300);
+  }
+
+  function clearSwellLoadStatus(restoreReady) {
+    if (swellLoadStatusTimer) {
+      window.clearTimeout(swellLoadStatusTimer);
+      swellLoadStatusTimer = null;
+    }
+    if (restoreReady && swellPreparationState === "ready") {
+      setSwellPrimeStatus("Swell ready.", "ready");
+    }
   }
 
   function setSwellLegendVisible(visible) {
     var legend = document.getElementById("map-swell-legend");
     if (legend) legend.hidden = !visible;
+  }
+
+  function normalizeSwellHours(value) {
+    var hours = Math.round(Number(value) || 0);
+    return Math.max(0, Math.min(120, hours));
+  }
+
+  function effectiveSwellPlaybackStepHours() {
+    var selected = [1,3,6].indexOf(Number(swellPlaybackStepHours)) >= 0
+      ? Number(swellPlaybackStepHours)
+      : 3;
+    var zoom = map.getZoom();
+    if (zoom <= 4) return Math.max(6, selected);
+    if (zoom === 5) return Math.max(3, selected);
+    return selected;
+  }
+
+  function updateSwellMapTransport(previewHours) {
+    var transport = document.getElementById("map-swell-transport");
+    var button = document.getElementById("map-swell-map-play");
+    var time = document.getElementById("map-swell-map-time");
+    var selected = document.getElementById("map-swell-map-selected");
+    var mapSlider = document.getElementById("map-swell-map-hours");
+    var menuSlider = document.getElementById("map-swell-hours");
+    var stepSelect = document.getElementById("map-swell-playback-step");
+    var speedSelect = document.getElementById("map-swell-playback-speed");
+    var nowButton = document.getElementById("map-swell-map-now");
+    var prevButton = document.getElementById("map-swell-map-prev");
+    var nextButton = document.getElementById("map-swell-map-next");
+    var note = document.getElementById("map-swell-playback-note");
+    var visible = !!mapState.swellOverlayVisible;
+    var hours = Number.isFinite(Number(previewHours))
+      ? normalizeSwellHours(previewHours)
+      : normalizeSwellHours(mapState.swellForecastHours);
+    var zoom = map.getZoom();
+    var busy = !!swellManualLoadActive;
+
+    if (transport) {
+      transport.hidden = !visible;
+      transport.classList.toggle("is-busy", busy);
+    }
+    var preparing = swellPreparationBusy();
+    if (mapSlider) {
+      mapSlider.value = String(hours);
+      mapSlider.disabled = busy || preparing;
+    }
+    if (menuSlider) {
+      menuSlider.disabled = busy;
+    }
+    if (stepSelect) {
+      stepSelect.value = String(swellPlaybackStepHours);
+      stepSelect.disabled = busy || swellPreparationBusy();
+    }
+    if (speedSelect) {
+      speedSelect.value = String(swellPlaybackSpeed);
+      speedSelect.disabled = busy;
+    }
+    var displayAllowed = zoom >= swellMinDisplayZoom;
+    if (nowButton) nowButton.disabled = visible && (!displayAllowed || busy || preparing);
+    if (prevButton) prevButton.disabled = visible && (!displayAllowed || busy || preparing || hours <= 0);
+    if (nextButton) nextButton.disabled = visible && (!displayAllowed || busy || preparing || hours >= 120);
+    if (button) {
+      var playbackAllowed = zoom >= swellMinPlaybackZoom;
+      var playbackCacheReady = swellPreparationState === "ready";
+      button.disabled = visible && (!playbackAllowed || busy || !playbackCacheReady);
+      button.textContent = swellPlaybackActive ? "❚❚ Pause" : "▶ Play";
+      button.setAttribute("aria-pressed", swellPlaybackActive ? "true" : "false");
+      button.setAttribute("aria-label", swellPlaybackActive ? "Pause swell forecast timeline" : "Play swell forecast timeline");
+      button.classList.toggle("is-playing", swellPlaybackActive);
+    }
+    if (time) {
+      if (busy && Number.isFinite(Number(swellManualLoadHours))) {
+        var loadingHours = normalizeSwellHours(swellManualLoadHours);
+        time.textContent = loadingHours === 0 ? "Swell · Loading Now…" : "Swell · Loading +" + loadingHours + "h…";
+      } else if (swellTime && swellTime.textContent) {
+        time.textContent = String(swellTime.textContent).replace(/^Selected:\s*/i, "Swell · ");
+      } else {
+        time.textContent = hours === 0 ? "Swell · Now" : "Swell · +" + hours + "h";
+      }
+    }
+    if (selected) {
+      selected.textContent = "";
+    }
+    if (note) {
+      note.textContent = "";
+      note.hidden = true;
+    }
+  }
+
+  function stopSwellPlayback() {
+    swellPlaybackActive = false;
+    if (swellPlaybackTimer) {
+      window.clearTimeout(swellPlaybackTimer);
+      swellPlaybackTimer = null;
+    }
+    updateSwellMapTransport();
+  }
+
+  function suspendSwellForWideZoom() {
+    stopSwellPlayback();
+    swellRequestSerial++;
+    if (swellRefreshTimer) {
+      window.clearTimeout(swellRefreshTimer);
+      swellRefreshTimer = null;
+    }
+    if (swellHeatLayer && map.hasLayer(swellHeatLayer)) map.removeLayer(swellHeatLayer);
+    if (swellVectorLayer && map.hasLayer(swellVectorLayer)) map.removeLayer(swellVectorLayer);
+    setSwellLegendVisible(false);
+    setSwellStatus("Zoom in to Zoom 3 or closer to load the Global Swell Forecast.", false);
+    closeSwellInfoPanel();
+    updateSwellMapTransport();
+  }
+
+  function scheduleSwellPlaybackAdvance(delayMS) {
+    if (!swellPlaybackActive || !mapState.swellOverlayVisible) return;
+    if (map.getZoom() < swellMinPlaybackZoom) {
+      stopSwellPlayback();
+      setSwellStatus("Zoom in to Zoom 4 or closer for animated swell playback.", false);
+      return;
+    }
+    if (swellPlaybackTimer) window.clearTimeout(swellPlaybackTimer);
+    swellPlaybackTimer = window.setTimeout(function() {
+      swellPlaybackTimer = null;
+      if (!swellPlaybackActive || !mapState.swellOverlayVisible) return;
+      if (map.getZoom() < swellMinPlaybackZoom) {
+        stopSwellPlayback();
+        setSwellStatus("Zoom in to Zoom 4 or closer for animated swell playback.", false);
+        return;
+      }
+      var current = normalizeSwellHours(mapState.swellForecastHours);
+      var step = effectiveSwellPlaybackStepHours();
+      var next = current >= 120 ? 0 : Math.min(120, current + step);
+      mapState.swellForecastHours = next;
+      updateSwellTimeLabel(next);
+      loadSwellForecast(false, function(ok, reason) {
+        if (!swellPlaybackActive || !mapState.swellOverlayVisible) return;
+        if (!ok) {
+          // A newer swell request can legitimately supersede this playback
+          // request after a pan/zoom refresh. That is not a failed forecast
+          // frame and must not stop the playback state machine. The newer
+          // request owns the raster/status; continue from the current hour.
+          if (reason === "superseded") {
+            swellPlaybackFailureCount = 0;
+            scheduleSwellPlaybackAdvance(1000 / Math.max(0.5, Number(swellPlaybackSpeed) || 1));
+            return;
+          }
+          if (reason === "transient" && swellPlaybackFailureCount < 2) {
+            swellPlaybackFailureCount++;
+            setSwellStatus(
+              "Swell frame +" + next + "h could not be loaded after retry; previous frame retained. Continuing playback…",
+              true
+            );
+            scheduleSwellPlaybackAdvance(1400 / Math.max(0.5, Number(swellPlaybackSpeed) || 1));
+            return;
+          }
+          stopSwellPlayback();
+          return;
+        }
+        swellPlaybackFailureCount = 0;
+        scheduleSwellPlaybackAdvance(900 / Math.max(0.5, Number(swellPlaybackSpeed) || 1));
+      });
+    }, Math.max(0, Number(delayMS) || 0));
+  }
+
+  function toggleSwellPlayback() {
+    if (!mapState.swellOverlayVisible) return;
+    if (swellPlaybackActive) {
+      stopSwellPlayback();
+      return;
+    }
+    if (map.getZoom() < swellMinPlaybackZoom) {
+      setSwellStatus("Zoom in to Zoom 4 or closer for animated swell playback.", false);
+      updateSwellMapTransport();
+      return;
+    }
+    swellPlaybackFailureCount = 0;
+    swellPlaybackActive = true;
+    updateSwellMapTransport();
+    scheduleSwellPlaybackAdvance(300 / Math.max(0.5, Number(swellPlaybackSpeed) || 1));
+  }
+
+  function setSwellToNow() {
+    commitSwellHours(0);
+  }
+
+  function stepSwellManual(direction) {
+    var current = normalizeSwellHours(mapState.swellForecastHours);
+    var step = [1,3,6].indexOf(Number(swellPlaybackStepHours)) >= 0 ? Number(swellPlaybackStepHours) : 3;
+    var next = Math.max(0, Math.min(120, current + (direction < 0 ? -step : step)));
+    commitSwellHours(next);
   }
 
   function swellHeightRGBA(meters, alpha) {
@@ -11315,11 +11747,16 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     var lonCells = Math.max(1, longitudeSpan / nativeStep);
     var latCells = Math.max(1, latitudeSpan / nativeStep);
     var stride = Math.ceil(Math.max(lonCells / 48, latCells / 32));
+    var zoom = map.getZoom();
+    if (zoom <= 3) stride = Math.max(stride, 8);
+    else if (zoom === 4) stride = Math.max(stride, 4);
+    else if (zoom === 5) stride = Math.max(stride, 2);
     return Math.max(1, Math.min(20, stride));
   }
 
 
   function clearSwellLayers() {
+    stopSwellPlayback();
     swellRequestSerial++;
     if (swellRefreshTimer) {
       window.clearTimeout(swellRefreshTimer);
@@ -11336,6 +11773,8 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     swellLoadedSegments = [];
     swellCachedResults = null;
     swellCachedHours = null;
+    swellManualLoadActive = false;
+    swellManualLoadHours = null;
     closeSwellInfoPanel();
   }
 
@@ -11771,35 +12210,71 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   }
 
 
-  function loadSwellForecast(forceRefresh) {
-    if (!mapState.swellOverlayVisible) return;
+  function fetchSwellForecastJSON(url, retriesRemaining) {
+    return fetch(url, {
+      headers:{"Accept":"application/json"},
+      cache:"no-store"
+    }).then(function(response) {
+      if (!response.ok) {
+        return response.text().then(function(detail) {
+          var error = new Error(String(detail || "HTTP " + response.status).trim());
+          error.httpStatus = response.status;
+          throw error;
+        });
+      }
+      return response.json();
+    }).catch(function(err) {
+      var status = Number(err && err.httpStatus);
+      var transient = !Number.isFinite(status) || status >= 500 || status === 429;
+      if (!transient || retriesRemaining <= 0) throw err;
+      return new Promise(function(resolve) {
+        window.setTimeout(resolve, 650);
+      }).then(function() {
+        return fetchSwellForecastJSON(url, retriesRemaining - 1);
+      });
+    });
+  }
 
-    var hours = Math.max(0, Math.min(120, Number(mapState.swellForecastHours) || 0));
+  function loadSwellForecast(forceRefresh, onComplete) {
+    if (!mapState.swellOverlayVisible) {
+      if (onComplete) onComplete(false);
+      return;
+    }
+    if (map.getZoom() < swellMinDisplayZoom) {
+      suspendSwellForWideZoom();
+      if (onComplete) onComplete(false);
+      return;
+    }
+
+    var hours = normalizeSwellHours(mapState.swellForecastHours);
     var cacheMatchesTime = swellCachedResults && swellCachedHours === hours;
 
     if (!forceRefresh && cacheMatchesTime &&
         swellSegmentsContainVisibleViewport(swellLoadedSegments)) {
       // Existing anchored raster already covers the visible map. Leave the
       // heat image untouched and only redistribute lightweight direction arrows.
-      renderSwellForecast(swellCachedResults, swellLoadedSegments, false);
+      var cacheRendered = renderSwellForecast(swellCachedResults, swellLoadedSegments, false);
+      if (onComplete) onComplete(!!cacheRendered);
       return;
     }
 
     var segments = swellViewportSegments(.38);
     if (!segments.length) {
       setSwellStatus("WaveWatch III swell data are unavailable for this latitude.", true);
+      if (onComplete) onComplete(false);
       return;
     }
 
     var commonStride = swellStrideForSegments(segments);
     var serial = ++swellRequestSerial;
-    if (cacheMatchesTime && swellCachedResults) {
-      setSwellStatus(
-        "Loading expanded swell area… showing previous coverage temporarily.",
-        false
-      );
-    } else {
-      setSwellStatus("Loading PacIOOS / NOAA WaveWatch III swell forecast…", false);
+    if (!swellPreparationBusy()) {
+      if (cacheMatchesTime && swellCachedResults) {
+        scheduleSwellLoadStatus("Loading expanded swell area… previous coverage retained.");
+      } else {
+        scheduleSwellLoadStatus(
+          hours === 0 ? "Loading swell frame · Now…" : "Loading swell frame · +" + hours + "h…"
+        );
+      }
     }
 
     var requests = segments.map(function(segment) {
@@ -11811,18 +12286,9 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
         hours:String(Math.round(hours)),
         stride:String(commonStride)
       });
+      if (forceRefresh) params.set("refresh", "1");
 
-      return fetch("/swell-forecast?" + params.toString(), {
-        headers:{"Accept":"application/json"},
-        cache:"no-store"
-      }).then(function(response) {
-        if (!response.ok) {
-          return response.text().then(function(detail) {
-            throw new Error(String(detail || "HTTP " + response.status).trim());
-          });
-        }
-        return response.json();
-      }).then(function(payload) {
+      return fetchSwellForecastJSON("/swell-forecast?" + params.toString(), 1).then(function(payload) {
         return {
           ok:true,
           result:{payload:payload, shift:segment.shift},
@@ -11841,7 +12307,13 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     });
 
     Promise.all(requests).then(function(outcomes) {
-      if (serial !== swellRequestSerial || !mapState.swellOverlayVisible) return;
+      if (serial !== swellRequestSerial || !mapState.swellOverlayVisible) {
+        clearSwellLoadStatus(false);
+        if (onComplete) onComplete(false, serial !== swellRequestSerial ? "superseded" : "hidden");
+        return;
+      }
+
+      clearSwellLoadStatus(false);
 
       var successfulResults = [];
       var successfulSegments = [];
@@ -11868,21 +12340,37 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 
       if (!successfulResults.length ||
           !successfulSwellSegmentsCoverViewport(successfulSegments)) {
-        if (cacheMatchesTime && swellCachedResults) {
-          var failureDetail = failures.length && failures[0].error &&
-            failures[0].error.message ? " " + failures[0].error.message : "";
+        var firstFailure = failures.length ? failures[0] : null;
+        var failureMessage = firstFailure && firstFailure.error && firstFailure.error.message
+          ? String(firstFailure.error.message).trim()
+          : "";
+        var failureStatus = firstFailure && firstFailure.error
+          ? Number(firstFailure.error.httpStatus)
+          : NaN;
+        var transientFailure = failures.length > 0 &&
+          (!Number.isFinite(failureStatus) || failureStatus >= 500 || failureStatus === 429);
+        var previousFrameVisible = !!swellRenderedForecastTime &&
+          swellHeatLayer && map.hasLayer(swellHeatLayer);
+
+        if (previousFrameVisible || (cacheMatchesTime && swellCachedResults)) {
+          setSwellLegendVisible(true);
           setSwellStatus(
-            "Expanded swell request failed — previous coverage shown." + failureDetail,
+            "Swell frame +" + hours + "h could not be loaded — previous frame retained." +
+            (failureMessage ? " " + failureMessage : ""),
             true
           );
+          if (onComplete) onComplete(false, transientFailure ? "transient" : "coverage");
           return;
         }
 
         setSwellLegendVisible(false);
         setSwellStatus(
-          "Global swell forecast did not return enough data to cover the visible map.",
+          failureMessage
+            ? "Global swell forecast request failed. " + failureMessage
+            : "Global swell forecast did not return enough data to cover the visible map.",
           true
         );
+        if (onComplete) onComplete(false, transientFailure ? "transient" : "coverage");
         return;
       }
 
@@ -11903,6 +12391,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
         } else {
           setSwellStatus("Swell forecast returned no usable raster.", true);
         }
+        if (onComplete) onComplete(false, "render");
         return;
       }
 
@@ -11912,22 +12401,33 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 
       if (failures.length) {
         setSwellStatus(
-          "Swell forecast loaded for the visible map; " +
+          "Swell loaded; " +
           failures.length + " optional padded segment" +
           (failures.length === 1 ? "" : "s") +
           " could not be loaded.",
           false
         );
+      } else {
+        clearSwellLoadStatus(true);
       }
+      if (onComplete) onComplete(true);
     }).catch(function(err) {
-      if (serial !== swellRequestSerial || !mapState.swellOverlayVisible) return;
+      clearSwellLoadStatus(false);
+      if (serial !== swellRequestSerial || !mapState.swellOverlayVisible) {
+        if (onComplete) onComplete(false, serial !== swellRequestSerial ? "superseded" : "hidden");
+        return;
+      }
 
-      if (cacheMatchesTime && swellCachedResults) {
+      var previousFrameVisible = !!swellRenderedForecastTime &&
+        swellHeatLayer && map.hasLayer(swellHeatLayer);
+      if (previousFrameVisible || (cacheMatchesTime && swellCachedResults)) {
+        setSwellLegendVisible(true);
         setSwellStatus(
-          "Expanded swell request failed — previous coverage shown. " +
+          "Swell frame +" + hours + "h could not be loaded — previous frame retained. " +
           (err && err.message ? err.message : "Unknown error."),
           true
         );
+        if (onComplete) onComplete(false, "transient");
         return;
       }
 
@@ -11937,12 +12437,19 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
         (err && err.message ? err.message : "unknown error"),
         true
       );
+      if (onComplete) onComplete(false, "transient");
     });
   }
 
 
   function scheduleSwellRefresh() {
     if (!mapState.swellOverlayVisible) return;
+    if (map.getZoom() < swellMinDisplayZoom) {
+      suspendSwellForWideZoom();
+      return;
+    }
+    if (map.getZoom() < swellMinPlaybackZoom && swellPlaybackActive) stopSwellPlayback();
+    updateSwellMapTransport();
     if (swellRefreshTimer) window.clearTimeout(swellRefreshTimer);
     swellRefreshTimer = window.setTimeout(function() {
       swellRefreshTimer = null;
@@ -11950,15 +12457,307 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     }, 280);
   }
 
+  function primeSwellPlaybackCache(forceRefresh, retryMissingOnly, onProgress, onComplete) {
+    if (!mapState.swellOverlayVisible || map.getZoom() < swellMinDisplayZoom) {
+      if (onComplete) onComplete(false, 0, 0, []);
+      return;
+    }
+
+    var segments = swellViewportSegments(.38);
+    if (!segments.length) {
+      if (onComplete) onComplete(false, 0, 0, []);
+      return;
+    }
+
+    var commonStride = swellStrideForSegments(segments);
+    var step = [1,3,6].indexOf(Number(swellPlaybackStepHours)) >= 0
+      ? Number(swellPlaybackStepHours)
+      : 3;
+    var sequenceHours = [];
+    for (var hours = 0; hours <= 120; hours += step) {
+      sequenceHours.push(hours);
+    }
+
+    var frameTotal = sequenceHours.length;
+    var currentHours = normalizeSwellHours(mapState.swellForecastHours);
+    var primeKey = swellPrimeViewportKey(step, segments, commonStride);
+    var successfulHours = {};
+    var targetHours = [];
+
+    if (retryMissingOnly && swellPrimeRetryState &&
+        swellPrimeRetryState.key === primeKey &&
+        swellPrimeRetryState.failedHours &&
+        swellPrimeRetryState.failedHours.length) {
+      Object.keys(swellPrimeRetryState.successfulHours || {}).forEach(function(key) {
+        successfulHours[key] = true;
+      });
+      targetHours = swellPrimeRetryState.failedHours.slice();
+    } else {
+      swellPrimeRetryState = null;
+      if (sequenceHours.indexOf(currentHours) >= 0) {
+        successfulHours[currentHours] = true;
+      }
+      targetHours = sequenceHours.filter(function(hours) {
+        return hours !== currentHours;
+      });
+    }
+
+    var jobs = [];
+    targetHours.forEach(function(hours) {
+      segments.forEach(function(segment) {
+        jobs.push({hours:hours, segment:segment});
+      });
+    });
+
+    var hourState = {};
+    targetHours.forEach(function(hours) {
+      hourState[hours] = {remaining:segments.length, failed:false};
+      delete successfulHours[hours];
+    });
+
+    var nextJob = 0;
+    var active = 0;
+    var activeHours = {};
+    var finished = false;
+    var concurrency = 2;
+
+    function sortedNumberKeys(obj) {
+      return Object.keys(obj || {}).map(Number).filter(Number.isFinite).sort(function(a,b){ return a-b; });
+    }
+
+    function currentFailedHours() {
+      return targetHours.filter(function(hours) {
+        var state = hourState[hours];
+        return state && state.remaining === 0 && state.failed;
+      }).sort(function(a,b){ return a-b; });
+    }
+
+    function completedFrameCount() {
+      return Math.min(frameTotal, Object.keys(successfulHours).length);
+    }
+
+    function reportProgress() {
+      if (onProgress) {
+        onProgress(
+          completedFrameCount(),
+          frameTotal,
+          step,
+          sortedNumberKeys(activeHours),
+          currentFailedHours()
+        );
+      }
+    }
+
+    function finishIfDone() {
+      if (finished || active > 0 || nextJob < jobs.length) return;
+      finished = true;
+      var failedHours = currentFailedHours();
+      swellPrimeRetryState = {
+        key:primeKey,
+        step:step,
+        total:frameTotal,
+        successfulHours:successfulHours,
+        failedHours:failedHours
+      };
+      var done = completedFrameCount();
+      if (onComplete) onComplete(failedHours.length === 0 && done === frameTotal, done, frameTotal, failedHours);
+    }
+
+    function settleHour(jobHours, ok) {
+      var state = hourState[jobHours];
+      if (!state) return;
+      if (!ok) state.failed = true;
+      state.remaining = Math.max(0, state.remaining - 1);
+      if (state.remaining === 0) {
+        delete activeHours[jobHours];
+        if (state.failed) {
+          delete successfulHours[jobHours];
+        } else {
+          successfulHours[jobHours] = true;
+        }
+      }
+    }
+
+    function launchMore() {
+      if (finished || !mapState.swellOverlayVisible) {
+        if (!finished) {
+          finished = true;
+          if (onComplete) onComplete(false, completedFrameCount(), frameTotal, currentFailedHours());
+        }
+        return;
+      }
+
+      while (active < concurrency && nextJob < jobs.length) {
+        var job = jobs[nextJob++];
+        active++;
+        activeHours[job.hours] = true;
+        reportProgress();
+
+        var params = new URLSearchParams({
+          west:job.segment.west.toFixed(2),
+          south:job.segment.south.toFixed(2),
+          east:job.segment.east.toFixed(2),
+          north:job.segment.north.toFixed(2),
+          hours:String(job.hours),
+          stride:String(commonStride),
+          prime:"1"
+        });
+        if (forceRefresh) params.set("refresh", "1");
+
+        (function(jobHours) {
+          fetchSwellForecastJSON("/swell-forecast?" + params.toString(), 1)
+            .then(function() {
+              settleHour(jobHours, true);
+            })
+            .catch(function() {
+              settleHour(jobHours, false);
+            })
+            .then(function() {
+              active--;
+              reportProgress();
+              launchMore();
+              finishIfDone();
+            });
+        })(job.hours);
+      }
+
+      finishIfDone();
+    }
+
+    reportProgress();
+    launchMore();
+  }
+
+  function prepareSwellOverlay(options) {
+    options = options || {};
+    var forceRefresh = !!options.forceRefresh;
+    var allowRetry = options.allowRetry !== false;
+
+    if (!mapState.swellOverlayVisible || swellPreparationBusy()) return;
+    if (map.getZoom() < swellMinDisplayZoom) {
+      setSwellPreparationState(
+        "idle",
+        "Swell enabled · zoom in to Zoom 3 or closer to prepare the forecast.",
+        "ready"
+      );
+      return;
+    }
+
+    setSwellPreparationState(
+      "loading-current",
+      "Loading current swell frame · preparing " + swellPlaybackStepHours + "h playback cache…",
+      "working"
+    );
+
+    function finishCurrentFrame(ok, reason, retryAttempt) {
+      if (!mapState.swellOverlayVisible) {
+        setSwellPreparationState("idle", "", "");
+        return;
+      }
+
+      if (ok) {
+        setSwellPreparationState(
+          "priming-playback",
+          "Preparing swell playback cache…",
+          "working"
+        );
+        primeSwellPlaybackCache(
+          forceRefresh,
+          false,
+          function(done, total, step, activeHours, failedHours) {
+            if (!mapState.swellOverlayVisible) return;
+            var activeText = activeHours && activeHours.length
+              ? " · fetching " + activeHours.map(function(h) { return "+" + h + "h"; }).join(", ")
+              : "";
+            var failedText = failedHours && failedHours.length
+              ? " · failed " + failedHours.map(function(h) { return "+" + h + "h"; }).join(", ")
+              : "";
+            setSwellPreparationState(
+              "priming-playback",
+              "Preparing " + step + "h playback cache · " + done + " of " + total +
+                activeText + failedText + "…",
+              "working"
+            );
+          },
+          function(primeOK, done, total, failedHours) {
+            if (!mapState.swellOverlayVisible) {
+              swellManualReloadActive = false;
+              setSwellPreparationState("idle", "", "");
+              return;
+            }
+            swellManualReloadActive = false;
+            if (primeOK) {
+              setSwellPreparationState("ready", "Swell ready.", "ready");
+            } else {
+              var failedText = failedHours && failedHours.length
+                ? " · failed: " + failedHours.map(function(h) { return "+" + h + "h"; }).join(", ")
+                : "";
+              setSwellPreparationState(
+                "error",
+                "Playback cache incomplete · " + done + " of " + total +
+                  " frames cached" + failedText + ".",
+                "error"
+              );
+            }
+          }
+        );
+        return;
+      }
+
+      if (reason === "superseded") {
+        swellManualReloadActive = false;
+        setSwellPreparationState(
+          "error",
+          "Map view changed before preparation finished · reload swell cache.",
+          "error"
+        );
+        return;
+      }
+
+      if (allowRetry && reason === "transient" && retryAttempt < 1) {
+        setSwellPreparationState(
+          "loading-current",
+          "Temporary upstream error · retrying current swell frame…",
+          "working"
+        );
+        window.setTimeout(function() {
+          if (!mapState.swellOverlayVisible) {
+            setSwellPreparationState("idle", "", "");
+            return;
+          }
+          loadSwellForecast(true, function(retryOK, retryReason) {
+            finishCurrentFrame(retryOK, retryReason, retryAttempt + 1);
+          });
+        }, 850);
+        return;
+      }
+
+      swellManualReloadActive = false;
+      setSwellPreparationState(
+        "error",
+        "Current swell could not be loaded · no cache available.",
+        "error"
+      );
+    }
+
+    loadSwellForecast(forceRefresh, function(ok, reason) {
+      finishCurrentFrame(ok, reason, 0);
+    });
+  }
+
   function setSwellVisible(visible) {
     mapState.swellOverlayVisible = !!visible;
-    var controls = document.getElementById("map-swell-controls");
-    if (controls) controls.hidden = !mapState.swellOverlayVisible;
+    updateSwellMapTransport();
+
     if (!mapState.swellOverlayVisible) {
+      setSwellPreparationState("idle", "", "");
+      if (swellCacheReloadButton) swellCacheReloadButton.hidden = true;
       clearSwellLayers();
       return;
     }
-    loadSwellForecast();
+
+    setSwellPreparationState("idle", "", "");
+    prepareSwellOverlay({forceRefresh:false, allowRetry:true});
   }
 
   function marineZoneStyle() {
@@ -13214,6 +14013,125 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   var swellCheckbox = document.getElementById("map-show-swell");
   var swellHours = document.getElementById("map-swell-hours");
   var swellTime = document.getElementById("map-swell-time");
+  var swellPrimeStatus = document.getElementById("map-swell-prime-status");
+
+  function setSwellPrimeStatus(message, state) {
+    if (!swellPrimeStatus) return;
+    var value = String(message || "").trim();
+    swellPrimeStatus.textContent = value;
+    swellPrimeStatus.hidden = !value;
+    if (value) {
+      swellPrimeStatus.setAttribute("data-state", String(state || "working"));
+    } else {
+      swellPrimeStatus.removeAttribute("data-state");
+    }
+  }
+
+  var swellCacheReloadButton = document.getElementById("map-swell-cache-reload");
+  var swellPreparationState = "idle";
+  var swellManualReloadActive = false;
+  var swellPrimeRetryState = null;
+
+  function swellPrimeViewportKey(step, segments, stride) {
+    return [
+      String(step),
+      String(stride),
+      segments.map(function(segment) {
+        return [
+          Number(segment.west).toFixed(2),
+          Number(segment.south).toFixed(2),
+          Number(segment.east).toFixed(2),
+          Number(segment.north).toFixed(2)
+        ].join(",");
+      }).join("|")
+    ].join("::");
+  }
+
+  function retryMissingSwellCache() {
+    if (!swellPrimeRetryState || !swellPrimeRetryState.failedHours ||
+        !swellPrimeRetryState.failedHours.length) return false;
+
+    swellManualReloadActive = true;
+    setSwellPreparationState(
+      "priming-playback",
+      "Retrying missing " + swellPrimeRetryState.step + "h cache frames…",
+      "working"
+    );
+
+    primeSwellPlaybackCache(
+      true,
+      true,
+      function(done, total, step, activeHours, failedHours) {
+        var activeText = activeHours && activeHours.length
+          ? " · fetching " + activeHours.map(function(h) { return "+" + h + "h"; }).join(", ")
+          : "";
+        var failedText = failedHours && failedHours.length
+          ? " · still missing " + failedHours.map(function(h) { return "+" + h + "h"; }).join(", ")
+          : "";
+        setSwellPreparationState(
+          "priming-playback",
+          "Retrying " + step + "h cache · " + done + " of " + total + activeText + failedText + "…",
+          "working"
+        );
+      },
+      function(primeOK, done, total, failedHours) {
+        swellManualReloadActive = false;
+        if (primeOK) {
+          setSwellPreparationState("ready", "Swell ready.", "ready");
+          return;
+        }
+        var failedText = failedHours && failedHours.length
+          ? " · failed: " + failedHours.map(function(h) { return "+" + h + "h"; }).join(", ")
+          : "";
+        setSwellPreparationState(
+          "error",
+          "Playback cache incomplete · " + done + " of " + total + " frames cached" + failedText + ".",
+          "error"
+        );
+      }
+    );
+    return true;
+  }
+
+  function reloadSwellCache(event) {
+    if (event) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    if (!mapState.swellOverlayVisible || swellPreparationBusy()) return;
+    if (retryMissingSwellCache()) return;
+    swellManualReloadActive = true;
+    prepareSwellOverlay({forceRefresh:true, allowRetry:true});
+  }
+
+  if (swellCacheReloadButton) {
+    swellCacheReloadButton.addEventListener("click", reloadSwellCache);
+  }
+
+  function swellPreparationBusy() {
+    return swellPreparationState === "loading-current" ||
+      swellPreparationState === "priming-playback";
+  }
+
+  function setSwellPreparationState(state, message, tone) {
+    swellPreparationState = String(state || "idle");
+    var visible = !!mapState.swellOverlayVisible;
+    var busy = swellPreparationBusy();
+
+    if (swellPrimeStatus) {
+      swellPrimeStatus.setAttribute("data-preparation-state", swellPreparationState);
+    }
+    if (swellCacheReloadButton) {
+      swellCacheReloadButton.setAttribute("data-preparation-state", swellPreparationState);
+      swellCacheReloadButton.hidden = !visible;
+      swellCacheReloadButton.disabled = busy;
+      swellCacheReloadButton.textContent =
+        busy && swellManualReloadActive ? "Reloading…" : "Reload swell cache";
+    }
+
+    setSwellPrimeStatus(message || "", tone || (busy ? "working" : ""));
+    updateSwellMapTransport();
+  }
 
   var swellInfoClose = document.getElementById("map-swell-info-panel-close");
   if (swellInfoClose) {
@@ -13223,13 +14141,22 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     });
   }
 
-  function updateSwellTimeLabel(previewHours) {
-    if (!swellTime || !swellHours) return;
+  function syncSwellSliders(hours) {
+    var normalized = normalizeSwellHours(hours);
+    if (swellHours) swellHours.value = String(normalized);
+    var mapHours = document.getElementById("map-swell-map-hours");
+    if (mapHours) mapHours.value = String(normalized);
+  }
 
-    var committedHours = Number(mapState.swellForecastHours) || 0;
+  function updateSwellTimeLabel(previewHours) {
+    if (!swellTime) return;
+
+    var mapHours = document.getElementById("map-swell-map-hours");
+    var committedHours = normalizeSwellHours(mapState.swellForecastHours);
     var hours = Number.isFinite(Number(previewHours))
-      ? Number(previewHours)
-      : Number(swellHours.value) || 0;
+      ? normalizeSwellHours(previewHours)
+      : normalizeSwellHours(mapHours ? mapHours.value : mapState.swellForecastHours);
+    syncSwellSliders(hours);
     var offsetText = hours === 0 ? "Now" : "+" + hours + "h";
     var validDate = null;
 
@@ -13258,25 +14185,74 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     swellTime.textContent = hours === 0
       ? "Selected: Now · " + validText
       : "Selected: " + offsetText + " · " + validText;
+    updateSwellMapTransport(hours);
+  }
+
+  function previewSwellHours(value) {
+    stopSwellPlayback();
+    updateSwellTimeLabel(normalizeSwellHours(value));
+  }
+
+  function commitSwellHours(value) {
+    if (swellManualLoadActive) return false;
+    stopSwellPlayback();
+    var nextHours = normalizeSwellHours(value);
+    var changed = nextHours !== normalizeSwellHours(mapState.swellForecastHours);
+    mapState.swellForecastHours = nextHours;
+    updateSwellTimeLabel(nextHours);
+    if (!changed || !mapState.swellOverlayVisible) {
+      updateSwellMapTransport();
+      return false;
+    }
+
+    swellManualLoadActive = true;
+    swellManualLoadHours = nextHours;
+    updateSwellMapTransport();
+    loadSwellForecast(false, function() {
+      swellManualLoadActive = false;
+      swellManualLoadHours = null;
+      updateSwellMapTransport();
+    });
+    return true;
+  }
+
+  function swellSliderCommitKey(event) {
+    if (!event) return false;
+    return ["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","PageUp","PageDown","Home","End"].indexOf(event.key) >= 0;
+  }
+
+  function installSwellSliderHandlers(slider) {
+    if (!slider) return;
+    slider.step = "1";
+    slider.value = String(normalizeSwellHours(mapState.swellForecastHours));
+
+    slider.addEventListener("input", function(event) {
+      if (event) event.stopPropagation();
+      // Preview immediately while dragging. The active WW3 frame is committed
+      // on release/change/keyboard completion so scrubbing remains responsive.
+      previewSwellHours(slider.value);
+    });
+
+    function commitCurrent(event) {
+      if (event) event.stopPropagation();
+      commitSwellHours(slider.value);
+    }
+
+    // Some browser/range-input combinations do not reliably deliver the change event
+    // from an over-map slider. Commit on the physical release paths as well.
+    slider.addEventListener("change", commitCurrent);
+    slider.addEventListener("pointerup", commitCurrent);
+    slider.addEventListener("mouseup", commitCurrent);
+    slider.addEventListener("touchend", commitCurrent);
+    slider.addEventListener("blur", commitCurrent);
+    slider.addEventListener("keyup", function(event) {
+      if (swellSliderCommitKey(event)) commitCurrent(event);
+    });
   }
 
   if (swellHours) {
-    swellHours.value = String(mapState.swellForecastHours || 0);
+    installSwellSliderHandlers(swellHours);
     updateSwellTimeLabel();
-
-    swellHours.addEventListener("input", function() {
-      // Preview only while dragging. Do not mutate active swell forecast state
-      // and do not initiate data work until the user commits the slider value.
-      updateSwellTimeLabel(Number(swellHours.value) || 0);
-    });
-
-    swellHours.addEventListener("change", function() {
-      var nextHours = Number(swellHours.value) || 0;
-      var changed = nextHours !== Number(mapState.swellForecastHours || 0);
-      mapState.swellForecastHours = nextHours;
-      updateSwellTimeLabel(nextHours);
-      if (changed && mapState.swellOverlayVisible) loadSwellForecast(true);
-    });
   }
 
   if (swellCheckbox) {
@@ -13286,6 +14262,71 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     });
   }
 
+  var swellMapPlay = document.getElementById("map-swell-map-play");
+  if (swellMapPlay) {
+    swellMapPlay.addEventListener("click", function(event) {
+      if (event) event.stopPropagation();
+      toggleSwellPlayback();
+    });
+  }
+
+  var swellMapNow = document.getElementById("map-swell-map-now");
+  if (swellMapNow) {
+    swellMapNow.addEventListener("click", function(event) {
+      if (event) event.stopPropagation();
+      setSwellToNow();
+    });
+  }
+
+  var swellMapPrev = document.getElementById("map-swell-map-prev");
+  if (swellMapPrev) {
+    swellMapPrev.addEventListener("click", function(event) {
+      if (event) event.stopPropagation();
+      stepSwellManual(-1);
+    });
+  }
+
+  var swellMapNext = document.getElementById("map-swell-map-next");
+  if (swellMapNext) {
+    swellMapNext.addEventListener("click", function(event) {
+      if (event) event.stopPropagation();
+      stepSwellManual(1);
+    });
+  }
+
+  var swellMapHours = document.getElementById("map-swell-map-hours");
+  if (swellMapHours) {
+    installSwellSliderHandlers(swellMapHours);
+  }
+
+  var swellPlaybackStepSelect = document.getElementById("map-swell-playback-step");
+  if (swellPlaybackStepSelect) {
+    swellPlaybackStepSelect.value = String(swellPlaybackStepHours);
+    swellPlaybackStepSelect.addEventListener("change", function(event) {
+      if (event) event.stopPropagation();
+      var nextStep = Number(swellPlaybackStepSelect.value);
+      stopSwellPlayback();
+      swellPlaybackStepHours = [1,3,6].indexOf(nextStep) >= 0 ? nextStep : 3;
+      swellPrimeRetryState = null;
+      updateSwellMapTransport();
+      if (mapState.swellOverlayVisible && !swellPreparationBusy()) {
+        prepareSwellOverlay({forceRefresh:false, allowRetry:true});
+      }
+    });
+  }
+
+  var swellPlaybackSpeedSelect = document.getElementById("map-swell-playback-speed");
+  if (swellPlaybackSpeedSelect) {
+    swellPlaybackSpeedSelect.value = String(swellPlaybackSpeed);
+    swellPlaybackSpeedSelect.addEventListener("change", function(event) {
+      if (event) event.stopPropagation();
+      var nextSpeed = Number(swellPlaybackSpeedSelect.value);
+      swellPlaybackSpeed = nextSpeed === 0.5 || nextSpeed === 2 ? nextSpeed : 1;
+      updateSwellMapTransport();
+    });
+  }
+  updateSwellMapTransport();
+
   var airTemperatureCheckbox = document.getElementById("map-show-air-temperature");
   if (airTemperatureCheckbox) {
     airTemperatureCheckbox.checked = !!mapState.airTemperatureOverlayVisible;
@@ -13294,13 +14335,31 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     });
   }
 
-  var airTemperatureHours = document.getElementById("map-air-temperature-hours");
+  var airTemperatureMapHours = document.getElementById("map-air-temperature-map-hours");
+  var airTemperatureMapRangeEnd = document.getElementById("map-air-temperature-map-range-end");
+
+  function syncAirTemperatureSliders(hours) {
+    var value = Math.max(0, Math.min(
+      Math.max(3, Number(airTemperaturePlaybackRangeHours) || 24),
+      Math.round((Number(hours) || 0) * 4) / 4
+    ));
+    if (airTemperatureMapHours) airTemperatureMapHours.value = String(value);
+  }
+
+  function updateAirTemperatureFooterScale(hours) {
+    var range = Math.max(3, Math.min(24, Number(airTemperaturePlaybackRangeHours) || 24));
+    if (airTemperatureMapHours) {
+      airTemperatureMapHours.max = String(range);
+      airTemperatureMapHours.value = String(Math.max(0, Math.min(range, Number(hours) || 0)));
+    }
+    if (airTemperatureMapRangeEnd) airTemperatureMapRangeEnd.textContent = "+" + range + "h";
+  }
 
   function commitAirTemperatureHours(next) {
     var maxHours=Math.max(3,Number(airTemperaturePlaybackRangeHours)||24);
     next=Math.max(0,Math.min(maxHours,Math.round(Number(next)*4)/4));
     stopAirTemperaturePlayback();
-    if (airTemperatureHours) airTemperatureHours.value=String(next);
+    syncAirTemperatureSliders(next);
     mapState.airTemperatureForecastHours=next;
     airTemperatureForecastDisplayHours=next;
     hideAirTemperaturePointerTooltip();
@@ -13317,7 +14376,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     if (!key && event.keyCode===36) key="Home";
     if (!key && event.keyCode===35) key="End";
     if (key!=="ArrowLeft" && key!=="ArrowRight" && key!=="Home" && key!=="End") return false;
-    var current=Number(airTemperatureHours ? airTemperatureHours.value : airTemperatureForecastDisplayHours)||0;
+    var current=Number(airTemperatureMapHours ? airTemperatureMapHours.value : airTemperatureForecastDisplayHours)||0;
     var maxHours=Math.max(3,Number(airTemperaturePlaybackRangeHours)||24);
     var next=current;
     if (key==="ArrowLeft") next=Math.max(0,current-0.25);
@@ -13331,40 +14390,24 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     return true;
   }
 
-  if (airTemperatureHours) {
-    airTemperatureHours.value = String(mapState.airTemperatureForecastHours || 0);
-    updateAirTemperatureForecastTimeLabel();
+  if (airTemperatureMapHours) {
+    airTemperatureMapHours.value = String(mapState.airTemperatureForecastHours || 0);
+    updateAirTemperatureFooterScale(mapState.airTemperatureForecastHours || 0);
     ["pointerdown","mousedown","touchstart"].forEach(function(name){
-      airTemperatureHours.addEventListener(name,function(){
+      airTemperatureMapHours.addEventListener(name,function(){
         window.setTimeout(function(){
-          try { airTemperatureHours.focus({preventScroll:true}); } catch (_) { try { airTemperatureHours.focus(); } catch (_) {} }
+          try { airTemperatureMapHours.focus({preventScroll:true}); } catch (_) { try { airTemperatureMapHours.focus(); } catch (_) {} }
         },0);
       },{passive:true});
     });
-    airTemperatureHours.addEventListener("input", function() {
+    airTemperatureMapHours.addEventListener("input", function() {
       stopAirTemperaturePlayback();
-      updateAirTemperatureForecastTimeLabel(Number(airTemperatureHours.value) || 0);
+      updateAirTemperatureForecastTimeLabel(Number(airTemperatureMapHours.value) || 0);
     });
-    airTemperatureHours.addEventListener("change", function() {
-      commitAirTemperatureHours(Number(airTemperatureHours.value)||0);
+    airTemperatureMapHours.addEventListener("change", function() {
+      commitAirTemperatureHours(Number(airTemperatureMapHours.value) || 0);
     });
-    airTemperatureHours.addEventListener("keydown", stepAirTemperatureHoursFromKey, true);
-    // Leaflet/Safari can intercept range-input arrow keys before the bubble
-    // phase when the control lives inside the map UI. Capture them at document
-    // level whenever the slider owns focus.
-    document.addEventListener("keydown",function(event){
-      if (document.activeElement!==airTemperatureHours && event.target!==airTemperatureHours) return;
-      stepAirTemperatureHoursFromKey(event);
-    },true);
-  }
-
-  var airTemperaturePlay = document.getElementById("map-air-temperature-play");
-  if (airTemperaturePlay) {
-    updateAirTemperaturePlaybackButton();
-    airTemperaturePlay.addEventListener("click", function() {
-      if (airTemperaturePlaybackActive) stopAirTemperaturePlayback();
-      else startAirTemperaturePlayback();
-    });
+    airTemperatureMapHours.addEventListener("keydown", stepAirTemperatureHoursFromKey, true);
   }
 
   var airTemperatureNow = document.getElementById("map-air-temperature-now");
@@ -13403,8 +14446,11 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   if (airTemperatureRange) airTemperatureRange.addEventListener("change", function() {
     var range = Number(airTemperatureRange.value);
     airTemperaturePlaybackRangeHours = range===6 || range===12 ? range : 24;
+    updateAirTemperatureFooterScale(mapState.airTemperatureForecastHours || 0);
     if (Number(mapState.airTemperatureForecastHours||0) > airTemperaturePlaybackRangeHours) {
       commitAirTemperatureHours(airTemperaturePlaybackRangeHours);
+    } else {
+      syncAirTemperatureSliders(mapState.airTemperatureForecastHours || 0);
     }
   });
 

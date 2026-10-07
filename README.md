@@ -7,7 +7,7 @@ The default wind station is **PSBC1**.
 ## Current release
 
 **Public version: 1.14.0**  
-**Generated source lineage: v337**
+**Generated source lineage: v364**
 
 **Current SST status:** deferred/disabled in v195; see **Deferred SST — future approach** below.
 **Current chlorophyll status:** both Chlorophyll Field and Chlorophyll Contours are deferred/disabled in v198.
@@ -17,6 +17,626 @@ Version 1.9.2 builds on the streamlined browser workflow with clearer observatio
 
 
 
+
+
+
+## v364 / 1.14.0 durable missing-frame retry smoke test
+
+- Advances the generated development build to **v364** while retaining public/application version **1.14.0**.
+- No functional Swell or Air Temperature application behavior changes from v363.
+- Removes the brittle smoke-test requirement to observe the short-lived **Retrying 6h cache…** label after clicking Reload on an incomplete cache.
+- The retry regression now verifies only durable outcomes: the missing +60h frame is requested again, an already cached +6h frame is not re-requested, and the cache returns to **Swell ready.**
+- Keeps the v363 application behavior intact: active cache hours are shown during long preparation, failed hours are identified, Reload retries only missing frames after an incomplete build, and automatic preparation does not mislabel the button as **Reloading…**.
+- `main.go` candidate SHA-256: `824e5246276f4003cca1c071643faab8f7cd787a9083857da9a16bd9d951d3ec`.
+- v364 UI smoke-test SHA-256: `ab77d5d385957a3158c3037e4bb2ba41d6b80e5a7b7b601ba2896e61a83ed0af`.
+
+## v363 / 1.14.0 swell cache progress and missing-frame retry
+
+- Advances the generated development build to **v363** while retaining public/application version **1.14.0**.
+- Makes long cache preparation visibly specific instead of appearing stalled. The footer now reports active forecast hours, for example **Preparing 3h playback cache · 31 of 41 · fetching +93h, +96h…**.
+- Tracks cache completion by forecast hour across all viewport segments. A frame is counted as cached only after all required segments for that hour succeed.
+- When one or more frames fail, the final footer status identifies the missing hours, for example **Playback cache incomplete · 39 of 41 frames cached · failed: +93h, +111h.**
+- **Reload swell cache** now retries only the missing forecast hours after an incomplete cache build, preserving successful cached frames instead of rebuilding the entire selected-step sequence.
+- Missing-frame retry progress stays in the footer and identifies active/still-missing hours.
+- The Reload button remains labeled **Reload swell cache** during automatic cache preparation. It changes to **Reloading…** only for a reload explicitly initiated by the user.
+- A normal Reload when there is no incomplete cache still performs the existing full forced refresh/rebuild.
+- Existing v361/v362 behavior remains: playback uses the completed server cache, Swell operational status stays below the map, and Air Temperature has a single below-map timeline.
+- The v363 smoke test deliberately fails +60h during a 6h cache build, verifies the missing hour is identified, then verifies Reload retries +60h without re-requesting an already cached +6h frame.
+- `main.go` candidate SHA-256: `5d070f62841b8eca3c59569311f7cf94544e07ce3147518d3239eff45071e632`.
+- v363 UI smoke-test SHA-256: `d86531b4e1047aedc56a6fe31df0a7d5c64658c287de9e4842e8ee74f58eafff`.
+
+## v362 / 1.14.0 single air-temperature timeline
+
+- Advances the generated development build to **v362** while retaining public/application version **1.14.0**.
+- Removes the redundant Air Temperature forecast-time slider from **Map Overlays**.
+- Removes the redundant Air Temperature Play button from **Map Overlays** as part of the same cleanup; the below-map Air Temperature transport is now the sole playback/timeline interface.
+- The Weather & Hazards overlay panel now contains only the Air Temperature enable checkbox plus a short note pointing users to the below-map controls.
+- The below-map Air Temperature transport remains unchanged functionally: NOW / Previous / Play / Next, Speed, Range, the 15-minute timeline slider, and the canonical Air Temperature status line all remain there.
+- Simplifies the JavaScript by removing the dead overlay-slider synchronization/listener path and making `map-air-temperature-map-hours` the authoritative temperature timeline control.
+- The v362 smoke test verifies the redundant overlay Air Temperature slider and Play button are absent while the below-map timeline remains present.
+- All v361 Swell cache/status/playback changes remain unchanged.
+- `main.go` candidate SHA-256: `1c8db4f1e25645164fbae8f6a9fabfc750c3afd80b78073d152ce7a692af600e`.
+- v362 UI smoke-test SHA-256: `a1337bdf1286ca2ba5cbe7abedf38e4bdda8a03c9318f7a4c472e0ca20431c78`.
+
+## v361 / 1.14.0 unified swell status and cached playback
+
+- Advances the generated development build to **v361** while retaining public/application version **1.14.0**.
+- Consolidates all visible Swell operational status into the below-map Swell control area. The old lower-page `map-swell-status` node remains only as a permanently hidden compatibility/diagnostic node.
+- Removes the misleading visible message **Loading PacIOOS / NOAA WaveWatch III swell forecast…**. Frame loads now use a neutral footer message such as **Loading swell frame · +18h…** only when a request lasts long enough to be noticeable.
+- Adds a 300 ms delayed frame-load indicator so fast server-cache hits do not flash transient loading text. Successful frame loads restore **Swell ready.** in the footer.
+- Cache preparation status remains persistent in the same footer row, including selected cadence progress such as **Preparing swell playback cache · 12 of 21 frames (6h step)…**.
+- Playback and manual NOW / Previous / Next / slider navigation no longer force `refresh=1`. Once the selected-step sequence has been primed, those actions use the server cache instead of deliberately bypassing it and re-fetching PacIOOS.
+- **Reload swell cache** remains the explicit force-refresh operation and still rebuilds the selected-step cache.
+- The v360 Step-selection fix is retained: 1h, 3h, and 6h selections are captured before playback shutdown refreshes the transport.
+- The v361 smoke test verifies the legacy lower-page status is hidden, verifies 6h selection and full 6h cache preparation, and verifies playback requests do not force-refresh the completed cache.
+- `main.go` candidate SHA-256: `054a9f8dfe45870f640f7266ea328bedbbf8811955961d0f28522e87f80823a8`.
+- v361 UI smoke-test SHA-256: `4e53e2aa29d40bfcdbe11ba7d7b7813d7ef973a1de5546d87e2eae18afc844bd`.
+
+## v360 / 1.14.0 swell Step selection regression fix
+
+- Advances the generated development build to **v360** while retaining public/application version **1.14.0**.
+- Fixes the Step selector regression introduced by the v359 UX consolidation.
+- Root cause: the Step change handler called `stopSwellPlayback()` before reading the newly selected value. `stopSwellPlayback()` refreshes the transport, which rewrote the selector from the old `swellPlaybackStepHours` value (typically 3h), so a user selection of 1h was immediately lost.
+- v360 captures the selected Step first, then stops playback, then commits that captured value to `swellPlaybackStepHours`.
+- The complete selected-step cache rebuild, below-map progress/Reload controls, and Play gating remain unchanged.
+- The v360 smoke test retains the direct regression assertion that selecting 1h must stick before validating the full hourly cache and readiness state.
+- `main.go` candidate SHA-256: `77434b396ee8af8e6435773fdf98a8a9fa6bc7bae175e35a9fc465ff59485466`.
+- v360 UI smoke-test SHA-256: `365f5d39d27d487e7cb6c0ef9921c744459caa484bdc5eac791fc483504c3786`.
+
+## v359 / 1.14.0 consolidated swell playback and cache UX
+
+- Advances the generated development build to **v359** while retaining public/application version **1.14.0**.
+- Removes the redundant Swell forecast-time slider and selected-time controls from the **Map Overlays** popup. Surf & Swell configuration there is reduced to the enable checkbox plus a short note pointing users to the below-map controls.
+- Moves the live playback-cache progress/status and **Reload swell cache** button into the below-map Swell transport, directly beneath the forecast timeline and selected forecast-time status.
+- Expands the Swell transport to a fixed four-row layout: playback controls, timeline slider, selected forecast time, then cache progress + Reload.
+- Changing Step now stops any active playback, starts the complete selected-step cache build, and exposes that progress in the same below-map control area.
+- **Play is disabled unless the selected-step playback cache state is `ready`.** Manual timeline controls and the map slider are also disabled while cache preparation is actively loading/priming, preventing the appearance of playback hanging while a new cache is still being built.
+- When the selected Step cache completes, Play becomes available automatically without requiring the Map Overlays popup to be reopened.
+- Existing v358 complete 0–120 hour selected-step caching, bounded two-request priming queue, non-destructive refresh behavior, stale exact-key fallback, and PacIOOS timeout hardening remain unchanged.
+- The v359 smoke test verifies the overlay popup no longer contains the redundant Swell slider, verifies cache progress and Reload are children of the below-map Swell control area, verifies Play is disabled while the 1-hour cache is building, and waits for cache readiness before exercising hourly playback.
+- `main.go` candidate SHA-256: `c051b83cf60f5d44ba14848cd6d47d89396e6664e3d0c6ce5f5db01c1d83f987`.
+- v359 UI smoke-test SHA-256: `4483f6a09e30625ac2082ad32ff9b1f92fb88d96800feb2860fb624b0fc5f718`.
+
+## v358 / 1.14.0 complete selected-step swell playback cache
+
+- Advances the generated development build to **v358** while retaining public/application version **1.14.0**.
+- Changes the meaning of **Swell ready.** so it now means the complete **0–120 hour playback sequence for the currently selected Step** is cached for the current viewport, not merely the current frame plus the first playback frame.
+- The default 3-hour Step therefore primes **41 frames: 0h, +3h, +6h, ... +120h** before reporting ready.
+- Full cache preparation uses a bounded **two-request concurrent queue** and reports progress such as **Preparing swell playback cache · 18 of 41 frames (3h step)…**.
+- Changing the playback Step to 1h, 3h, or 6h automatically rebuilds the playback cache for that cadence before returning to **Swell ready.**
+- **Reload swell cache** now refreshes the current frame and rebuilds the complete selected-step playback sequence instead of refreshing only the first playback frame.
+- Explicit playback-prime requests carry `prime=1`; the Go server suppresses its old neighbor-prefetch fan-out for those requests so the bounded browser queue is the only source of upstream priming load.
+- Forced refreshes no longer delete a good exact-key cache entry before replacement. The old entry remains available until PacIOOS returns a successful replacement; if that refresh fails and an exact-key cached frame exists, it is retained as a `STALE` fallback.
+- PacIOOS TLS handshake allowance increases from **6 seconds to 10 seconds** and the swell HTTP client timeout increases from **12 seconds to 18 seconds**. Existing bounded retry behavior remains.
+- If any frame in the complete selected-step sequence cannot be cached, v358 does **not** claim readiness. It reports **Playback cache incomplete · X of Y frames cached. Use Reload swell cache to retry.**
+- The v358 smoke test verifies every +3h frame through +120h is explicitly primed before readiness and verifies manual Reload rebuilds the entire 3-hour sequence with forced refresh requests.
+- `main.go` candidate SHA-256: `5121a8f29d851d274f0b9df47be938185a07e2ebc80236ba8c3dffd1ac0b0422`.
+- v358 UI smoke-test SHA-256: `cff270c059502ac57c6dd093b791758a55adfe12ec844e09c005cc54b0ba1e46`.
+
+## v357 / 1.14.0 Reload swell cache button binding fix
+
+- Advances the generated development build to **v357** while retaining public/application version **1.14.0**.
+- Fixes the manual **Reload swell cache** button not responding to clicks.
+- Root cause: in v356 the click listener registration executed earlier in the script than `swellCacheReloadButton = document.getElementById("map-swell-cache-reload")`. Because the `var` was hoisted but still `undefined` at that point, the conditional listener-registration block was skipped and never retried.
+- v357 removes that premature listener block, defines a dedicated `reloadSwellCache(event)` handler, and binds it immediately after the button DOM element is assigned.
+- The dedicated handler prevents default/propagation, rejects only hidden-overlay or genuinely busy preparation states, and otherwise invokes the existing state-machine preparation path with `forceRefresh:true`.
+- The v356 state machine, `refresh=1` server-cache bypass, 8-second TCP dial allowance, and 1.5-second upstream retry backoff remain unchanged.
+- The v357 smoke test retains the real manual-click regression: clicking Reload must enter **loading-current**, issue a forced refresh request, and return to **ready** after playback-cache priming.
+- `main.go` candidate SHA-256: `a23a9c1ca2020bbdd00497cac783f61080d16688b70693e6340b8d5e01cf088a`.
+- v357 UI smoke-test SHA-256: `bdc204609233b00e7c8d6a9394cbe3feb92b07b46b1f1864d56af36eb14f3430`.
+
+## v356 / 1.14.0 swell preparation state-machine rewrite
+
+- Advances the generated development build to **v356** while retaining public/application version **1.14.0**.
+- Replaces the separate `swellPreparationActive` flag, button state, and status-message updates with one authoritative swell preparation state machine: **idle**, **loading-current**, **priming-playback**, **ready**, and **error**.
+- The Reload button's visibility, disabled state, label, and `data-preparation-state` are now derived from that single state. A manual reload is rejected only while the state is actually **loading-current** or **priming-playback**.
+- Enabling the overlay resets the controller to **idle** and immediately starts preparation. Successful current-frame loading moves to **priming-playback**, then to **ready** only after the first playback frame is prepared.
+- Manual **Reload swell cache** now performs a true server-cache bypass. Browser requests generated by forced reloads include `refresh=1`; the `/swell-forecast` handler invalidates that exact in-memory cache entry before contacting PacIOOS.
+- The existing bounded automatic retry remains, but the TCP dial allowance is increased from **5 seconds to 8 seconds** and the server-side inter-attempt backoff is increased from **300 ms to 1.5 seconds**, matching the intermittent TCP-connect failures observed during live testing.
+- The v356 smoke test verifies the state machine is `ready` before manual reload, forces the current-frame mock to remain in flight long enough to observe **loading-current**, verifies the button is disabled during that state, verifies the request contains `refresh=1`, and requires the controller to return to **ready**.
+- Existing fixed playback-control rows, single status labels, and staged swell preparation messages remain unchanged.
+- `main.go` candidate SHA-256: `1295c2dc28c0bbe71d31018302950472d31da1b7edec152869c9c52a0675e659`.
+- v356 UI smoke-test SHA-256: `eef8428f9715e6ff74f9898e56b679f5e3850b3e6b4514302dcedf2158141e68`.
+
+## v355 / 1.14.0 explicit swell cache reload and staged preparation
+
+- Advances the generated development build to **v355** while retaining public/application version **1.14.0**.
+- Adds an explicit **Reload swell cache** button to the Surf & Swell overlay section.
+- The button is available whenever the swell overlay is enabled and is disabled while preparation is already running, preventing parallel manual reloads.
+- Enabling swell now exposes preparation stages clearly:
+  - **Loading current swell frame…**
+  - **Current swell loaded · preparing playback cache…**
+  - **Swell ready.**
+- If the initial frame cannot be obtained after the existing automatic transient retry, the popup now reports **Current swell could not be loaded · no cache available.**
+- If the visible current frame succeeds but the first playback frame cannot be primed, the popup reports **Current swell loaded · playback cache unavailable.**
+- Clicking **Reload swell cache** forces a fresh current-frame load for the current viewport and then re-primes the first playback frame for the selected Step.
+- The manual reload path reuses the existing bounded transient retry policy; there is still no unbounded retry loop.
+- Existing v354 fixed playback-control rows and single status labels remain unchanged.
+- The v355 smoke test verifies staged preparation text, verifies the Reload button is visible and enabled after readiness, verifies it disables during reload, and verifies a fresh current-frame request is issued before returning to **Swell ready.**
+- `main.go` candidate SHA-256: `2f867804ca383319902f08e188ccf4734a2b4acaf6687d01830e4c3fa6e78e43`.
+- v355 UI smoke-test SHA-256: `5e5d47c8f24219423f0e456a9c23d13b07d924611caa58ecc68f980f9e8f06c6`.
+
+## v354 / 1.14.0 fixed playback control rows and single status labels
+
+- Advances the generated development build to **v354** while retaining public/application version **1.14.0**.
+- Removes the duplicate Air Temperature status presentation. The transport now has one changing status line only, positioned beneath the timeline slider.
+- Removes the changing Air Temperature time/status text from the first control row so NOW / previous / Play / next / Speed / Range stay at fixed horizontal positions as playback advances.
+- Applies the same layout rule to Swell: fixed controls on row 1, timeline slider on row 2, and one canonical changing status line on row 3.
+- The Swell status line now carries normal, loading, and exact forecast-time feedback so there is no separate visible `Selected:` line competing with it.
+- The old hidden swell `map-swell-map-selected` node remains only as a compatibility placeholder and is not rendered.
+- Both transports retain their existing 92px fixed desktop height and 96px mobile height.
+- Existing Air Temperature slider synchronization, Range behavior, swell cache priming, and enable-time transient retry logic are unchanged.
+- The v354 smoke test verifies that neither dynamic temperature nor swell status lives inside its control row, verifies the redundant temperature `Selected` element is gone, and continues to exercise the swell retry/cache-prime path.
+- `main.go` candidate SHA-256: `7b82eacc48017e52630fbb73738219d5d2aaf6ed2b8fd4a49f55aad825c11411`.
+- v354 UI smoke-test SHA-256: `83f1b5cb9812238383737249a62568180e3881b667379c9112e838c7a4cbb765`.
+
+## v353 / 1.14.0 enable-time transient swell retry
+
+- Advances the generated development build to **v353** while retaining public/application version **1.14.0**.
+- Adds one automatic **enable-time preparation retry** when the initial swell load still fails with a transient network/upstream error after the existing short request-level retry.
+- During that second preparation attempt, the Map Overlays popup remains in a working state and reports **“Preparing swell forecast · retrying after a temporary upstream error…”** rather than immediately switching to a red failure.
+- The retry waits approximately **850 ms** before re-running the current-frame swell load with a forced refresh.
+- If the retry succeeds, v353 continues into the existing playback-cache prime and only reports **“Swell ready.”** after the first frame for the selected playback Step has been prepared.
+- If the retry also fails, the existing final preparation error is shown; there is no unbounded retry loop.
+- The server-side playback-aligned +3h/+6h/+1h cache warming introduced in v352 remains unchanged.
+- The v353 smoke test forces both request-level attempts for the initial Now frame to fail, verifies the enable-time retry message appears, verifies a later Now request succeeds, and then confirms readiness still waits for the delayed +3h playback-cache prime.
+- `main.go` candidate SHA-256: `8ac8c6a812c8f8888c2d2a13e83663f851d14e6f7f91c9b2d4269f56291aeee2`.
+- v353 UI smoke-test SHA-256: `f0219aa9c390b899bc3e94d65c7f306787f1dfa736c14beadbd0efc16419fd56`.
+
+## v352 / 1.14.0 playback-aligned swell cache priming
+
+- Advances the generated development build to **v352** while retaining public/application version **1.14.0**.
+- Fixes the mismatch between swell cache warming and the actual playback controls. The earlier cache strategy warmed nearby +1h/+2h frames even though the default playback Step immediately requests +3h.
+- Enabling **Global Swell Forecast** now keeps the popup in **“Preparing swell forecast and playback cache…”** while it loads the visible frame and explicitly preloads the first frame required by the currently selected Step.
+- With the default 3-hour Step, the enable-time preparation now requests and caches **+3h** before the popup is allowed to report **“Swell ready.”**
+- If the first playback frame cannot be prepared, the popup reports **“Swell displayed · playback cache could not be prepared.”** instead of falsely claiming readiness.
+- Server-side opportunistic prefetch now prioritizes forward playback-relevant offsets **+3h, +6h, then +1h**, instead of the old ±1h/±2h pattern.
+- The first Play action still makes the normal browser `/swell-forecast` request for +3h, but once enable-time priming has succeeded that request should be served from the server cache rather than waiting on a fresh PacIOOS TLS handshake.
+- Existing single-flight coalescing remains in place, so if the background warmer and explicit prime request target the same +3h frame, they share the same upstream work.
+- The v352 smoke test deliberately delays the +3h prime request and verifies that **“Swell ready.”** does not appear until that request has completed. It also records the +3h request count before Play so the earlier prime request cannot be mistaken for actual playback progress.
+- `main.go` candidate SHA-256: `ddc18e46b4548a4aefe408e2e89bb9f13a241c106bab5967a7906483935eef21`.
+- v352 UI smoke-test SHA-256: `29796c5208e7f72432842ec4c3f56f1a5fa4bb01eb2839d7e44464021b8b6589`.
+
+## v351 / 1.14.0 synchronized temperature footer timeline
+
+- Advances the generated development build to **v351** while retaining public/application version **1.14.0**.
+- Adds a below-map **Air Temperature** timeline slider so temperature now follows the same three-part footer hierarchy as swell: labeled control row, timeline scale, and selected-time/status line.
+- The temperature footer slider uses the existing **15-minute (`0.25h`) step** and is synchronized with the Map Overlays temperature slider.
+- The temperature slider's right endpoint follows the selected **Range** control dynamically: `+6h`, `+12h`, or `+24h`.
+- Changing Range immediately updates both the footer slider maximum and the visible endpoint label. If the selected temperature time lies beyond the new range, it is clamped through the existing commit path.
+- Manual dragging of either temperature slider previews the same selected time; committing either slider updates the shared temperature forecast state.
+- The temperature transport remains **92px high**, matching the swell transport's fixed-height three-row layout.
+- Existing temperature playback, forecast interpolation, NOW/previous/next controls, speed control, Range semantics, and swell cache/prefetch behavior remain unchanged.
+- The v351 smoke test verifies that the footer temperature slider exists, retains `step=0.25`, defaults to a 24-hour scale, and changes to a 12-hour scale when Range is changed to 12h.
+- `main.go` candidate SHA-256: `ab0e5da25814770a9ba5026128baf17a285c05a5d695eb3f3046c5b1cb9b25e5`.
+- v351 UI smoke-test SHA-256: `eabf1c09f2a53b1ce0eabfe83ca058f2c995e65c0e2ed67ce891b87a3168c482`.
+
+## v350 / 1.14.0 compact standardized transports and clear swell-ready state
+
+- Advances the generated development build to **v350** while retaining public/application version **1.14.0**.
+- Fixes the large blank area under the swell controls caused by the old horizontal-layout `flex-basis: 720px` being interpreted vertically inside the new stacked column container.
+- Changes the swell transport to content-sized column behavior with `flex: none`, full shared-footer width, and the existing fixed **92px** transport height.
+- Standardizes the first-row visual structure with Air Temperature: the persistent **Swell · Now/+Nh** identity/status is now the first item at the left, followed by NOW / previous / Play / next / Speed / Step.
+- Matches Air Temperature and Swell font sizing, weight, border, radius, background, and shared footer width more closely while preserving the swell-only hourly slider and exact selected-time line beneath its first row.
+- Air Temperature retains **Range** while Swell retains **Step** because those controls have different semantics.
+- Replaces the ambiguous **“nearby playback hours are warming in the background”** completion message with the authoritative popup state **“Swell ready.”**
+- The enabling message remains **“Preparing swell forecast and playback cache…”** until the initial frame is ready. The popup no longer claims a background job is still running after reporting readiness.
+- Existing server-side opportunistic prefetch remains in place; it is an implementation detail rather than a user-visible state requiring the user to wait.
+- The v350 smoke test now verifies the swell transport remains roughly 92px tall, verifies the swell identity/status appears first in the control row, and requires the concise exact **“Swell ready.”** completion state.
+- `main.go` candidate SHA-256: `5cb48dbb533afd1adc82b58f6223f89962230b727fedb9347558f0894bc803ea`.
+- v350 UI smoke-test SHA-256: `1d9a6c3b6fcb71017d5fe28af78f8de46fafcbdbf20b737135f3f14356f49261`.
+
+## v349 / 1.14.0 standardized below-map temperature and swell transports
+
+- Advances the generated development build to **v349** while retaining public/application version **1.14.0**.
+- Moves the **Air Temperature** playback transport out of the Leaflet map viewport and into the same below-map footer system used by swell.
+- Adds a shared stacked transport container so, when both overlays are enabled, **Air Temperature** and **Swell** appear as separate clearly identified rows rather than overlapping or competing for the same in-map space.
+- Keeps the map scale on the far right of the footer, independent of the playback rows.
+- Removes the old floating black **Air Temperature · NOW · Observed** pill. That status now lives inline inside the Air Temperature footer row and uses the same white/bordered visual language as the transport.
+- Preserves the semantic difference between the two transports: temperature keeps **Range** (6h / 12h / 24h), while swell keeps **Step** (1h / 3h / 6h).
+- Preserves existing temperature playback behavior, speed controls, NOW/previous/next controls, forecast interpolation, and current swell cache/prefetch behavior.
+- Mobile layout keeps both transport rows below the map and allows horizontal scrolling within the temperature row rather than placing controls over the map.
+- The v349 smoke test verifies that the temperature transport and temperature status are no longer descendants of the map viewport, that the status is integrated into the footer transport row, and that the old floating/black styling is gone.
+- `main.go` candidate SHA-256: `6607a96afae83351a90e38991f7859df04a2111fb5974e8dd24e14f2c8463e18`.
+- v349 UI smoke-test SHA-256: `df9c683aef879447942864ea757446faa628f312710f11b8e01e789978f28182`.
+
+## v348 / 1.14.0 enable-time swell preparation status
+
+- Advances the generated development build to **v348** while retaining public/application version **1.14.0**.
+- Makes enabling **Global Swell Forecast** in the Map Overlays popup the explicit forecast/cache preparation step.
+- Adds a dedicated popup status line that is separate from the ordinary map swell status, so preparation feedback cannot be immediately overwritten by normal render/status updates.
+- While the initial frame is loading, the popup displays **“Preparing swell forecast and playback cache…”**.
+- After the first frame succeeds, the popup displays **“Swell ready · nearby playback hours are warming in the background.”**
+- If the map is too wide for swell display, the popup explains that the user must zoom to Zoom 3 or closer. If preparation fails, the popup keeps a visible failure message and points to the detailed swell status below the map.
+- The underlying v347 cache architecture is unchanged: a successful foreground frame seeds the server cache and opportunistically warms nearby hourly frames in the background.
+- The v348 smoke test deliberately delays the initial Now frame and verifies that the popup preparation message remains visible throughout the delay, then changes to a persistent ready message after success.
+- `main.go` candidate SHA-256: `374702541b6b6a1792b0b0d3526049a83d192d21a1c15be0b98bcf05f154f506`.
+- v348 UI smoke-test SHA-256: `97923cf56d44e3b3cdc4b485c67c972ef9cd8c6f6a30352ac0d5450a2116f284`.
+
+## v347 / 1.14.0 compile fix for cached swell helpers
+
+- Advances the generated development build to **v347** while retaining public/application version **1.14.0**.
+- Fixes the v346 compile error by adding the missing Go standard-library `context` import required by `fetchSwellRaw`, `getOrFetchSwellRaw`, and the background prefetch timeout context.
+- No swell behavior, cache policy, timeout policy, UI layout, or smoke-test logic is changed from v346.
+- `main.go` candidate SHA-256 for this build: `1b3567b047d4c65d27e5397d99dfbe3dac3441dcd6362f29a423ae8dcbcf9ec9`.
+- v347 UI smoke-test SHA-256: `3ed86ce26aae8457ff03d9c6f87297528b7113c013547dfd247d945ee74fb8dc`.
+
+## v346 / 1.14.0 cached and prefetched swell frames
+
+- Advances the generated development build to **v346** while retaining public/application version **1.14.0**.
+- Changes the swell architecture so repeated timeline movement does not require a fresh PacIOOS TLS connection for every frame.
+- Adds an in-memory raw-frame cache keyed by the exact PacIOOS ERDDAP URL, which includes forecast hour, map bounds, grid subset, and stride.
+- Cached upstream frames are retained for **45 minutes**. A repeat request for the same viewport/hour is served locally and returns `X-Swell-Cache: HIT`.
+- Adds **single-flight coalescing** for identical in-flight upstream requests. If playback, a manual step, or background prefetch asks for the same frame while it is already being fetched, only one PacIOOS request is made; the other caller waits for that result and reports `X-Swell-Cache: COALESCED`.
+- After any successful foreground swell response, the server opportunistically prefetches the neighboring **±1h and ±2h** frames for the exact same viewport and stride.
+- Background prefetch is globally limited to **two concurrent upstream fetches**, preventing cache warming from turning into a request burst.
+- Tightens the interactive upstream timeout policy from the v345 ~30-second worst case. The HTTP transport now uses a **6-second TLS handshake timeout**, **8-second response-header timeout**, and **12-second overall request timeout**, with one short retry.
+- Preserves v345's below-map fixed-height transport, always-visible hourly scrubber, exact selected-time feedback, manual single-flight controls, previous-good-raster retention, and v343 request-supersession handling.
+- The browser smoke test remains deterministic and mocks `/swell-forecast`; it verifies the UI state machine independently of PacIOOS availability. The new server cache/prefetch path should be verified separately with the direct local endpoint probe described below.
+- `main.go` candidate SHA-256 for this build: `8e5472d01aac2a1e552af322e84677b324a95cc11e66daa31c7bd7670cdcdc57`.
+
+### Deterministic UI smoke test
+
+Run the service from the repository root:
+
+```bash
+go build -o sailing-go .
+./sailing-go -server
+```
+
+Then, in a second terminal:
+
+```bash
+cd ui
+go test -v -timeout 60s
+```
+
+A successful run ends with output similar to:
+
+```text
+PASS: v346 cached/prefetched swell + below-map fixed-height transport + manual single-flight + supersession resilience smoke test
+--- PASS: TestSwellPlaybackSmoke
+PASS
+```
+
+Generated v346 UI smoke-test SHA-256: `cbb56dc59147524b9c4c67a2d912ef7255a5f152de89a9f06f68db02d71160fd`.
+
+### Live swell cache probe
+
+Because the UI smoke test intentionally mocks `/swell-forecast`, use this separate local probe when validating real PacIOOS connectivity:
+
+```bash
+curl -i --max-time 20 'http://127.0.0.1:8080/swell-forecast?west=-123&south=36&east=-121&north=39&hours=0&stride=1'
+```
+
+On the first successful request, `X-Swell-Cache` should normally be `MISS`. Repeating the identical command should return `X-Swell-Cache: HIT` and should complete from local memory without another PacIOOS request. After a successful foreground fetch, requests for nearby forecast hours are also candidates to be served from the prefetch cache.
+
+## v345 / 1.14.0 below-map fixed-height swell transport
+
+- Advances the generated development build to **v345** while retaining public/application version **1.14.0**.
+- Moves the swell playback transport **out of the Leaflet map viewport** and into the map footer, hard-left below the map. The map scale remains hard-right in the same footer row, so the swell controls no longer cover chart content.
+- Replaces the v344 collapsible transport with a **constant-height** transport. Manual loading no longer adds a second status line or changes the control height.
+- Restores the **always-visible hourly scrubber** with explicit `Now` and `+120h (5 days)` endpoints.
+- Restores persistent selected-time feedback beneath the scrubber, e.g. `Selected: +71h · Sat, Oct 10, 10:00 AM PDT`.
+- During a single-flight manual load, that same selected-time line temporarily becomes `Loading +Nh…`; when the request completes it returns to exact selected-time feedback. The transport height remains unchanged.
+- Keeps NOW / Previous / Play-Pause / Next / Speed / Step visible without requiring an expand action.
+- Preserves v344's manual single-flight locking, server-side PacIOOS keep-alive transport, retry/backoff for transient upstream errors, and v343 request-supersession resilience.
+- Extends the deterministic `chromedp` smoke test to verify:
+  - the transport is a direct child of the below-map footer and no longer lives inside the map viewport;
+  - the scrubber and Step selector are visible immediately;
+  - selected-time context starts at `Selected: Now`;
+  - a delayed manual +1h load keeps the transport at exactly the same height while showing `Loading +1h…`;
+  - repeated Next clicks remain blocked during that load;
+  - selected-time feedback and slider position return correctly after the load.
+- `main.go` candidate SHA-256 for this build: `83dfc128a410dcd679d357a63349e32966eaaf8b300084980d377510db0601d9`.
+
+### Automated swell-playback UI smoke test
+
+The independent `ui/` Go module still targets the interactive **Planning and Details** page and mocks only `/swell-forecast` in the browser. The v345 test retains playback, speed, hourly scrubber, Zoom 9 supersession, and wide-zoom regressions while adding below-map placement and fixed-height loading-state coverage.
+
+Run the service from the repository root:
+
+```bash
+go build -o sailing-go .
+./sailing-go -server
+```
+
+Then, in a second terminal:
+
+```bash
+cd ui
+go test -v -timeout 60s
+```
+
+A successful run ends with output similar to:
+
+```text
+PASS: v345 below-map fixed-height transport + visible hourly scrubber + manual single-flight + supersession resilience + wide-zoom smoke test
+--- PASS: TestSwellPlaybackSmoke
+PASS
+```
+
+Generated v345 smoke-test SHA-256: `0e85e9fefdb4cbf1a156feac064cb239ee32517245981dbe60fbf2e29ea77c34`.
+
+## v344 / 1.14.0 swell transport resilience and compact controls
+
+- Advances the generated development build to **v344** while retaining public/application version **1.14.0**.
+- Hardens the server-side PacIOOS / NOAA WaveWatch III fetch path against the TLS-handshake timeout observed during manual swell stepping. The server now uses a shared keep-alive HTTP transport with explicit dial, TLS-handshake, response-header, idle-connection, and overall request timeouts.
+- Adds one server-side retry, after a short backoff, for upstream connection errors, HTTP 429, and HTTP 5xx responses. Successful keep-alive connections are reused instead of constructing a fresh one-shot `http.Client` for every swell request.
+- Keeps the previous good swell raster visible while a replacement frame is loading or fails, preserving the v342/v343 failure and supersession protections.
+- Makes **manual NOW / Previous / Next / slider commits single-flight**. While a requested manual frame is in flight, the manual timeline buttons, slider, Step selector, Speed selector, and Play control are temporarily disabled so repeated Next/Previous clicks cannot create parallel PacIOOS work.
+- The on-map time readout changes to **Loading +Nh…** (or **Loading Now…**) during a manual request, and the transport note explains that the timeline controls are temporarily locked.
+- Reduces map obstruction by making the swell transport **compact and collapsed by default**. NOW / Previous / Play-Pause / Next / Speed / time remain immediately available; the synchronized hourly slider and 1h / 3h / 6h Step selector are behind a small expand/collapse control.
+- Preserves v343's Zoom 9 request-supersession handling, playback speed choices, wide-zoom throttling, and Zoom 3/4 display/playback safeguards.
+- Extends the deterministic `chromedp` smoke test with two v344 regressions:
+  - compact transport starts collapsed and expands on demand;
+  - a deliberately delayed +1h manual Next request locks the manual controls, ignores repeated Next clicks, and issues only one +1h request before completing.
+- `main.go` candidate SHA-256 for this build: `6ce990358d0cc43a5b40d301e09b763350af574e195292aab2314a58e6e89eb6`.
+
+### Automated swell-playback UI smoke test
+
+The independent `ui/` Go module still targets the interactive **Planning and Details** page and mocks only `/swell-forecast` in the browser. The v344 test retains the existing playback, speed, hourly scrubber, Zoom 9 supersession, and wide-zoom regressions while adding compact-transport and manual single-flight coverage.
+
+Run the service from the repository root:
+
+```bash
+go build -o sailing-go .
+./sailing-go -server
+```
+
+Then, in a second terminal:
+
+```bash
+cd ui
+go test -v -timeout 60s
+```
+
+A successful run ends with output similar to:
+
+```text
+PASS: v344 compact transport + manual single-flight + supersession resilience + hourly scrubber + wide-zoom smoke test
+--- PASS: TestSwellPlaybackSmoke
+PASS
+```
+
+Generated v344 smoke-test SHA-256: `bb6e4ae2f22424123d84a963966fcb403d80f2e97eaad765cf9dcf3b9e9f123f`.
+
+## v343 / 1.14.0 swell playback request-supersession resilience
+
+- Advances the generated development build to **v343** while retaining public/application version **1.14.0**.
+- Fixes a playback race exposed at Zoom 9 when a delayed pan/zoom swell refresh starts a newer `/swell-forecast` request while an animated playback frame is still in flight.
+- `loadSwellForecast` now reports a stale request completion explicitly as **`superseded`** instead of returning an undifferentiated failure to the playback state machine.
+- Animated playback treats **superseded** frame requests as benign. The newer request owns the raster/status, the transient-failure counter is reset, and playback schedules the next frame instead of stopping.
+- Keeps v342's transient HTTP/network retry and previous-good-frame retention behavior unchanged for genuine request failures.
+- Preserves the v341 NOW / Previous / Play-Pause / Next controls, 0.5× / 1× / 2× speed selector, 1h / 3h / 6h forecast step selector, hourly scrubber, synchronized sliders, and Zoom 3/4 wide-view safeguards.
+- Extends the deterministic `chromedp` smoke test with a **Zoom 9 supersession regression**. The mock deliberately delays the +19h frame, then the test performs a quick zoom-out/zoom-in so a newer +19h refresh supersedes the original playback request. The test requires playback to remain active and advance to +20h.
+- `main.go` candidate SHA-256 for this build: `10fbf4b4513f90d485a3ec53d3c5d62144ab4ef9feff8e177bc66a19ee7bd6b2`.
+
+### Automated swell-playback UI smoke test
+
+The independent `ui/` Go module still targets the interactive **Planning and Details** page and mocks only `/swell-forecast` in the browser. In addition to the existing transport, scrubber, synchronization, transient-failure, and wide-zoom behavior, the v343 test verifies that a map refresh can supersede an in-flight playback request without terminating playback.
+
+Run the service from the repository root:
+
+```bash
+go build -o sailing-go .
+./sailing-go -server
+```
+
+Then, in a second terminal:
+
+```bash
+cd ui
+go test -v -timeout 60s
+```
+
+A successful run ends with output similar to:
+
+```text
+PASS: v343 swell supersession resilience + transport parity + hourly scrubber + wide-zoom smoke test
+--- PASS: TestSwellPlaybackSmoke
+PASS
+```
+
+Generated v343 smoke-test SHA-256: `336e3f5e4cba5d0502d13cd43e333c885023cf1a7de4c606c9c30793d5ac0868`.
+
+## v342 / 1.14.0 swell playback transient-failure resilience
+
+- Advances the generated development build to **v342** while retaining public/application version **1.14.0**.
+- Repairs an intermittent Global Swell Forecast playback failure observed at Zoom 9 where several frames could load successfully and then playback would stop with the generic message **“Global swell forecast did not return enough data to cover the visible map.”**
+- Adds one automatic retry, after a short backoff, for transient `/swell-forecast` failures such as HTTP 5xx, HTTP 429, or network errors. Non-transient client errors are not retried.
+- Keeps the last successfully rendered swell raster and legend visible while a replacement frame is retried or fails. A failed replacement no longer makes a valid previous swell field disappear.
+- Replaces the misleading generic coverage message with the underlying request failure detail when the server returned one.
+- During animated playback, up to two transient frame failures can be skipped while playback continues from the previous good raster; a later successful frame resets the failure counter. Persistent or non-transient failures still stop playback rather than hammering the upstream service.
+- Preserves the v341 NOW / Previous / Play-Pause / Next controls, 0.5× / 1× / 2× speed selector, 1h / 3h / 6h forecast step selector, hourly scrubber, synchronized sliders, and Zoom 3/4 wide-view safeguards.
+- Extends the deterministic `chromedp` smoke test with a **Zoom 9 transient-failure regression**. The mock returns a synthetic HTTP 503 for the first +19h request; the test requires a retry of +19h, successful continuation to +20h, and no return of the old generic coverage error.
+- `main.go` candidate SHA-256 for this build: `2e48de29de64f491f8773af4863c7600dc059099a471ed345da2897a6aad28e4`.
+
+### Automated swell-playback UI smoke test
+
+The independent `ui/` Go module still targets the interactive **Planning and Details** page and mocks only `/swell-forecast` in the browser. In addition to the v341 transport, scrubber, synchronization, and wide-zoom checks, the v342 test now verifies retry-and-continue behavior for a transient frame failure at Zoom 9.
+
+Run the service from the repository root:
+
+```bash
+go build -o sailing-go .
+./sailing-go -server
+```
+
+Then, in a second terminal:
+
+```bash
+cd ui
+go test -v -timeout 60s
+```
+
+A successful run ends with output similar to:
+
+```text
+PASS: v342 swell retry resilience + transport parity + hourly scrubber + wide-zoom smoke test
+--- PASS: TestSwellPlaybackSmoke
+PASS
+```
+
+Generated v342 smoke-test SHA-256: `fa6b67303eab24d75f5565326c054bb49ca1bca0aa7a3d49a3e012b38b924686`.
+
+## v341 / 1.14.0 swell transport NOW, frame navigation, and playback speed
+
+- Advances the generated development build to **v341** while retaining public/application version **1.14.0**.
+- Brings the on-map Global Swell Forecast transport closer to the existing air-temperature playback transport by adding **NOW**, **Previous**, and **Next** buttons.
+- Adds a swell playback **Speed** selector with **0.5× / 1× / 2×** choices. Playback speed changes wall-clock pacing only; the separate **1h / 3h / 6h Step** selector continues to control how much forecast time each frame advances.
+- **NOW** stops playback, commits hour 0, synchronizes both swell sliders, and reloads the current WW3 frame when necessary.
+- **Previous / Next** stop playback and move by the currently selected swell step, clamped to the **Now … +120h** forecast range. They remain independent from the zoom-aware automatic playback throttling so manual inspection follows the user's selected step.
+- Keeps v340's robust range-slider release commit paths (`change`, pointer/mouse/touch release, blur, and keyboard completion), hourly manual scrubbing, synchronized menu/on-map sliders, and wide-zoom safeguards.
+- Keeps animated playback disabled below Zoom 4 and swell display suspended below Zoom 3.
+- Updates the deterministic `chromedp` smoke test to verify the new NOW / Previous / Next controls, the default 1× speed, selection of 2× speed, continued playback at the selected speed, plus the existing hourly scrubber and wide-zoom regression coverage.
+- `main.go` candidate SHA-256 for this build: `e19e5bd1ab2aff836f7b6aa7ff241d22000ae66720da820af30d308dffd23aff`.
+
+### Automated swell-playback UI smoke test
+
+The independent `ui/` Go module continues to target the interactive **Planning and Details** page and mock only `/swell-forecast` in the browser. The v341 test verifies the complete swell transport, including NOW, manual frame navigation, speed and step selectors, playback, slider release commit behavior, synchronized sliders, wide-zoom suspension, and Clear All.
+
+Run the service from the repository root:
+
+```bash
+go build -o sailing-go .
+./sailing-go -server
+```
+
+Then, in a second terminal:
+
+```bash
+cd ui
+go test -v -timeout 60s
+```
+
+A successful run ends with output similar to:
+
+```text
+PASS: v341 swell transport parity + hourly scrubber + wide-zoom smoke test
+--- PASS: TestSwellPlaybackSmoke
+PASS
+```
+
+Generated v341 smoke-test SHA-256: `7b3539195937117ccf2fc5f78d5d2d3953ebc2d146082836b0e6d29016eec461`.
+
+## v340 / 1.14.0 swell scrubber release-commit repair
+
+- Advances the generated development build to **v340** while retaining public/application version **1.14.0**.
+- Fixes the v339 on-map swell scrubber bug where manually dragging the range control could update the preview label but fail to load the newly selected WW3 overlay frame on release.
+- Keeps the responsive v288-style split between preview and commit: `input` still updates the preview and synchronized sliders without fetching while the thumb is moving.
+- Adds redundant, browser-safe commit paths for swell sliders. The selected hour now commits on `change`, `pointerup`, `mouseup`, `touchend`, focus loss, and relevant keyboard-release events (arrow keys, Page Up/Down, Home, End). Duplicate events are harmless because only the first changed committed hour triggers a fetch.
+- Applies the same robust commit handling to both the **Map Overlays** swell slider and the **on-map playback slider**.
+- Preserves v339 hourly resolution, 1h / 3h / 6h playback-step selector, default 3h playback, zoom-aware throttling, and wide-zoom protection.
+- Updates the `chromedp` smoke test so the manual on-map slider is previewed with `input` and then committed using **pointer release without dispatching `change`**. This directly guards the real-world regression reported in v339.
+- `main.go` candidate SHA-256 for this build: `d95a900ed888290898704d4520cb614122b6ee7c635467e1424a083c7d22a7dc`.
+
+### Automated swell-playback UI smoke test
+
+The independent `ui/` Go module continues to use `chromedp` against the interactive **Planning and Details** page:
+
+```text
+http://127.0.0.1:8080/report?format=html&station=PSBC1&planning=1
+```
+
+The v340 smoke test retains the deterministic browser-side `/swell-forecast` mock and verifies the v339 playback, hourly scrubber, synchronization, and wide-zoom behavior. Its manual-slider regression check deliberately does **not** emit a `change` event: it previews with `input`, sends `pointerup`, and requires the selected hourly swell frame to be fetched and rendered.
+
+Run the service from the repository root:
+
+```bash
+go build -o sailing-go .
+./sailing-go -server
+```
+
+Then, in a second terminal:
+
+```bash
+cd ui
+go test -v -timeout 60s
+```
+
+A successful run ends with output similar to:
+
+```text
+PASS: v340 swell playback + hourly scrubber + wide-zoom smoke test
+--- PASS: TestSwellPlaybackSmoke
+PASS
+```
+
+Generated v340 smoke-test SHA-256: `db2d641886f35e8e63c0c3966309a8e4bc433d03cb3c33a2419d0c7937e0ffde`.
+
+## v339 / 1.14.0 hourly swell scrubber, playback step control, and wide-zoom protection
+
+- Advances the generated development build to **v339** while retaining public/application version **1.14.0**.
+- Changes the Global Swell Forecast time controls from 6-hour-only selection to **hourly selection from Now through +120h**. Both the Map Overlays slider and the new on-map slider use 1-hour increments and stay synchronized.
+- Expands the on-map swell transport into a compact manual scrubber with **Play / Pause**, the active forecast offset, a synchronized **hourly slider**, and a **1h / 3h / 6h playback-step selector**.
+- Uses **3-hour playback by default** at normal regional zooms. Selecting 1h enables true hourly animation at normal zooms; 6h remains available for lower-request-rate playback.
+- Adds zoom-aware playback throttling: at **Zoom 5**, playback is automatically at least 3-hour steps; at **Zoom 4**, playback is automatically at least 6-hour steps. The transport explains when a wider view is forcing a coarser effective playback step.
+- Adds wide-zoom protection for the swell raster. **Zoom 3** remains available as a static, aggressively downsampled basin-scale swell view. Below Zoom 3, swell loading/raster display is suspended and the UI asks the user to zoom in. Animated playback requires **Zoom 4+**.
+- Makes the WW3 spatial sampling stride more aggressive at wide views (minimum stride 8 at Zoom 3, 4 at Zoom 4, and 2 at Zoom 5) while preserving the existing globally aligned WW3 lattice, anchored padded raster, dateline interpolation, cache behavior, and clickable swell details.
+- Preserves the v288 preview/commit rule on both swell sliders: `input` updates the preview and stops playback without fetching; `change` commits the hour and fetches the frame.
+- Keeps `/swell-forecast` compatible with existing callers while explicitly supporting any whole-hour `hours=0..120` request.
+- `main.go` candidate SHA-256 for this build: `32b23b5c9a55bae22fc79a812b9616aae28d7f173f8ce308cfc1c93025d1583c`.
+
+### Automated swell-playback UI smoke test
+
+The repository uses an independent Go UI-test module under `ui/` with `chromedp`, keeping browser-test dependencies out of the production sailing-service module.
+
+The v339 smoke test is `ui/swell_playback_test.go` and targets the interactive **Planning and Details** page:
+
+```text
+http://127.0.0.1:8080/report?format=html&station=PSBC1&planning=1
+```
+
+The test replaces browser `fetch()` only for `/swell-forecast` with a deterministic synthetic WW3-like grid. All other page behavior is real, so PacIOOS/NOAA availability cannot make the regression test flaky.
+
+The v339 smoke test verifies:
+
+- Global Swell Forecast can be enabled from **Map Overlays → Surf & Swell**.
+- Both the Map Overlays slider and on-map slider expose **1-hour increments**.
+- The default playback step is **3h** and advances through **+3h** and **+6h**.
+- Selecting **1h** playback advances the next frame from +6h to **+7h**.
+- **Pause** prevents further automatic requests.
+- The on-map manual slider previews without fetching, synchronizes the menu slider, and commits/fetches only on `change`.
+- Zooming out to **Zoom 2** triggers the wide-view protection: swell loading is suspended, playback is disabled, and the UI requests Zoom 3+ / Zoom 4+ as appropriate.
+- **Clear all overlays** disables swell, hides the transport, and stops further swell requests.
+
+Run the sailing service first from the repository root:
+
+```bash
+go build -o sailing-go .
+./sailing-go -server
+```
+
+Then, in a second terminal:
+
+```bash
+cd ui
+go test -v -timeout 60s
+```
+
+A successful run ends with output similar to:
+
+```text
+PASS: v339 swell playback + hourly scrubber + wide-zoom smoke test
+--- PASS: TestSwellPlaybackSmoke
+PASS
+```
+
+Generated v339 smoke-test SHA-256: `1fba4206ad7353051bc8c398bafa0667773eb656593e2e7fd56f2af42063d13c`.
+
+The UI test module has its own `ui/go.mod` and `ui/go.sum` and may use a newer Go toolchain than the production service module. The production root module remains independent.
+
+## v338 / 1.14.0 swell forecast playback control
+
+- Advances the generated development build to **v338** while retaining public/application version **1.14.0**.
+- Adds a compact **on-map Play / Pause control** for the Global Swell Forecast, visually aligned with the existing air-temperature playback controls while remaining independently positioned on the map.
+- Swell playback advances through the existing PacIOOS / NOAA WaveWatch III forecast timeline in the product's established **6-hour steps**, from **Now through +120h (5 days)**, then loops back to Now.
+- Playback is **frame-aware**: after advancing the committed swell forecast hour, it waits for that WW3 frame request/render to complete before scheduling the next step. A failed or superseded frame stops playback instead of continuing through unresolved requests.
+- The on-map swell transport displays the active forecast offset (`Swell · Now`, `Swell · +6h`, etc.) and changes the control between **▶ Play** and **❚❚ Pause** with corresponding ARIA pressed/label state.
+- Manual interaction with the existing swell forecast slider stops playback immediately; disabling the swell overlay or using **Clear all overlays** also stops playback and clears its timer.
+- Preserves the existing slider's drag-preview/commit-on-release behavior, anchored padded raster lifecycle, globally aligned WW3 lattice, dateline interpolation, clickable swell field, vector markers, and `/swell-forecast` server behavior.
+- `main.go` candidate SHA-256 for this build: `36826d2e3787c38cf4059b384f551fa9f8dc6e5678e5cfc52fe265de2f295191`.
 
 
 ## v337 / 1.14.0 AIS vessel-track feature removal
@@ -1615,10 +2235,10 @@ The normal development workflow is:
 3. Generate and review a versioned source candidate such as `main-updated-v115.go`.
 4. Run `gofmt` on the generated source.
 5. Record SHA-256 checkpoints.
-6. Manually copy the reviewed generated source to `main.go`.
-7. Copy the reviewed README candidate to `README.md` when applicable.
+6. Move the reviewed downloaded source candidate into the repository as `main.go` (for example, `mv ~/Downloads/main-updated-vNNN.go ./main.go`).
+7. Move the reviewed downloaded README candidate into the repository as `README.md` when applicable (for example, `mv ~/Downloads/README-updated-vNNN.md ./README.md`).
 8. Run the local project-state checker.
-9. Build and test locally.
+9. Build and test locally. When the change affects the interactive map, also run the applicable `ui/` chromedp smoke test.
 10. Inspect the Git diff.
 11. Commit and push to GitHub `main`.
 12. Allow Render to deploy the new revision.
@@ -2421,17 +3041,17 @@ This section is the authoritative development handoff for this repository. A new
 <!-- PROJECT-STATE:BEGIN -->
 
 - Public app version: **1.14.0**
-- Generated source build: **v337**
-- Next generated source build: **v338**
+- Generated source build: **v364**
+- Next generated source build: **v365**
 - Authoritative repository: **https://github.com/richard-mauri/pittsburg-saildata**
 - Authoritative branch: **main**
-- Release status: **v337 / 1.14.0 development candidate — AIS vessel-track feature removed**
+- Release status: **v364 / 1.14.0 development candidate — durable missing-frame retry smoke test**
 
 ### Managed-file checkpoints
 
 | Repository file | SHA-256 |
 | --- | --- |
-| `main.go` | `65bc828b23927cff3b954b75b79ddb5accc9ffe846024215564212dc6c9752b9` |
+| `main.go` | `824e5246276f4003cca1c071643faab8f7cd787a9083857da9a16bd9d951d3ec` |
 | `assets/yogiisms.txt` | `4ebf00217e194ee26a8e8fe38237b298800b36ead0c64accdbb82f623c142371` |
 | `assets/fishing_reports.json` | `02b01de77784153157c6a4a60d6ad21e286f7c191bbe204fed605659ea15ca5e` |
 | `check-project-state.sh` | `85fa5062e2ae4509174b6843ebc0066f4a94e2f2e90001230ca74c07aeb500dc` |
@@ -2442,13 +3062,13 @@ This section is the authoritative development handoff for this repository. A new
 
 ### Source-generation workflow
 
-Complete Go source candidates are generated as `main-updated-vNN.go`. Generated candidates never overwrite repository `main.go` automatically. After review, manually copy the candidate to `main.go`, run the checker/build/tests, inspect the Git diff, and then commit/push.
+Complete Go source candidates are generated as `main-updated-vNN.go`. Generated candidates never overwrite repository `main.go` automatically. After review, move the downloaded candidate into place (for example, `mv ~/Downloads/main-updated-vNNN.go ./main.go`), run the checker/build/tests, inspect the Git diff, and then commit/push.
 
 The generated build number is immutable. Any change to generated Go source bytes requires a new `vNN` value and filename; do not reuse an earlier build number for a corrected candidate.
 
 The public application version and generated build are separate identities. The current runtime identity is expected to render as:
 
-`Version 1.14.0 · Build v337`
+`Version 1.14.0 · Build v364`
 
 For future public pushes, choose the semantic version deliberately: patch for fixes/refinements, minor for backward-compatible user-facing features, and major only for incompatible changes. Existing Git release tags are immutable: never reuse or move an existing version tag.
 
@@ -2512,7 +3132,7 @@ Map controls place **Map Types**, **Map Overlays**, and **Center Map** on one ro
 
 NOAA Nautical Chart is considered practical at **Zoom 9+**. If Nautical is the preferred basemap and the user zooms below 9, Street Map is shown temporarily with a notice; Nautical automatically returns at Zoom 9+. Legitimate inland/no-chart blank areas at supported zooms are left unchanged.
 
-Map overlays include NWS forecast zone, NOAA HMS qualitative smoke, **Air Temperature (NOAA/NDBC + METAR)**, NOAA/NDBC Marine / Bay wind barbs, Aviation Weather Center METAR Land / Inland wind barbs, **Surface Pressure / Isobars**, **Global Swell Forecast**, NOAA/NESDIS cloud cover, and NEXRAD radar. The Air Temperature layer is an interpolated observational heat map with a fixed **−10°F to 110°F** color scale; it combines fresh NDBC `ATMP` and METAR temperatures and intentionally renders no station icons. Global Swell Forecast uses public PacIOOS/NOAA-NCEP WaveWatch III `shgt`, `sper`, and `sdir` fields for basin-scale swell tracking with a 0-to-120-hour forecast slider; it is not a surf-break forecast. The two wind-barb layers share buffered viewport loading but use independent observation networks; zoom-dependent collision thinning keeps wide-area views readable. Sea Surface Temp remains deferred/disabled since v195; historical implementation notes are retained below for reference, but SST is not an active Map Overlays control. v191 uses the PFEL/ERD host and its matching `nesdis...` dataset identifier for the primary path, with a matching Central-host fallback only for SST imagery. v189 uses the current NOAA NESDIS ERDDAP identifier after the older `noaacwBLENDEDsstDNDaily` path stopped serving the deployed overlay. `/sst-info` resolves the latest available dataset time and `/sst-overlay` renders the current map bounds through ERDDAP `griddap` as a transparent PNG using a fixed **35–95°F** wide-area fishing-oriented scale. Because the ERDDAP source image is linear in latitude while Leaflet is EPSG:3857 Web Mercator, v180 server-side reprojects the SST scanlines into Web Mercator before returning the PNG. The browser displays that reprojected PNG as a normal Leaflet image overlay at 0.50 opacity. CoastWatch's native transparent/no-data edge is preserved and no secondary coastline mask is applied. The wider fixed range avoids painting most warm tropical/subtropical water with one saturated hottest color while preserving cross-view comparability. At low zooms, Leaflet world wrapping can extend the viewport outside -180°/+180°. v183 keeps the reliable single-image path: it clips the visible viewport to the one 360° world copy containing the map center, translates that interval into NOAA's canonical longitude range, and displays the returned SST image over only that clipped interval. The projection fix improves geographic alignment at wide map extents; the approximately 5 km source grid still limits shoreline-scale detail. Saildrone Observations is a separate optional moving-platform layer backed by NOAA PMEL public ERDDAP; it displays the latest available position and met-ocean readings from configured 2026 missions and is not treated as a persistent local station network. v187 discovers each mission's ERDDAP schema before requesting data, requires only time/position for plotting, and treats wind, SST, salinity, currents, and wave measurements as optional enrichments. HMS smoke uses the current warm yellow → amber → burnt-orange light/medium/heavy palette. Smoke is qualitative satellite analysis, not AQI or measured PM2.5. v298 adds separate NIFC/WFIGS current-fire-perimeter and NOAA HMS satellite-fire-detection overlays so visible fire context is not conflated with smoke-plume analysis. v299 filters WFIGS perimeter responses to the newest approved/public/visible perimeter per incident, preventing historical or duplicate source polygons for the same incident from stacking on the map.
+Map overlays include NWS forecast zone, NOAA HMS qualitative smoke, **Air Temperature (NOAA/NDBC + METAR)**, NOAA/NDBC Marine / Bay wind barbs, Aviation Weather Center METAR Land / Inland wind barbs, **Surface Pressure / Isobars**, **Global Swell Forecast**, NOAA/NESDIS cloud cover, and NEXRAD radar. The Air Temperature layer is an interpolated observational heat map with a fixed **−10°F to 110°F** color scale; it combines fresh NDBC `ATMP` and METAR temperatures and intentionally renders no station icons. Global Swell Forecast uses public PacIOOS/NOAA-NCEP WaveWatch III `shgt`, `sper`, and `sdir` fields for basin-scale swell tracking with a 0-to-120-hour forecast slider and an on-map Play/Pause transport that advances frame-aware through the established 6-hour WW3 forecast steps; it is not a surf-break forecast. The two wind-barb layers share buffered viewport loading but use independent observation networks; zoom-dependent collision thinning keeps wide-area views readable. Sea Surface Temp remains deferred/disabled since v195; historical implementation notes are retained below for reference, but SST is not an active Map Overlays control. v191 uses the PFEL/ERD host and its matching `nesdis...` dataset identifier for the primary path, with a matching Central-host fallback only for SST imagery. v189 uses the current NOAA NESDIS ERDDAP identifier after the older `noaacwBLENDEDsstDNDaily` path stopped serving the deployed overlay. `/sst-info` resolves the latest available dataset time and `/sst-overlay` renders the current map bounds through ERDDAP `griddap` as a transparent PNG using a fixed **35–95°F** wide-area fishing-oriented scale. Because the ERDDAP source image is linear in latitude while Leaflet is EPSG:3857 Web Mercator, v180 server-side reprojects the SST scanlines into Web Mercator before returning the PNG. The browser displays that reprojected PNG as a normal Leaflet image overlay at 0.50 opacity. CoastWatch's native transparent/no-data edge is preserved and no secondary coastline mask is applied. The wider fixed range avoids painting most warm tropical/subtropical water with one saturated hottest color while preserving cross-view comparability. At low zooms, Leaflet world wrapping can extend the viewport outside -180°/+180°. v183 keeps the reliable single-image path: it clips the visible viewport to the one 360° world copy containing the map center, translates that interval into NOAA's canonical longitude range, and displays the returned SST image over only that clipped interval. The projection fix improves geographic alignment at wide map extents; the approximately 5 km source grid still limits shoreline-scale detail. Saildrone Observations is a separate optional moving-platform layer backed by NOAA PMEL public ERDDAP; it displays the latest available position and met-ocean readings from configured 2026 missions and is not treated as a persistent local station network. v187 discovers each mission's ERDDAP schema before requesting data, requires only time/position for plotting, and treats wind, SST, salinity, currents, and wave measurements as optional enrichments. HMS smoke uses the current warm yellow → amber → burnt-orange light/medium/heavy palette. Smoke is qualitative satellite analysis, not AQI or measured PM2.5. v298 adds separate NIFC/WFIGS current-fire-perimeter and NOAA HMS satellite-fire-detection overlays so visible fire context is not conflated with smoke-plume analysis. v299 filters WFIGS perimeter responses to the newest approved/public/visible perimeter per incident, preventing historical or duplicate source polygons for the same incident from stacking on the map.
 
 The Welcome page reflects the current Conditions Now / Planning and Details workflow and retains the randomized Yogi Berra quotation. `assets/yogiisms.txt` currently contains the expanded 59-line quote set.
 
