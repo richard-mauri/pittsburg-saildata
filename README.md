@@ -7,7 +7,7 @@ The default wind station is **PSBC1**.
 ## Current release
 
 **Public version: 1.14.0**  
-**Generated source lineage: v364**
+**Generated source lineage: v365**
 
 **Current SST status:** deferred/disabled in v195; see **Deferred SST — future approach** below.
 **Current chlorophyll status:** both Chlorophyll Field and Chlorophyll Contours are deferred/disabled in v198.
@@ -19,6 +19,16 @@ Version 1.9.2 builds on the streamlined browser workflow with clearer observatio
 
 
 
+
+## v365 / 1.15.0 release version bump
+
+- Advances the generated development build to **v365** and bumps the public/application semantic version from **1.14.0** to **1.15.0** for release.
+- No functional application behavior changes from v364.
+- This semantic-version bump reflects the significant feature and UX changes accumulated since the previous pushed release, including Swell playback/cache preparation, missing-frame recovery, cache-status consolidation, 1h / 3h / 6h playback handling, and the Air Temperature control cleanup.
+- Release display: **Version 1.15.0 · Build v365**.
+- Recommended Git tag for this release: **v1.15.0**.
+- `main.go` candidate SHA-256: `1d0094f8f02dc1f5ea7374d318055d5536bcab15525f600c821ac871f8212034`.
+- v365 UI smoke-test SHA-256: `c52f1341c634454b09abab348f54836ce17c823a3731ccc262cd2a4af1a0803e`.
 
 ## v364 / 1.14.0 durable missing-frame retry smoke test
 
@@ -3041,17 +3051,17 @@ This section is the authoritative development handoff for this repository. A new
 <!-- PROJECT-STATE:BEGIN -->
 
 - Public app version: **1.14.0**
-- Generated source build: **v364**
-- Next generated source build: **v365**
+- Generated source build: **v365**
+- Next generated source build: **v366**
 - Authoritative repository: **https://github.com/richard-mauri/pittsburg-saildata**
 - Authoritative branch: **main**
-- Release status: **v364 / 1.14.0 development candidate — durable missing-frame retry smoke test**
+- Release status: **v365 / 1.15.0 release candidate — semantic version bump for accumulated feature changes**
 
 ### Managed-file checkpoints
 
 | Repository file | SHA-256 |
 | --- | --- |
-| `main.go` | `824e5246276f4003cca1c071643faab8f7cd787a9083857da9a16bd9d951d3ec` |
+| `main.go` | `1d0094f8f02dc1f5ea7374d318055d5536bcab15525f600c821ac871f8212034` |
 | `assets/yogiisms.txt` | `4ebf00217e194ee26a8e8fe38237b298800b36ead0c64accdbb82f623c142371` |
 | `assets/fishing_reports.json` | `02b01de77784153157c6a4a60d6ad21e286f7c191bbe204fed605659ea15ca5e` |
 | `check-project-state.sh` | `85fa5062e2ae4509174b6843ebc0066f4a94e2f2e90001230ca74c07aeb500dc` |
@@ -3068,7 +3078,7 @@ The generated build number is immutable. Any change to generated Go source bytes
 
 The public application version and generated build are separate identities. The current runtime identity is expected to render as:
 
-`Version 1.14.0 · Build v364`
+`Version 1.15.0 · Build v365`
 
 For future public pushes, choose the semantic version deliberately: patch for fixes/refinements, minor for backward-compatible user-facing features, and major only for incompatible changes. Existing Git release tags are immutable: never reuse or move an existing version tag.
 

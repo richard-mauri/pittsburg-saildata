@@ -221,7 +221,7 @@ func TestSwellPlaybackSmoke(t *testing.T) {
 	}
 
 	// Enable Global Swell Forecast through the real UI. Force both request-level
-	// attempts for the initial Now frame to fail so v364 must exercise its one
+	// attempts for the initial Now frame to fail so v365 must exercise its one
 	// enable-time preparation retry. Delay +3h so readiness cannot complete until
 	// the full default 3-hour playback sequence has really been primed.
 	if err := chromedp.Do(testCtx,
@@ -284,7 +284,7 @@ func TestSwellPlaybackSmoke(t *testing.T) {
 		t.Fatal("Reload swell cache button remains disabled after preparation")
 	}
 
-	// v364 regression: the Reload button listener must actually be bound after the
+	// v365 regression: the Reload button listener must actually be bound after the
 	// button element is assigned. Clicking it must enter loading-current, send a
 	// forced refresh request, and return to ready after playback priming.
 	beforeReloadNow := mockHourCount(testCtx, 0)
@@ -365,7 +365,7 @@ func TestSwellPlaybackSmoke(t *testing.T) {
 		t.Fatalf("close overlay menu before transport test: %v", err)
 	}
 
-	// v364 standardizes both playback overlays below the map. Temperature and
+	// v365 standardizes both playback overlays below the map. Temperature and
 	// swell live as separately identified rows in the shared footer transport
 	// stack, while the map scale remains outside that stack at the right.
 	if !evalBool(testCtx, `document.querySelector(".map-footer-transports > #map-air-temperature-transport") !== null`) {
@@ -495,7 +495,7 @@ func TestSwellPlaybackSmoke(t *testing.T) {
 
 	initialTransportHeight := evalString(testCtx, `String(Math.round(document.querySelector("#map-swell-transport").getBoundingClientRect().height))`)
 
-	// v364 regression: changing Step must preserve the newly selected value before stopSwellPlayback() refreshes the transport.
+	// v365 regression: changing Step must preserve the newly selected value before stopSwellPlayback() refreshes the transport.
 	// The test asserts the 1h selection sticks, then verifies durable cache/readiness outcomes.
 	if err := chromedp.Do(testCtx,
 		chromedp.Evaluate[chromedp.Void](`(() => {
@@ -592,7 +592,7 @@ func TestSwellPlaybackSmoke(t *testing.T) {
 			!evalBool(testCtx, `document.querySelector("#map-swell-map-play")?.disabled === true`)
 	})
 
-	// v364 regression: a failed cache frame must identify the missing hour and
+	// v365 regression: a failed cache frame must identify the missing hour and
 	// Reload must retry only that missing frame instead of rebuilding the full sequence.
 	if err := chromedp.Do(testCtx,
 		chromedp.Evaluate[chromedp.Void](`(() => {
@@ -667,7 +667,7 @@ func TestSwellPlaybackSmoke(t *testing.T) {
 		t.Fatalf("swell Play button disabled before playback; map=%q note=%q", zoom, note)
 	}
 
-	// v364 has already primed +3h. Capture the baseline so the test proves that
+	// v365 has already primed +3h. Capture the baseline so the test proves that
 	// pressing Play actually advances/request-serves the +3h frame rather than
 	// mistaking the earlier cache-prime request for playback.
 	beforePlay3 := mockHourCount(testCtx, 3)
@@ -759,7 +759,7 @@ func TestSwellPlaybackSmoke(t *testing.T) {
 		t.Fatalf("playback continued after Pause: request count %d -> %d", countAtPause, got)
 	}
 
-	// Select 1-hour playback. v364 exposes cache progress directly below the map
+	// Select 1-hour playback. v365 exposes cache progress directly below the map
 	// and keeps Play disabled until all 121 hourly frames are cached.
 	if err := chromedp.Do(testCtx,
 		chromedp.Evaluate[chromedp.Void](`(() => {
@@ -920,10 +920,10 @@ func TestSwellPlaybackSmoke(t *testing.T) {
 			strings.Contains(textOf(testCtx, `#map-swell-map-time`), wantMapTime)
 	})
 
-	// v364 regression: at Zoom 9, deliberately keep the +19h playback request
+	// v365 regression: at Zoom 9, deliberately keep the +19h playback request
 	// in flight, then make a quick zoom-out/zoom-in movement. The map's delayed
 	// swell refresh starts a newer +19h request and supersedes the original
-	// playback request. v364 must treat that supersession as benign and continue
+	// playback request. v365 must treat that supersession as benign and continue
 	// to +20h rather than stopping playback.
 	zoom9Reached := strings.Contains(textOf(testCtx, `#map-scale-status`), "Zoom 9")
 	for i := 0; i < 8 && !zoom9Reached; i++ {
@@ -1068,5 +1068,5 @@ func TestSwellPlaybackSmoke(t *testing.T) {
 		t.Fatalf("swell requests continued after Clear All: request count %d -> %d", countAfterClear, got)
 	}
 
-	t.Log("PASS: v364 durable missing-frame retry + temperature/swell UX smoke test")
+	t.Log("PASS: v365 durable missing-frame retry + temperature/swell UX smoke test")
 }
