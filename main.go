@@ -32,8 +32,8 @@ import (
 )
 
 const (
-	appVersion                      = "1.15.0"
-	buildVersion                    = "v366"
+	appVersion                      = "1.16.0"
+	buildVersion                    = "v367"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -592,6 +592,9 @@ func main() {
 	}
 
 	observations, err := getWindStation(stationID)
+	if *at != "" {
+		observations, err = getNDBCWindStation(stationID)
+	}
 	if err != nil {
 		fatal(err)
 	}
@@ -3884,6 +3887,13 @@ func runServer(
 		currentBin := queryInt(r, "bin", 0)
 
 		if at != "" {
+			// Historical reports retain the NDBC archive rather than the
+			// CO-OPS recent-only wind window.
+			observations, err = getNDBCWindStation(stationID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
+			}
 			report, err = buildHistoricalWindReport(stationID, observations, at, loc)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
@@ -6280,6 +6290,12 @@ func makeHTMLReportData(report *SailingReport, loc *time.Location) htmlReportDat
 		d.WindObserved = latest.Time.In(loc).Format("3:04 PM")
 		if report.Historical == nil {
 			d.WindObservedAge = formatObservationAge(time.Since(latest.Time))
+			if latest.Source != "" {
+				d.WindObservedAge += " · " + latest.Source
+			}
+			if latest.Stale {
+				d.WindObservedAge += " · STALE"
+			}
 		}
 	} else {
 		d.WindDirection = "—"

@@ -2,9 +2,13 @@ package main
 
 import (
 	"bufio"
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,6 +21,7 @@ const (
 )
 
 type Observation struct {
+	Source    string
 	Time      time.Time
 	Direction float64
 	WindMS    float64
@@ -33,6 +38,8 @@ type PeriodReport struct {
 }
 
 type WindObservation struct {
+	Source     string    `json:"source,omitempty"`
+	Stale      bool      `json:"stale,omitempty"`
 	Time       time.Time `json:"time"`
 	AgeMinutes int       `json:"age_minutes"`
 	Direction  string    `json:"direction,omitempty"`
@@ -59,7 +66,7 @@ type HistoricalReport struct {
 	Observations []WindObservation `json:"observations,omitempty"`
 }
 
-func getWindStation(station string) ([]Observation, error) {
+func getNDBCWindStation(station string) ([]Observation, error) {
 	station = strings.ToUpper(strings.TrimSpace(station))
 	url := fmt.Sprintf("%s/%s.txt", ndbcBaseURL, station)
 
@@ -133,6 +140,7 @@ func parseWindStation(r io.Reader) ([]Observation, error) {
 				HasDir:    dirOK,
 				HasWind:   windOK,
 				HasGust:   gustOK,
+				Source:    "NDBC",
 			},
 		)
 	}
@@ -146,8 +154,14 @@ func buildCurrentWindReport(
 	loc *time.Location,
 ) *SailingReport {
 	now := time.Now().In(loc)
-	latest := findLatest(observations)
-	latest10 := findLatestN(observations, 10)
+	valid := filterObservations(observations, func(o Observation) bool {
+		return o.HasWind && !o.Time.After(now.Add(5*time.Minute))
+	})
+	var latest Observation
+	if len(valid) > 0 {
+		latest = findLatest(valid)
+	}
+	latest10 := findLatestN(valid, 10)
 
 	start12 := now.Add(-12 * time.Hour)
 
@@ -162,7 +176,7 @@ func buildCurrentWindReport(
 	report := &SailingReport{
 		Station:    station,
 		ReportTime: now,
-		Latest:     makeWindObservation(latest, now, loc),
+		Latest:     nil,
 		Latest10:   makeWindObservationList(latest10, now, loc),
 		Last12Hours: calculateWindStats(
 			last12,
@@ -170,6 +184,10 @@ func buildCurrentWindReport(
 		),
 	}
 
+	if !latest.Time.IsZero() {
+		report.Latest = makeWindObservation(latest, now, loc)
+		report.Latest.Stale = now.Sub(latest.Time) > currentWindMaxAge
+	}
 	for daysAgo := 1; daysAgo <= 2; daysAgo++ {
 		d := now.AddDate(0, 0, -daysAgo)
 
@@ -284,7 +302,8 @@ func writeWindSummaryText(
 
 	fmt.Fprintf(
 		w,
-		"Currently %s %.1f kt, gusting %.1f kt.\n",
+		"%s %s %.1f kt, gusting %.1f kt.\n",
+		map[bool]string{true: "Latest (STALE)", false: "Currently"}[latest.Stale],
 		latest.Direction,
 		latest.WindKT,
 		latest.GustKT,
@@ -328,7 +347,7 @@ func writeWindSummaryText(
 	}
 
 	age := report.ReportTime.Sub(latest.Time)
-	if age >= 60*time.Minute {
+	if age >= currentWindMaxAge {
 		fmt.Fprintf(
 			w,
 			"Warning: the latest wind observation is %s old.\n",
@@ -616,6 +635,7 @@ func makeWindObservation(
 ) *WindObservation {
 	result := &WindObservation{
 		Time:       o.Time.In(loc),
+		Source:     o.Source,
 		AgeMinutes: int(absDuration(reference.Sub(o.Time)).Minutes()),
 	}
 
@@ -808,4 +828,193 @@ func formatAge(d time.Duration) string {
 
 func round1(value float64) float64 {
 	return float64(int(value*10+0.5)) / 10
+}
+
+// Reliable wind source adapter. Existing reports continue to consume []Observation.
+const currentWindMaxAge = 30 * time.Minute
+const coopsWindURL = "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
+
+// Enable a station only after its mapping has been independently established.
+var coopsWindStationIDs = map[string]string{
+	"PSBC1": "9415115", "MZXC1": "9415102", "PPXC1": "9414847",
+}
+
+type coopsWindRow struct {
+	Time      string `json:"t"`
+	Speed     string `json:"s"`
+	Direction string `json:"d"`
+	Gust      string `json:"g"`
+	Flags     string `json:"f"`
+}
+type coopsWindPayload struct {
+	Data  []coopsWindRow `json:"data"`
+	Error *struct {
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+func coopsGoodFlags(flags string) bool {
+	// CO-OPS wind flags are X (maximum expected speed) and R (rate change).
+	// NOAA reports accepted measurements as "0,0". Be conservative about
+	// unknown or malformed flag configurations.
+	bits := strings.Split(strings.TrimSpace(flags), ",")
+	if len(bits) != 2 {
+		return false
+	}
+	return strings.TrimSpace(bits[0]) == "0" && strings.TrimSpace(bits[1]) == "0"
+}
+func coopsNumber(s string) (float64, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.EqualFold(s, "MM") || strings.EqualFold(s, "null") {
+		return 0, false
+	}
+	n, e := strconv.ParseFloat(s, 64)
+	return n, e == nil && !math.IsNaN(n) && !math.IsInf(n, 0)
+}
+func parseCOOPSWind(r io.Reader) ([]Observation, error) {
+	var p coopsWindPayload
+	if err := json.NewDecoder(io.LimitReader(r, 4<<20)).Decode(&p); err != nil {
+		return nil, err
+	}
+	if p.Error != nil {
+		return nil, fmt.Errorf("CO-OPS: %s", p.Error.Message)
+	}
+	if len(p.Data) == 0 {
+		return nil, fmt.Errorf("CO-OPS: no wind observations")
+	}
+	out := make([]Observation, 0, len(p.Data))
+	for _, row := range p.Data {
+		if !coopsGoodFlags(row.Flags) {
+			continue
+		}
+		t, err := time.ParseInLocation("2006-01-02 15:04", strings.TrimSpace(row.Time), time.UTC)
+		if err != nil {
+			continue
+		}
+		speed, hasSpeed := coopsNumber(row.Speed)
+		if !hasSpeed || speed < 0 || speed > 200 {
+			continue
+		}
+		dir, hasDir := coopsNumber(row.Direction)
+		if hasDir && (dir < 0 || dir > 360) {
+			hasDir = false
+		}
+		gust, hasGust := coopsNumber(row.Gust)
+		if hasGust && (gust < 0 || gust > 250) {
+			hasGust = false
+		}
+		// NOAA's english wind values are knots, while Observation stores m/s.
+		out = append(out, Observation{Time: t, WindMS: speed / msToKnots, GustMS: gust / msToKnots,
+			Direction: dir, HasWind: true, HasDir: hasDir, HasGust: hasGust, Source: "CO-OPS"})
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("CO-OPS: no quality-accepted wind observations")
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Time.After(out[j].Time) })
+	return out, nil
+}
+
+func getCOOPSWindStation(ctx context.Context, client *http.Client, station, coopsID string) ([]Observation, error) {
+	q := url.Values{}
+	q.Set("date", "recent")
+	q.Set("station", coopsID)
+	q.Set("product", "wind")
+	q.Set("units", "english")
+	q.Set("time_zone", "gmt")
+	q.Set("format", "json")
+	q.Set("application", "mauri_sailing")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, coopsWindURL+"?"+q.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "pittsburg-saildata/"+appVersion)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("CO-OPS %s HTTP %d", station, resp.StatusCode)
+	}
+	return parseCOOPSWind(resp.Body)
+}
+
+func newestValidWind(observations []Observation, now time.Time) (Observation, bool) {
+	var latest Observation
+	found := false
+	for _, o := range observations {
+		if !o.HasWind || math.IsNaN(o.WindMS) || math.IsInf(o.WindMS, 0) || o.WindMS < 0 || o.Time.IsZero() || o.Time.After(now.Add(5*time.Minute)) {
+			continue
+		}
+		if !found || o.Time.After(latest.Time) {
+			latest = o
+			found = true
+		}
+	}
+	return latest, found
+}
+func chooseWindSeries(coops []Observation, coopsErr error, ndbc []Observation, ndbcErr error, now time.Time) ([]Observation, error) {
+	a, ao := newestValidWind(coops, now)
+	b, bo := newestValidWind(ndbc, now)
+	switch {
+	case ao && bo:
+		// Select fresh observations before stale, then timestamp, with CO-OPS
+		// winning ties. Do not merge independent histories into statistics.
+		af := now.Sub(a.Time) <= currentWindMaxAge
+		bf := now.Sub(b.Time) <= currentWindMaxAge
+		if af != bf {
+			if af {
+				return coops, nil
+			}
+			return ndbc, nil
+		}
+		if a.Time.After(b.Time) || a.Time.Equal(b.Time) {
+			return coops, nil
+		}
+		return ndbc, nil
+	case ao:
+		return coops, nil
+	case bo:
+		return ndbc, nil
+	}
+	if coopsErr != nil && ndbcErr != nil {
+		return nil, fmt.Errorf("CO-OPS: %v; NDBC: %v", coopsErr, ndbcErr)
+	}
+	if ndbcErr != nil {
+		return nil, fmt.Errorf("NDBC: %w", ndbcErr)
+	}
+	if coopsErr != nil {
+		return nil, fmt.Errorf("CO-OPS: %w; NDBC has no valid wind", coopsErr)
+	}
+	return nil, fmt.Errorf("neither NOAA provider returned valid wind")
+}
+
+// getWindStation remains the one public integration point for current reports,
+// local station browsing, and nearest-station probes.
+func getWindStation(station string) ([]Observation, error) {
+	station = strings.ToUpper(strings.TrimSpace(station))
+	id, hasCOOPS := coopsWindStationIDs[station]
+	if !hasCOOPS {
+		return getNDBCWindStation(station)
+	}
+	type result struct {
+		items []Observation
+		err   error
+	}
+	client := &http.Client{Timeout: 6 * time.Second}
+	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
+	defer cancel()
+	coopsCh := make(chan result, 1)
+	ndbcCh := make(chan result, 1)
+	go func() { x, e := getCOOPSWindStation(ctx, client, station, id); coopsCh <- result{x, e} }()
+	go func() {
+		x, e := getNDBCWindStation(station)
+		for i := range x {
+			x[i].Source = "NDBC"
+		}
+		ndbcCh <- result{x, e}
+	}()
+	a := <-coopsCh
+	b := <-ndbcCh
+	return chooseWindSeries(a.items, a.err, b.items, b.err, time.Now().UTC())
 }

@@ -722,13 +722,11 @@ type windStationProbeResult struct {
 }
 
 func latestUsableWindTime(observations []Observation) (time.Time, bool) {
-	for _, observation := range observations {
-		if !observation.HasWind {
-			continue
-		}
-		return observation.Time, true
+	latest, ok := newestValidWind(observations, time.Now().UTC())
+	if !ok || time.Since(latest.Time) > currentWindMaxAge {
+		return time.Time{}, false
 	}
-	return time.Time{}, false
+	return latest.Time, true
 }
 
 func findNearestUsableWindStation(
@@ -888,7 +886,7 @@ func findNearestUsableWindStation(
 			diag.Reason = "realtime2 returned no parsed observations"
 
 		case !result.Usable:
-			diag.Reason = "realtime2 contained no observation with usable wind speed"
+			diag.Reason = "no wind observation within freshness threshold"
 
 		default:
 			age := now.Sub(result.Latest.UTC())
