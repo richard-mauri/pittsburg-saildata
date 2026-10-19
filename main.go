@@ -35,7 +35,7 @@ import (
 
 const (
 	appVersion                      = "1.16.0"
-	buildVersion                    = "v381"
+	buildVersion                    = "v382"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -3888,6 +3888,70 @@ func runServer(
 		planningURL.RawQuery = q.Encode()
 		planningRequest.URL = &planningURL
 		mux.ServeHTTP(w, planningRequest)
+	})
+
+	// History selector AJAX endpoint. Keep its response aligned with the
+	// initial HTML wind table, including unit formatting and timestamp ages.
+	mux.HandleFunc("/wind-readings", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		stationID := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("station")))
+		if stationID == "" {
+			stationID = defaultStation
+		}
+		if !validStationID(stationID) {
+			http.Error(w, "invalid station ID", http.StatusBadRequest)
+			return
+		}
+		observations, err := getWindStation(stationID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		if len(observations) == 0 {
+			http.Error(w, "no wind observations available", http.StatusBadGateway)
+			return
+		}
+		hours := parseWindReadingHours(r.URL.Query())
+		unit := parseWindUnit(r.URL.Query())
+		report := buildCurrentWindReport(stationID, observations, loc)
+		readings := windObservationsForHours(observations, report.ReportTime, loc, hours)
+		items := make([]map[string]string, 0, len(readings))
+		for _, reading := range readings {
+			windText, gustText := "—", "—"
+			direction := strings.TrimSpace(reading.Direction)
+			if direction == "" {
+				direction = "—"
+			}
+			if reading.WindKT > 0 {
+				windText = formatWindSpeed(reading.WindKT, 1, unit)
+			}
+			if reading.GustKT > 0 {
+				gustText = formatWindSpeed(reading.GustKT, 1, unit)
+			}
+			age := report.ReportTime.Sub(reading.Time)
+			if age < 0 {
+				age = 0
+			}
+			items = append(items, map[string]string{
+				"time":      reading.Time.In(loc).Format("3:04 PM"),
+				"direction": direction,
+				"wind":      windText,
+				"gust":      gustText,
+				"age":       formatAge(age),
+			})
+		}
+		var summary strings.Builder
+		writeWindSummaryDisplay(&summary, report, loc, unit)
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"hours":    hours,
+			"readings": items,
+			"summary":  strings.TrimSpace(summary.String()),
+		})
 	})
 
 	mux.HandleFunc("/report", func(w http.ResponseWriter, r *http.Request) {
