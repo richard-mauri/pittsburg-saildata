@@ -1,42 +1,40 @@
 # Mauri's Weather & Water Conditions
 
-A sailing-planning dashboard for the San Francisco Bay–Delta corridor and other supported waters. Choose where you plan to sail and see nearby **wind observations**, **predicted currents**, weather forecasts and environmental map overlays in one place.
+A sailing-planning dashboard for the San Francisco Bay–Delta corridor and other supported waters. Select a sailing location to see nearby **observed wind**, **predicted tidal currents**, forecasts and environmental map overlays.
 
-**Open the dashboard:** https://weather.themauris.org  
-**Source code:** https://github.com/richard-mauri/pittsburg-saildata
-
-> **For AI coding agents and future chats:** [AGENTS.md](AGENTS.md) contains the development procedure, current build handoff, source/version rules and Git safeguards. This README is a general user guide.
+**Dashboard:** https://weather.themauris.org  
+**Source:** https://github.com/richard-mauri/pittsburg-saildata
 
 ## Getting started
 
-Open the dashboard, click the map at the area you're considering, and generate conditions for that location. Read the **Bottom Line** summary first, then explore **Conditions Now** and **Planning and Details** for supporting observations, current timing, forecasts and overlays.
+Open the dashboard, click the map where you want to sail, and generate conditions. Read the **Bottom Line** summary, then use **Conditions Now** and **Planning and Details** for observations, current timing, forecast context and overlays. You need not know NOAA station numbers: the application can select a nearby station with recent usable wind, or you can override it manually when you know a station is more representative.
 
-You do not need to know NOAA station numbers. The system can choose a nearby wind station with sufficiently recent observations. You may also choose a station yourself when you know its exposure is more representative of your sailing area.
+Moving or zooming the map changes the view; **clicking a location** changes the selected sailing position. These actions are intentionally different.
 
-Map position and sailing selection are deliberately separate: moving or zooming the map changes the view; clicking a point selects the location for the sailing report.
+## Understanding the data
 
-## What the data means
+**Wind** is measured at NOAA stations, including NDBC and selected validated NOAA CO-OPS sources. Review observation age, station identity, anemometer height and exposure.
 
-**Wind** is based on measured observations from NOAA stations, including NDBC and selected validated NOAA CO-OPS sources when available. Check the station name, time and measurement freshness. Wind varies across the Bay and Delta, and station heights and exposure differ.
+**Current** is NOAA **tidal-current prediction**, not a direct measurement at your boat. Use the ebb, flood, slack, maximum-speed and time plots as planning context. Wind and current stations are selected separately.
 
-**Currents** are NOAA **tidal-current predictions**, not measurements of water moving at your boat. The predictions help estimate flood, ebb, slack periods and maximum currents, and can be displayed with a time-based graph. Current station choice is distinct from wind station choice.
+**Forecasts and map layers** may include marine/point weather, radar, pressure, temperature, smoke/fire, wind barbs and swell depending on coverage and upstream availability. These are distinct from observations and tidal-current predictions.
 
-**Forecasts** provide prospective marine/point weather information rather than observed conditions. Radar, smoke/fire, pressure, temperature, wind barbs, swell and other map overlays depend on coverage, region, zoom and upstream availability.
+## Main views and interfaces
 
-## Main views
+- **Conditions Now:** concise current conditions and Bottom Line.
+- **Planning and Details:** deeper wind, forecast and current-planning information.
+- **Wind History:** observation plots/tables with 1, 4, 8, 12, 16, 20 or 24-hour windows where data are available.
+- **Station selection:** automatic nearby-usable choice or explicit manual override.
+- **Maps:** environmental context and map overlays.
 
-- **Conditions Now:** a concise current summary and Bottom Line for the selected area.
-- **Planning and Details:** deeper weather, wind-history and current-prediction information.
-- **Wind History:** recent observations with a chart/table and selectable periods of 1, 4, 8, 12, 16, 20 or 24 hours, when the data source provides observations.
-- **Station selection:** automatic nearby usable station or manual override.
-- **Maps:** layered environmental information for spatial context and route planning.
+The Go service supports browser, text and JSON outputs where available. Documented routes include `/report`, `/planning`, `/wind-readings`, `/wind-stations`, `/point-weather` and `/marine-forecast`; parameters and formats depend on the endpoint.
 
-The service also offers HTML, text and JSON reporting for integrations and scripts. Core routes include `/report`, `/planning`, `/wind-readings`, `/wind-stations`, `/point-weather` and `/marine-forecast`; availability and parameters vary by endpoint.
+## Operating limits
 
-## Operating notes and limits
+The documented public service is hosted by a locally running Go application exposed through Cloudflare Tunnel; the server and tunnel must be running for public access. Wind measurements may be delayed, stations may be unavailable, and predicted currents may differ from actual water movement.
 
-The public site is served by a locally running Go application exposed through Cloudflare Tunnel. Its server and tunnel must remain running for the public reader to be accessible.
+**This is a planning and exploration tool, not a navigation or safety-critical instrument.** Use official forecasts, marine notices, charts, local knowledge and seamanship before sailing.
 
-Observations can be delayed, stations can be offline, and predicted currents will differ from actual conditions. The dashboard is **not a navigation or safety-critical instrument**. Use current official marine forecasts, notices, charts, local knowledge and seamanship before sailing.
+## Development documentation
 
-For code changes, testing, reproducible builds and the authoritative next-chat development handoff, see [AGENTS.md](AGENTS.md).
+This README is for users. For contributors and coding agents, see [AGENTS.md](AGENTS.md) (mandatory agent instructions), [ARCHITECTURE.md](ARCHITECTURE.md) (system and behavior contracts), [DEVELOPMENT.md](DEVELOPMENT.md) (GitHub Issues, branches, draft PRs, CI and acceptance), and [CURRENT_WORK.md](CURRENT_WORK.md) (current active handoff). Development changes follow GitHub PRs rather than downloadable replacement-file handoffs.
