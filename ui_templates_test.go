@@ -18,7 +18,10 @@ func TestEmbeddedPageTemplates(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			markup := readSailingUITemplate(tc.file)
-			if !strings.Contains(strings.ToLower(markup), "<html") {
+			if !strings.Contains(markup, "--panel:") || !strings.Contains(markup, "--accent:") {
+\t\t\t\tt.Fatalf("%s missing shared theme", tc.file)
+\t\t\t}
+\t\t\tif !strings.Contains(strings.ToLower(markup), "<html") {
 				t.Fatalf("%s does not contain an HTML page", tc.file)
 			}
 		})
