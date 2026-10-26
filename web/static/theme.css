@@ -126,7 +126,7 @@ input,select,textarea {
 #bottom-line-card.bottom.planning-preferred,
 #bottom-line-card.bottom.planning-caution,
 #bottom-line-card.bottom.planning-redflag {
-  border-left:5px solid var(--accent);
+  border-left:3px solid var(--accent);
 }
 
 
@@ -139,7 +139,7 @@ input,select,textarea {
 }
 .planning-day,.planning-day.preferred,.planning-day.caution,.planning-day.redflag {
   background:var(--panel);color:var(--ink);
-  border:1px solid var(--border);border-left-width:4px;
+  border:1px solid var(--border);border-left-width:3px;
 }
 .planning-day.preferred { border-left-color:var(--status-preferred); }
 .planning-day.caution { border-left-color:var(--status-caution); }
@@ -180,3 +180,8 @@ input,select,textarea {
 .page-loading-spinner {
   border-color:var(--border);border-top-color:var(--accent);
 }
+
+/* Rank-aware Conditions Now accent; status colors never borrow tidal gold. */
+#bottom-line-card.bottom.planning-preferred { border-left-color:var(--status-preferred); }
+#bottom-line-card.bottom.planning-caution { border-left-color:var(--status-caution); }
+#bottom-line-card.bottom.planning-redflag { border-left-color:var(--status-redflag); }
