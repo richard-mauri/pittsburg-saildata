@@ -88,3 +88,43 @@ input,select,textarea {
   border-color:light-dark(#e7c978,#8d703d); color:light-dark(#654d08,#ffe6a3); }
 .wind-distance-warning strong { color:inherit; }
 .full-report { background:#0a1720;color:#e7f4f8; }
+
+
+/* Shared controls: navigation links and action buttons use the same restrained
+   panel treatment as the map controls, including disabled/current states. */
+.planning-page-link,
+.map-primary-actions .map-go,
+.map-primary-actions .map-reset,
+.current-range-toolbar .current-date-nav,
+.current-range-toolbar .current-date-nav.is-current {
+  display:inline-flex;align-items:center;justify-content:center;
+  background:var(--panel);color:var(--ink);border:1px solid var(--border);
+  border-radius:999px;text-decoration:none;font:inherit;font-weight:800;
+  min-height:44px;padding:10px 16px;box-shadow:none;
+}
+.planning-page-link:hover,
+.map-primary-actions .map-go:not(:disabled):hover,
+.map-primary-actions .map-reset:not(:disabled):hover,
+.current-range-toolbar .current-date-nav:hover {
+  background:var(--soft);color:var(--ink);border-color:var(--accent);
+  filter:none;
+}
+.map-primary-actions .map-go:disabled,
+.map-primary-actions .map-reset:disabled,
+.map-primary-actions .map-go[aria-disabled="true"],
+.map-primary-actions .map-reset[aria-disabled="true"],
+.current-range-toolbar .current-date-nav.is-current {
+  opacity:.55;cursor:default;
+}
+.current-range-toolbar .current-date-nav.is-current {
+  background:var(--panel);color:var(--ink);border-color:var(--border);
+}
+/* Cyan belongs to the shared card frame, not to warning or tidal-range
+   semantics. No gold or other state-colored card borders. */
+.card,
+#bottom-line-card.bottom,
+#bottom-line-card.bottom.planning-preferred,
+#bottom-line-card.bottom.planning-caution,
+#bottom-line-card.bottom.planning-redflag {
+  border-left:5px solid var(--accent);
+}
