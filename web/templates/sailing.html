@@ -162,6 +162,25 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 .wind-distance-warning{background:light-dark(#fff8df,#403317);color:light-dark(#654d08,#ffe6a3);border-color:light-dark(#e7c978,#92733e)}
 .wind-distance-warning strong{color:inherit}
 .full-report{background:light-dark(#071f31,#0a1116);color:#e7f4f8}
+
+/* v384 review fix: keep foreground and background paired in every theme. */
+.page-unit-control,.page-preferences .page-unit-control select{background:var(--panel);color:var(--ink);border-color:var(--border)}
+.bottom-source-context{background:var(--soft);color:var(--ink);border-color:var(--border)}
+.bottom-source-context strong{color:var(--ink)}
+.bottom.planning-preferred{background:light-dark(#eff8f1,#19382d);border-color:light-dark(#b8d8c0,#35735b);color:light-dark(#18382b,#e8f8f0)}
+.bottom.planning-caution{background:light-dark(#fff8e6,#3b301c);border-color:light-dark(#e6c66a,#8b6e35);color:light-dark(#46310a,#ffe9b0)}
+.bottom.planning-redflag{background:light-dark(#fff0ef,#402522);border-color:light-dark(#e0a39d,#a75d53);color:light-dark(#512922,#ffddd7)}
+.bottom.planning-preferred h2,.bottom.planning-preferred .conditions-now-asof,.bottom.planning-preferred .bottom-source-context strong{color:inherit}
+.bottom.planning-caution h2,.bottom.planning-caution .conditions-now-asof,.bottom.planning-caution .bottom-source-context strong{color:inherit}
+.bottom.planning-redflag h2,.bottom.planning-redflag .conditions-now-asof,.bottom.planning-redflag .bottom-source-context strong{color:inherit}
+.bottom.planning-preferred .bottom-source-context,.bottom.planning-caution .bottom-source-context,.bottom.planning-redflag .bottom-source-context{background:light-dark(#ffffffa8,#00000040);color:inherit;border-color:currentColor}
+.bottom .planning-period-status.preferred{color:light-dark(#176246,#a3ebc2)}
+.bottom .planning-period-status.caution{color:light-dark(#8a5a00,#ffe09a)}
+.bottom .planning-period-status.redflag{color:light-dark(#9b3027,#ffb8aa)}
+.details-link,.info-popup-open,.tide-context-open,.current-range-toolbar .current-date-nav,.current-date-picker,.current-date-controls a,.current-planning,.planning-preferences input,.nearest-link,.location-help>summary,.location-help-panel,.map-overlays-menu summary,.map-overlays-panel,.map-nav-button,.place-search-input,.place-search-result,.map-coordinate-field input,.map-station-table-wrap,.map-station-table td,.map-station-table th{background:var(--panel);color:var(--ink);border-color:var(--border)}
+.tide-context-dialog,.info-popup-dialog,.tide-context-dialog-head,.info-popup-dialog-head,.tide-context-close,.info-popup-close,.location-help-header,.map-overlays-toolbar,.map-overlay-group,.map-overlay-group>summary,.map-overlay-help-body{background:var(--panel);color:var(--ink);border-color:var(--border)}
+.planning-help,.location-help-close,.map-menu-close{background:var(--soft);color:var(--ink)}
+.current-chart-svg{background:var(--panel)}
 </style></head><body><main class="shell{{if .PlanningDetails}} planning-shell{{end}}">
 <section class="hero"><div class="eyebrow">Mauri's Weather & Water Conditions</div><h1>{{.Title}}</h1><div class="sub">{{.ReportTime}} · {{.Station}}</div>{{if .Historical}}<span class="badge">Historical · {{.RequestedTime}}</span>{{end}}{{if .Yogiism}}<div class="yogiism">“{{.Yogiism}}” — Yogi Berra</div>{{end}}</section>
 <div class="page-preferences" aria-label="Display preferences"><label class="page-unit-control" for="wind-unit-select">Wind units<select id="wind-unit-select"><option value="kts" {{if eq .WindUnit "kts"}}selected{{end}}>Knots</option><option value="mph" {{if eq .WindUnit "mph"}}selected{{end}}>MPH</option></select></label><label class="page-unit-control" for="distance-unit-select">Distance units<select id="distance-unit-select"><option value="nmi" {{if eq .DistanceUnit "nmi"}}selected{{end}}>Nautical Miles</option><option value="mi" {{if eq .DistanceUnit "mi"}}selected{{end}}>Miles</option></select></label></div>
