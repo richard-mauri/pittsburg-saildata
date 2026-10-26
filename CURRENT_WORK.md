@@ -6,7 +6,7 @@
 
 - PR #4 (UI template extraction) merged into `main`; its exact-head GitHub Actions run succeeded: https://github.com/richard-mauri/pittsburg-saildata/actions/runs/40350065247 .
 - Theme branch base: merged `main` at `474d1d6d3a9840fd89020c29b7f87d8c58319dd9`.
-- Application version remains `1.16.0`; the current UI-theme candidate is `v387` (previously `v386`); appVersion remains `1.16.0`. Prior CSS revisions under v384 did not increment the build as required; this was corrected on October 26, 2026.
+- Application version remains `1.16.0`; the current UI-theme candidate is `v388` (previously `v387`); appVersion remains `1.16.0`. Prior CSS revisions under v384 did not increment the build as required; this was corrected on October 26, 2026.
 - Local running application, Safari appearance and any unpushed local changes remain **unverified**.
 
 ## Active change — Issue #3
@@ -26,3 +26,5 @@
 - Build v386: Conditions Now now styles the actual `.PlanningPeriodCause` text via `.planning-period-cause`, using preferred green, caution orange, and red-flag rose while retaining cyan card edges and reserving gold for the tidal-range scale. Safari acceptance pending.
 
 - Build v387: planning navigation loading overlay and loading dialog now use theme-matched scrim, panel, foreground, borders and spinner. Safari acceptance pending.
+
+- Build v388: card left accents narrowed from 5px to 3px and planning-day accents from 4px to 3px; Conditions Now border now reflects preferred/caution/redflag status with green/orange/rose, and defaults to cyan. Safari acceptance pending.
