@@ -13,12 +13,12 @@
 
 - Issue: https://github.com/richard-mauri/pittsburg-saildata/issues/3 .
 - Branch: `feature/issue-3-scrapergo-palette`, separate from the merged extraction PR.
-- Scope: use ScraperGo's semantic light/dark surface/text/accent/border tokens across `web/templates/welcome.html`, `stations.html`, `details.html`, and `sailing.html`. Preserve weather/current calculations, existing chart data and warning status semantics. Theme additions live at the end of each existing CSS block so the historical UI can be compared easily.
+- Scope: centralize ScraperGo's semantic light/dark surface/text/accent/border tokens in one `web/static/theme.css`, embedded into all four HTML pages by `ui_templates.go`. Prior duplicated per-page theme overrides were removed. Conditions Now uses a consistent neutral panel with a status-colored left border instead of a full brown caution background. Preserve weather/current calculations and meaningful chart-series colors.
 - No routing, NOAA processing, station-selection JavaScript, map selection, overlay behavior or Cloudflare changes intended.
 
 ## Checks and next action
 
 - Inspect and verify GitHub Actions at the exact latest theme PR commit before handing the PR off; a passing run alone does not establish Mac/Safari appearance.
-- Owner Mac/Safari acceptance should review both light and dark system appearances: welcome, Conditions Now, Planning and Details, nearby stations, history chart and table, map overlays, menus/modals and warnings. Check readability and contrast, especially the wind chart, labels and form controls.
+- The owner reported two unacceptable dark-mode screenshots (unreadable contrast, then oversized brown caution card and white selector panels). The shared-stylesheet revision responds to these but is not yet verified in Safari. Owner Mac/Safari acceptance should review both light and dark system appearances: welcome, Conditions Now, Planning and Details, nearby stations, history chart and table, map overlays, menus/modals and warnings. Check readability and contrast, especially the wind chart, labels and form controls.
 - Owner approval required before merge, release, or service restart. Any contrast defects discovered during acceptance are fixed on the theme branch with CI rerun.
 - Related work: remaining monolithic Go backend structure is out of scope; historical WELCOME.md update is separate.
