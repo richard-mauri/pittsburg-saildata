@@ -34,10 +34,10 @@ textarea:focus-visible, a:focus-visible { outline:2px solid var(--accent);outlin
 input,select,textarea {
   color:var(--ink);background:var(--panel);border-color:var(--border);
 }
-.page-unit-control,.page-preferences .page-unit-control select {
+.page-preferences .page-unit-control,.page-preferences .page-unit-control select {
   color:var(--ink);background:var(--panel);border-color:var(--border);
 }
-.page-unit-control { box-shadow:none; }
+.page-preferences .page-unit-control { box-shadow:none; }
 .bottom-source-context {
   color:var(--ink); background:var(--soft); border-color:var(--border);
 }
