@@ -159,3 +159,10 @@ input,select,textarea {
 #bottom-line-card.bottom.planning-preferred .planning-period-status { color:var(--status-preferred); }
 #bottom-line-card.bottom.planning-caution .planning-period-status { color:var(--status-caution); }
 #bottom-line-card.bottom.planning-redflag .planning-period-status { color:var(--status-redflag); }
+
+/* Conditions Now uses PlanningPeriodCause, not planning-period-status. */
+#bottom-line-card.bottom .planning-period-cause { margin:14px 0;line-height:1.45; }
+#bottom-line-card.bottom .planning-period-cause strong { color:var(--ink); }
+#bottom-line-card.bottom.planning-preferred .planning-period-cause strong { color:var(--status-preferred); }
+#bottom-line-card.bottom.planning-caution .planning-period-cause strong { color:var(--status-caution); }
+#bottom-line-card.bottom.planning-redflag .planning-period-cause strong { color:var(--status-redflag); }
