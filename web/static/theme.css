@@ -42,17 +42,13 @@ input,select,textarea {
   color:var(--ink); background:var(--soft); border-color:var(--border);
 }
 .bottom-source-context strong { color:var(--ink); }
-/* Keep normal ScraperGo panels throughout Conditions Now; signal hazards
-   through a narrow border and an accessible status label. */
+/* Keep a neutral panel border: gold remains exclusive to the tidal-range scale. */
 #bottom-line-card.bottom,
 #bottom-line-card.bottom.planning-preferred,
 #bottom-line-card.bottom.planning-caution,
 #bottom-line-card.bottom.planning-redflag {
   background:var(--panel);color:var(--ink);border:1px solid var(--border);
 }
-#bottom-line-card.bottom.planning-preferred { border-left:5px solid light-dark(#16805f,#78d9ad); }
-#bottom-line-card.bottom.planning-caution { border-left:5px solid light-dark(#af781b,#e5b75f); }
-#bottom-line-card.bottom.planning-redflag { border-left:5px solid light-dark(#af4239,#ff9285); }
 #bottom-line-card h2,#bottom-line-card .conditions-now-asof,
 #bottom-line-card p,#bottom-line-card strong { color:var(--ink); }
 #bottom-line-card .planning-period-status.preferred { color:light-dark(#176246,#91e1b5); }
