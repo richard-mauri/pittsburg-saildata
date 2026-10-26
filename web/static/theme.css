@@ -185,3 +185,27 @@ input,select,textarea {
 #bottom-line-card.bottom.planning-preferred { border-left-color:var(--status-preferred); }
 #bottom-line-card.bottom.planning-caution { border-left-color:var(--status-caution); }
 #bottom-line-card.bottom.planning-redflag { border-left-color:var(--status-redflag); }
+
+
+/* Navigation actions are links, not filled or outlined buttons. */
+a.planning-page-link,
+a.details-link {
+  display:inline-flex;align-items:center;justify-content:flex-start;
+  width:auto;min-height:0;padding:0;border:0;border-radius:0;
+  background:transparent;color:var(--ink);box-shadow:none;
+  text-decoration:none;font:inherit;font-weight:850;
+  white-space:normal;filter:none;
+}
+a.planning-page-link:hover,
+a.planning-page-link:focus-visible,
+a.details-link:hover,
+a.details-link:focus-visible {
+  background:transparent;color:var(--accent);
+  border:0;filter:none;text-decoration:underline;
+  text-underline-offset:3px;
+}
+a.planning-page-link:focus-visible,
+a.details-link:focus-visible { outline:2px solid var(--accent);outline-offset:5px; }
+@media(max-width:640px) {
+  a.planning-page-link { width:auto;text-align:left; }
+}
