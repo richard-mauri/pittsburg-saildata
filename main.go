@@ -35,7 +35,7 @@ import (
 
 const (
 	appVersion                      = "1.16.0"
-	buildVersion                    = "v384"
+	buildVersion                    = "v385"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
