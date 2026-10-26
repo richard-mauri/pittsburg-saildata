@@ -1,25 +1,24 @@
 # Mauri's Weather & Water Conditions — current work
 
-**Snapshot: October 26, 2026.** Recheck live GitHub branch/PR state and the owner's local source before resuming. This is an active snapshot, not a release record.
+**Snapshot: October 26, 2026.** Reconfirm PR and build state on GitHub before continuing, and reconcile any newer local Mac work.
 
-## Baseline and active Issue
+## Verified baseline
 
-- The merged baseline for this task was `main` commit `c71563fd5052a7ba987d1ed7e5acd1563594a76d`, after the five-file documentation PR #2 was merged. Owner's installed local build and unpushed changes remain unverified.
-- GitHub source at task start declares `appVersion 1.16.0`, `buildVersion v382`. This development candidate sets `buildVersion v383`; no semantic version bump.
-- Active Issue: https://github.com/richard-mauri/pittsburg-saildata/issues/3 — separate UI from the root Go monolith, then apply ScraperGo-inspired colors in an independent follow-up.
-- Working branch: `refactor/issue-3-extract-ui-templates` from the above `main` baseline. Draft PR status must be checked live; do not assume owner approval.
+- PR #4 (UI template extraction) merged into `main`; its exact-head GitHub Actions run succeeded: https://github.com/richard-mauri/pittsburg-saildata/actions/runs/40350065247 .
+- Theme branch base: merged `main` at `474d1d6d3a9840fd89020c29b7f87d8c58319dd9`.
+- Application version remains `1.16.0`; the UI-theme candidate increments build from `v383` to `v384`.
+- Local running application, Safari appearance and any unpushed local changes remain **unverified**.
 
-## Exact first PR scope
+## Active change — Issue #3
 
-Extract the four HTML templates (welcome, stations, details, sailing dashboard) from `main.go` into `web/templates/*.html` without modifying their HTML, CSS, or JavaScript. Bind them through `ui_templates.go` using `embed.FS`; Go module minimum raised from 1.13 to 1.16 for the embedding feature. Add a basic embedded-file regression test; update architecture. No NOAA, routes, handler interfaces, map logic, deployment or styling changes are intended.
+- Issue: https://github.com/richard-mauri/pittsburg-saildata/issues/3 .
+- Branch: `feature/issue-3-scrapergo-palette`, separate from the merged extraction PR.
+- Scope: use ScraperGo's semantic light/dark surface/text/accent/border tokens across `web/templates/welcome.html`, `stations.html`, `details.html`, and `sailing.html`. Preserve weather/current calculations, existing chart data and warning status semantics. Theme additions live at the end of each existing CSS block so the historical UI can be compared easily.
+- No routing, NOAA processing, station-selection JavaScript, map selection, overlay behavior or Cloudflare changes intended.
 
-**Static verification completed:** source reconstructed with only the four declarations removed (and v383 substituted) matches the branch's `main.go` exactly; all four extracted template bodies match original bytes. This is not proof of successful Go compilation or Safari rendering.
+## Checks and next action
 
-**Not performed:** complete root package Go tests/build, nested `ui/` module tests, owner Mac/Safari verification, live NOAA checks or deployment. The sailing repository had no GitHub Actions workflow at the start of this change; inspect any current checks for this PR head before claiming CI.
-
-## Next actions
-
-- Review final PR diff/embedded paths, run root Go tests/build on Mac and inspect Safari dashboard, history, station selection, map click/pan separation, popovers, and all major routes. Do not merge before owner acceptance.
-- **Separate subsequent PR:** implement ScraperGo's exact semantic light/dark palette with central design tokens while preserving sailing-condition warning colors. Do not combine cosmetic changes with extraction.
-- Separate CI workflow setup remains pending, as do potential legacy `WELCOME.md` updates.
-- Retain local server/Cloudflare Tunnel settings unchanged. Obtain owner authorization before merge, release or restart.
+- Inspect and verify GitHub Actions at the exact latest theme PR commit before handing the PR off; a passing run alone does not establish Mac/Safari appearance.
+- Owner Mac/Safari acceptance should review both light and dark system appearances: welcome, Conditions Now, Planning and Details, nearby stations, history chart and table, map overlays, menus/modals and warnings. Check readability and contrast, especially the wind chart, labels and form controls.
+- Owner approval required before merge, release, or service restart. Any contrast defects discovered during acceptance are fixed on the theme branch with CI rerun.
+- Related work: remaining monolithic Go backend structure is out of scope; historical WELCOME.md update is separate.
