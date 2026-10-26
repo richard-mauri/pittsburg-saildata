@@ -1,25 +1,34 @@
 # Mauri's Weather & Water Conditions — current work
 
-**Snapshot: October 26, 2026.** Recheck live GitHub branch/PR state and the owner's local source before resuming. This is an active snapshot, not a release record.
+**Snapshot: October 26, 2026.** Reconfirm PR and build state on GitHub before continuing, and reconcile any newer local Mac work.
 
-## Baseline and active Issue
+## Verified baseline
 
-- The merged baseline for this task was `main` commit `c71563fd5052a7ba987d1ed7e5acd1563594a76d`, after the five-file documentation PR #2 was merged. Owner's installed local build and unpushed changes remain unverified.
-- GitHub source at task start declares `appVersion 1.16.0`, `buildVersion v382`. This development candidate sets `buildVersion v383`; no semantic version bump.
-- Active Issue: https://github.com/richard-mauri/pittsburg-saildata/issues/3 — separate UI from the root Go monolith, then apply ScraperGo-inspired colors in an independent follow-up.
-- Working branch: `refactor/issue-3-extract-ui-templates` from the above `main` baseline. Draft PR status must be checked live; do not assume owner approval.
+- PR #4 (UI template extraction) merged into `main`; its exact-head GitHub Actions run succeeded: https://github.com/richard-mauri/pittsburg-saildata/actions/runs/40350065247 .
+- Theme branch base: merged `main` at `474d1d6d3a9840fd89020c29b7f87d8c58319dd9`.
+- Application version remains `1.16.0`; the current UI-theme candidate is `v390` (previously `v389`); appVersion remains `1.16.0`. Prior CSS revisions under v384 did not increment the build as required; this was corrected on October 26, 2026.
+- Local running application, Safari appearance and any unpushed local changes remain **unverified**.
 
-## Exact first PR scope
+## Active change — Issue #3
 
-Extract the four HTML templates (welcome, stations, details, sailing dashboard) from `main.go` into `web/templates/*.html` without modifying their HTML, CSS, or JavaScript. Bind them through `ui_templates.go` using `embed.FS`; Go module minimum raised from 1.13 to 1.16 for the embedding feature. Add a basic embedded-file regression test; update architecture. No NOAA, routes, handler interfaces, map logic, deployment or styling changes are intended.
+- Issue: https://github.com/richard-mauri/pittsburg-saildata/issues/3 .
+- Branch: `feature/issue-3-scrapergo-palette`, separate from the merged extraction PR.
+- Scope: centralize ScraperGo's semantic light/dark surface/text/accent/border tokens in one `web/static/theme.css`, embedded into all four HTML pages by `ui_templates.go`. Prior duplicated per-page theme overrides were removed. Conditions Now uses a consistent neutral panel with a status-colored left border instead of a full brown caution background. Preserve weather/current calculations and meaningful chart-series colors.
+- No routing, NOAA processing, station-selection JavaScript, map selection, overlay behavior or Cloudflare changes intended.
 
-**Static verification completed:** source reconstructed with only the four declarations removed (and v383 substituted) matches the branch's `main.go` exactly; all four extracted template bodies match original bytes. This is not proof of successful Go compilation or Safari rendering.
+## Checks and next action
 
-**Not performed:** complete root package Go tests/build, nested `ui/` module tests, owner Mac/Safari verification, live NOAA checks or deployment. The sailing repository had no GitHub Actions workflow at the start of this change; inspect any current checks for this PR head before claiming CI.
+- Inspect and verify GitHub Actions at the exact latest theme PR commit before handing the PR off; a passing run alone does not establish Mac/Safari appearance.
+- The owner reported two unacceptable dark-mode screenshots (unreadable contrast, then oversized brown caution card and white selector panels). The shared-stylesheet revision responds to these but is not yet verified in Safari. Owner Mac/Safari acceptance should review both light and dark system appearances: welcome, Conditions Now, Planning and Details, nearby stations, history chart and table, map overlays, menus/modals and warnings. Check readability and contrast, especially the wind chart, labels and form controls.
+- Owner approval required before merge, release, or service restart. Any contrast defects discovered during acceptance are fixed on the theme branch with CI rerun.
+- Related work: remaining monolithic Go backend structure is out of scope; historical WELCOME.md update is separate.
 
-## Next actions
+- Build v386: Conditions Now now styles the actual `.PlanningPeriodCause` text via `.planning-period-cause`, using preferred green, caution orange, and red-flag rose while retaining cyan card edges and reserving gold for the tidal-range scale. Safari acceptance pending.
 
-- Review final PR diff/embedded paths, run root Go tests/build on Mac and inspect Safari dashboard, history, station selection, map click/pan separation, popovers, and all major routes. Do not merge before owner acceptance.
-- **Separate subsequent PR:** implement ScraperGo's exact semantic light/dark palette with central design tokens while preserving sailing-condition warning colors. Do not combine cosmetic changes with extraction.
-- Separate CI workflow setup remains pending, as do potential legacy `WELCOME.md` updates.
-- Retain local server/Cloudflare Tunnel settings unchanged. Obtain owner authorization before merge, release or restart.
+- Build v387: planning navigation loading overlay and loading dialog now use theme-matched scrim, panel, foreground, borders and spinner. Safari acceptance pending.
+
+- Build v388: card left accents narrowed from 5px to 3px and planning-day accents from 4px to 3px; Conditions Now border now reflects preferred/caution/redflag status with green/orange/rose, and defaults to cyan. Safari acceptance pending.
+
+- Build v389: Planning and Details, Back to Conditions Now, and View full report details use consistent neutral text-link styling with cyan hover/focus and accessible keyboard focus outline. Safari acceptance pending.
+
+- Build v390: hero banner reduced from 360px to 260px minimum height on desktop and from 430px to 300px on narrow screens; background retains proportional `cover` scaling. Safari acceptance pending.
