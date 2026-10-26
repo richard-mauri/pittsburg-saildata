@@ -4,7 +4,7 @@ This documents current boundaries and non-negotiable behavior, **not** a require
 
 ## Runtime and component ownership
 
-The root Go service includes `main.go` (HTTP routing and largely embedded HTML/CSS/JavaScript UI), `wind.go`, `currents.go`, and related sources. Build the full root package. The repository also contains `cmd/marineplacesgen.go`, supporting assets/scripts, and a separate `ui/go.mod` module. Root `go test ./...` does not automatically validate the nested module. Test it independently for changes in that module.
+The root Go service includes `main.go` (routing/report preparation), `ui_templates.go` (the four embedded Go HTML template bindings), `web/templates/*.html` (browser UI HTML/CSS/JavaScript), `wind.go`, `currents.go`, and related sources. Go `embed.FS` includes the standalone templates in the compiled binary; the root `go.mod` requires at least Go 1.16. Do not confuse the root-owned `web/templates` with the separate `ui/` Go module. Build the full root package. The repository also contains `cmd/marineplacesgen.go`, supporting assets/scripts, and a separate `ui/go.mod` module. Root `go test ./...` does not automatically validate the nested module. Test it independently for changes in that module.
 
 The public site at https://weather.themauris.org currently uses a locally running Go server exposed through the owner's Cloudflare Tunnel. Do not change listener/process ownership, launchers, private credentials, or tunnel behavior as an incidental code or theme change.
 
