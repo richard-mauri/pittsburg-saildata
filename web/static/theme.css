@@ -166,3 +166,17 @@ input,select,textarea {
 #bottom-line-card.bottom.planning-preferred .planning-period-cause strong { color:var(--status-preferred); }
 #bottom-line-card.bottom.planning-caution .planning-period-cause strong { color:var(--status-caution); }
 #bottom-line-card.bottom.planning-redflag .planning-period-cause strong { color:var(--status-redflag); }
+
+
+/* Full-page navigation overlay must use a theme-matched scrim and dialog. */
+.page-loading-overlay {
+  background:light-dark(rgba(245,250,252,.82),rgba(8,14,19,.84));
+}
+.page-loading-box {
+  background:var(--panel);color:var(--ink);
+  border-color:var(--border);
+  box-shadow:0 14px 38px rgba(0,0,0,.3);
+}
+.page-loading-spinner {
+  border-color:var(--border);border-top-color:var(--accent);
+}
