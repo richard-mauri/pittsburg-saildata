@@ -1,0 +1,94 @@
+/* Shared ScraperGo-inspired semantic palette.
+   Status communicates meaning with a border/label, never by replacing an entire
+   card's surface. This file is embedded in all four page templates. */
+:root {
+  color-scheme: light dark;
+  --bg: light-dark(#f5f5f0,#0e141a);
+  --panel: light-dark(#ffffff,#19232b);
+  --ink: light-dark(#182631,#eef2f4);
+  --muted: light-dark(#60707b,#a5b3bb);
+  --border: light-dark(#dce2e1,#34434a);
+  --accent: light-dark(#126877,#69c6d3);
+  --soft: light-dark(#e6f3f3,#203c43);
+  --navy: var(--ink);
+  --blue: var(--accent);
+  --sea: var(--accent);
+  --paper: var(--bg);
+  --card: var(--panel);
+  --line: var(--border);
+  --shadow: 0 10px 35px light-dark(#17253408,#00000020);
+}
+html, body { color:var(--ink); background:var(--bg); }
+body, .shell { color:var(--ink); }
+a { color:var(--accent); }
+.card, .controls, .paper, .paynotice {
+  background:var(--panel); color:var(--ink);
+  border-color:var(--border); box-shadow:var(--shadow);
+}
+.card h2, .card h3, .value, .station, .time { color:var(--ink); }
+.metric, .wind-summary, .badge { background:var(--soft); color:var(--ink); }
+label { color:var(--ink); }
+button, input, select, textarea { font:inherit; }
+button:focus-visible, input:focus-visible, select:focus-visible,
+textarea:focus-visible, a:focus-visible { outline:2px solid var(--accent);outline-offset:2px; }
+input,select,textarea {
+  color:var(--ink);background:var(--panel);border-color:var(--border);
+}
+.page-unit-control,.page-preferences .page-unit-control select {
+  color:var(--ink);background:var(--panel);border-color:var(--border);
+}
+.page-unit-control { box-shadow:none; }
+.bottom-source-context {
+  color:var(--ink); background:var(--soft); border-color:var(--border);
+}
+.bottom-source-context strong { color:var(--ink); }
+/* Keep normal ScraperGo panels throughout Conditions Now; signal hazards
+   through a narrow border and an accessible status label. */
+#bottom-line-card.bottom,
+#bottom-line-card.bottom.planning-preferred,
+#bottom-line-card.bottom.planning-caution,
+#bottom-line-card.bottom.planning-redflag {
+  background:var(--panel);color:var(--ink);border:1px solid var(--border);
+}
+#bottom-line-card.bottom.planning-preferred { border-left:5px solid light-dark(#16805f,#78d9ad); }
+#bottom-line-card.bottom.planning-caution { border-left:5px solid light-dark(#af781b,#e5b75f); }
+#bottom-line-card.bottom.planning-redflag { border-left:5px solid light-dark(#af4239,#ff9285); }
+#bottom-line-card h2,#bottom-line-card .conditions-now-asof,
+#bottom-line-card p,#bottom-line-card strong { color:var(--ink); }
+#bottom-line-card .planning-period-status.preferred { color:light-dark(#176246,#91e1b5); }
+#bottom-line-card .planning-period-status.caution { color:light-dark(#805516,#f1ce86); }
+#bottom-line-card .planning-period-status.redflag { color:light-dark(#973b31,#ffa89d); }
+/* Input, nav, and overlay controls */
+.details-link,.info-popup-open,.tide-context-open,
+.current-range-toolbar .current-date-nav,.current-date-picker,
+.current-date-controls a,.current-planning,.planning-preferences input,
+.nearest-link,.location-help>summary,.location-help-panel,
+.map-overlays-menu summary,.map-overlays-panel,.map-nav-button,
+.place-search-input,.place-search-result,.map-coordinate-field input,
+.map-station-table-wrap,.map-station-table td,.map-station-table th,
+.wind-reading-control select,.wind-unit-control select,
+.wind-reading-chart,.wind-readings-table thead th {
+  background:var(--panel);color:var(--ink);border-color:var(--border);
+}
+.tide-context-dialog,.info-popup-dialog,.tide-context-dialog-head,
+.info-popup-dialog-head,.tide-context-close,.info-popup-close,
+.location-help-header,.map-overlays-toolbar,.map-overlay-group,
+.map-overlay-group>summary,.map-overlay-help-body {
+  background:var(--panel);color:var(--ink);border-color:var(--border);
+}
+.planning-help,.location-help-close,.map-menu-close,
+.wind-readings-table thead th { background:var(--soft);color:var(--ink); }
+.current-chart-svg { background:var(--panel); }
+.wind-chart-grid { stroke:var(--border); }
+.wind-chart-axis { stroke:var(--muted); }
+.wind-chart-label { fill:var(--muted); }
+.wind-chart-cursor-dot { fill:var(--panel); }
+.wind-readings-scroll-shell.has-more::after {
+  background:linear-gradient(to bottom,transparent,var(--panel));
+}
+.wind-readings-scroll-cue { background:var(--panel);color:var(--muted); }
+/* Chart series and map imagery deliberately retain their own meaningful colors. */
+.wind-distance-warning { background:light-dark(#fff8df,#342b19);
+  border-color:light-dark(#e7c978,#8d703d); color:light-dark(#654d08,#ffe6a3); }
+.wind-distance-warning strong { color:inherit; }
+.full-report { background:#0a1720;color:#e7f4f8; }
