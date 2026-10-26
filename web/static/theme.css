@@ -128,3 +128,34 @@ input,select,textarea {
 #bottom-line-card.bottom.planning-redflag {
   border-left:5px solid var(--accent);
 }
+
+
+/* Planning status palette: separate semantic ink from the tidal-range gold.
+   Keep all text legible on an explicitly paired panel surface. */
+:root {
+  --status-preferred:light-dark(#176246,#91e1b5);
+  --status-caution:light-dark(#98561a,#ffbc82);
+  --status-redflag:light-dark(#a63843,#ff9ba4);
+}
+.planning-day,.planning-day.preferred,.planning-day.caution,.planning-day.redflag {
+  background:var(--panel);color:var(--ink);
+  border:1px solid var(--border);border-left-width:4px;
+}
+.planning-day.preferred { border-left-color:var(--status-preferred); }
+.planning-day.caution { border-left-color:var(--status-caution); }
+.planning-day.redflag { border-left-color:var(--status-redflag); }
+.planning-day .planning-date,.planning-day .planning-detail { color:var(--ink); }
+.planning-day.preferred .planning-status { color:var(--status-preferred); }
+.planning-day.caution .planning-status { color:var(--status-caution); }
+.planning-day.redflag .planning-status { color:var(--status-redflag); }
+/* Forecast periods always use the same paired foreground/background. */
+.marine-period {
+  background:var(--panel);color:var(--ink);border-color:var(--border);
+}
+.marine-period strong { color:var(--ink); }
+.marine-period p { color:var(--ink); }
+/* Preserve the Conditions Now neutral panel, but communicate its status
+   through status text rather than reserved colors on the card border. */
+#bottom-line-card.bottom.planning-preferred .planning-period-status { color:var(--status-preferred); }
+#bottom-line-card.bottom.planning-caution .planning-period-status { color:var(--status-caution); }
+#bottom-line-card.bottom.planning-redflag .planning-period-status { color:var(--status-redflag); }
