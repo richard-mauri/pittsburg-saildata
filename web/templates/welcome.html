@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="Mauri's Weather & Water Conditions — current wind observations, predicted tidal currents, NWS local forecast context, and planning maps for sailors and other people on the water.">
+<meta property="og:title" content="Mauri's Weather & Water Conditions">
+<meta property="og:description" content="See Conditions Now, then use Planning and Details for location weather, wind and current stations, forecasts, and map overlays.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://pittsburg-saildata.onrender.com/welcome">
+<meta property="og:image" content="https://pittsburg-saildata.onrender.com/assets/hero.jpg">
+<meta property="og:image:alt" content="Sailing on the supported coastal and inland waters">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Mauri's Weather & Water Conditions">
+<meta name="twitter:description" content="See Conditions Now, then use Planning and Details for location weather, wind and current stations, forecasts, and map overlays.">
+<meta name="twitter:image" content="https://pittsburg-saildata.onrender.com/assets/hero.jpg">
+<title>Mauri's Weather & Water Conditions — Welcome</title>
+<style>
+:root{--navy:#082b45;--blue:#126b91;--sea:#0b8793;--ink:#153242;--muted:#607886;--paper:#f5fafc;--card:#fff;--line:#d8e7ed;--shadow:0 12px 34px rgba(8,43,69,.10)}
+*{box-sizing:border-box}
+body{margin:0;background:linear-gradient(180deg,#dff3f8,#f7fbfc 32rem);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Avenir Next",Avenir,Helvetica,Arial,sans-serif;line-height:1.55}
+.shell{max-width:900px;margin:auto;padding:28px 18px 64px}
+.hero{color:#fff;padding:34px 30px 30px;border-radius:24px;min-height:390px;display:flex;flex-direction:column;justify-content:flex-end;background:
+linear-gradient(180deg,rgba(4,24,38,.05) 10%,rgba(4,24,38,.28) 48%,rgba(4,24,38,.88) 100%),
+url('/assets/hero.jpg') center 48%/cover no-repeat;box-shadow:var(--shadow);text-shadow:0 2px 12px rgba(0,0,0,.45)}
+.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-weight:800;font-size:.76rem;opacity:.84}
+.hero h1{font-size:clamp(2rem,6vw,3.5rem);line-height:1.02;margin:.35rem 0 .6rem}
+.hero p{max-width:650px;font-size:1.05rem;margin:0 0 18px}
+.cta-row{display:flex;gap:10px;flex-wrap:wrap}
+.cta{display:inline-block;text-decoration:none;font-weight:850;border-radius:999px;padding:11px 17px}
+.cta.primary{background:#fff;color:var(--navy)}
+.cta.secondary{border:1px solid rgba(255,255,255,.72);color:#fff;background:rgba(255,255,255,.08)}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:18px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:22px;box-shadow:var(--shadow)}
+.card.full{grid-column:1/-1}
+h2{margin:.1rem 0 .7rem;color:var(--navy);font-size:1.28rem}
+h3{margin:1.2rem 0 .35rem;color:var(--navy)}
+.quick ol{padding-left:1.25rem}
+.qa details{border-top:1px solid var(--line);padding:12px 0}
+.qa details:first-of-type{border-top:0}
+.qa summary{cursor:pointer;font-weight:800;color:var(--navy)}
+.qa p{margin:.65rem 0 0}
+.note{color:var(--muted)}
+.github-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:12px}
+.github-actions a{display:block;text-decoration:none;border:1px solid var(--line);border-radius:14px;padding:12px 14px;color:var(--blue);font-weight:800;background:#fbfdfe}
+.footer{margin-top:18px;text-align:center;color:var(--muted);font-size:.88rem}.hero .yogiism{margin:16px 0 0;max-width:720px;color:#fff;font-style:italic;font-size:.96rem;line-height:1.4;opacity:.96}.page-loading-overlay{position:fixed;inset:0;z-index:6000;display:flex;align-items:center;justify-content:center;background:rgba(245,250,252,.82);backdrop-filter:blur(2px);opacity:0;visibility:hidden;pointer-events:none;transition:opacity .12s ease,visibility .12s ease}.page-loading-overlay.active{opacity:1;visibility:visible;pointer-events:auto}.page-loading-box{display:flex;align-items:center;gap:12px;padding:15px 18px;border:1px solid var(--line);border-radius:16px;background:#fff;box-shadow:0 14px 38px rgba(8,43,69,.18);color:var(--navy);font-weight:850}.page-loading-spinner{width:30px;height:30px;border:4px solid #d8e7ed;border-top-color:var(--blue);border-radius:50%;animation:page-loading-spin .8s linear infinite}@keyframes page-loading-spin{to{transform:rotate(360deg)}}@media (prefers-reduced-motion:reduce){.page-loading-spinner{animation-duration:1.8s}}
+@media(max-width:680px){.grid{grid-template-columns:1fr}.github-actions{grid-template-columns:1fr}.hero{min-height:340px;padding:26px 22px}}
+</style>
+</head>
+<body>
+<main class="shell">
+<section class="hero">
+<div class="eyebrow">Mauri's Weather & Water Conditions</div>
+<h1>Check conditions now. Plan with the details.</h1>
+<p>A free planning dashboard for sailors, paddlers, and other people on the water. Start with current wind and the one-day current outlook, then open Planning and Details for location weather, station choices, forecasts, current timing, maps, and overlays.</p>
+<div class="cta-row">
+<a id="welcome-conditions-link" class="cta primary" href="/report?format=html">Open Conditions Now</a>
+<a class="cta secondary" href="https://github.com/richard-mauri/pittsburg-saildata">View on GitHub</a>
+</div>
+{{if .Yogiism}}<div class="yogiism">“{{.Yogiism}}” — Yogi Berra</div>{{end}}
+</section>
+
+<div class="grid">
+<section class="card quick">
+<h2>The 30-second version</h2>
+<ol>
+<li>Open <strong>Conditions Now</strong> for the latest wind observation and one-day current outlook.</li>
+<li>Open <strong>Planning and Details</strong> when you want to choose a location, compare stations, or customize the planning view.</li>
+<li>Click the map to set a ★ selected sailing location.</li>
+<li>Review <strong>Local Conditions</strong>, nearby wind-station candidates, current timing, forecast context, and map layers.</li>
+<li>Return to <strong>Conditions Now</strong> with your selected station/location state preserved.</li>
+</ol>
+<p class="note">You do not need to know buoy IDs, NOAA station numbers, or coordinates. The map and station tools can resolve the nearby sources for you.</p>
+</section>
+
+<section class="card">
+<h2>What it combines</h2>
+<p><strong>Wind:</strong> recent NOAA/NDBC observations, wind history, and nearby station alternatives.</p>
+<p><strong>Currents:</strong> NOAA CO-OPS ebb, flood, slack, maximum-current timing, and 1/3/7-day current graphs.</p>
+<p><strong>Weather:</strong> NWS local conditions/forecast context and forecast-zone information for a selected map point.</p>
+<p><strong>Map context:</strong> street, nautical, satellite, and hybrid basemaps plus forecast-zone, smoke, active-fire-perimeter, satellite-fire-detection, cloud-cover, radar, and ALERTCalifornia camera overlays.</p>
+</section>
+
+<section class="card full qa">
+<h2>Questions people on the water will probably ask</h2>
+<details open><summary>What is Conditions Now?</summary><p>The streamlined landing page shows the latest selected wind observation, its observation age, and a one-day predicted tidal-current graph. It is meant to answer the first question quickly before you open the full planning dashboard.</p></details>
+<details><summary>What is Planning and Details?</summary><p>It is the full dashboard for choosing a sailing location, comparing nearby wind stations, inspecting the associated currents station, viewing wind history, changing current-planning thresholds, browsing 1/3/7-day current ranges, and using forecast/map tools.</p></details>
+<details><summary>What does selecting a location do?</summary><p>Clicking the map sets a ★ selected sailing location. That selected point is separate from the map viewport center. It drives nearby-station discovery and the Local Conditions panel; simply panning or using Center Map does not silently change the selected sailing location.</p></details>
+<details><summary>What does Local Conditions show?</summary><p>For the selected map point, the app uses the NWS point forecast to show the nearby city/state label, current-hour forecast temperature, expected high/low, and a short forecast phrase.</p></details>
+<details><summary>Can I choose another wind station?</summary><p>Yes. Nearby wind-station candidates appear after you select a location. You can compare them on the map/table and choose the station you think best represents the water you care about.</p></details>
+<details><summary>Is this tide data or current data?</summary><p><strong>Current data.</strong> The graph is predicted speed and direction of moving water — flood above zero, ebb below zero, and crossings near slack. Tide height and current are related, but they are not the same thing.</p></details>
+<details><summary>What map choices are available?</summary><p>Planning and Details includes Street Map, Nautical Chart, Satellite, and Hybrid basemaps; independent forecast-zone, satellite-smoke, NIFC/WFIGS active-fire-perimeter, NOAA HMS satellite-fire-detection, global PacIOOS/NOAA WaveWatch III swell, NOAA/NESDIS cloud-cover, NEXRAD radar, and ALERTCalifornia camera overlays; and Center Map actions for your location, entered coordinates, selected location, wind station, and currents station.</p></details>
+<details><summary>Is this for navigation or safety decisions?</summary><p>No. It is a conditions-planning and exploration tool. Observations can be delayed or missing, station exposure differs, and current/forecast products have limitations. Use official marine forecasts, charts, notices, local knowledge, and prudent seamanship.</p></details>
+</section>
+
+<section class="card full">
+<h2>Know these waters? Your feedback is useful.</h2>
+<p>If something looks questionable, that's worth reporting. Examples: a wind station that doesn't represent Alameda well, confusing current wording, an unexpectedly weak or strong ebb, or a feature that would make the report more useful.</p>
+<p>You do not need to be a programmer to contribute useful local knowledge.</p>
+</section>
+
+<section class="card full">
+<h2>Follow or help improve the project</h2>
+<p>The project is open source:</p>
+<p><strong><a href="https://github.com/richard-mauri/pittsburg-saildata">github.com/richard-mauri/pittsburg-saildata</a></strong></p>
+<div class="github-actions">
+<a href="https://github.com/richard-mauri/pittsburg-saildata">⭐ Star the repository</a>
+<a href="https://github.com/richard-mauri/pittsburg-saildata/subscription">👀 Watch project activity</a>
+<a href="https://github.com/richard-mauri/pittsburg-saildata/issues">💡 Open an Issue</a>
+<a href="https://github.com/richard-mauri/pittsburg-saildata/pulls">🔧 View / submit Pull Requests</a>
+</div>
+<p class="note">Issues are not just for software bugs. Local conditions knowledge, terminology, station-selection concerns, and feature ideas are all useful.</p>
+</section>
+
+<section class="card full">
+<h2>Want the geeky version?</h2>
+<p>The Go service combines live NDBC observations, NOAA CO-OPS current predictions, NWS point/zone forecast context, and browser map state. It caches active station metadata, computes geographic distance, probes nearby candidates concurrently for usable wind, and keeps the selected sailing location separate from the map viewport. The same service also exposes text and JSON output for scripts and integrations.</p>
+</section>
+</div>
+
+<div class="footer">Mauri's Weather & Water Conditions · Conditions-planning utility, not a navigation system.<br>Version {{.AppVersion}} · Build {{.BuildVersion}}</div>
+</main>
+<div id="welcome-loading-overlay" class="page-loading-overlay" aria-hidden="true"><div class="page-loading-box" role="status" aria-live="polite"><span class="page-loading-spinner" aria-hidden="true"></span><span>Loading Conditions Now…</span></div></div>
+<script>
+(function(){
+  var link = document.getElementById("welcome-conditions-link");
+  var overlay = document.getElementById("welcome-loading-overlay");
+  if (!link || !overlay) return;
+
+  function hideWelcomeLoader() {
+    overlay.classList.remove("active");
+    overlay.setAttribute("aria-hidden", "true");
+    link.removeAttribute("aria-disabled");
+  }
+
+  link.addEventListener("click", function(event) {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    overlay.classList.add("active");
+    overlay.setAttribute("aria-hidden", "false");
+    link.setAttribute("aria-disabled", "true");
+  });
+
+  window.addEventListener("pageshow", hideWelcomeLoader);
+})();
+</script>
+</body>
+</html>
