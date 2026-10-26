@@ -209,3 +209,10 @@ a.details-link:focus-visible { outline:2px solid var(--accent);outline-offset:5p
 @media(max-width:640px) {
   a.planning-page-link { width:auto;text-align:left; }
 }
+
+
+/* Shorter hero while preserving the source photograph's proportions. */
+.hero { min-height:260px;background-size:auto,cover; }
+@media(max-width:640px) {
+  .hero { min-height:300px;background-size:auto,cover; }
+}
