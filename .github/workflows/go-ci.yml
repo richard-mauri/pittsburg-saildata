@@ -1,0 +1,33 @@
+name: Go CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'ci/**'
+      - 'refactor/**'
+      - 'feature/**'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.23'
+          cache: true
+      - name: Report root Go formatting (non-blocking)
+        run: |
+          gofmt -l main.go wind.go currents.go
+      - name: Test root application package
+        run: go test -count=1 .
+      - name: Build root application
+        run: go build .
