@@ -1,8 +1,6 @@
 sailing-go.log
 .cloudflared
-devbuild.sh
 nohup.out
-sailgo.sh
 assets/marine_ferry_candidates.json
 PROJECT_STATE.md
 cache/
