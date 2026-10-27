@@ -10,21 +10,6 @@
 HOME=/Users/richardmauri
 cd "$HOME/projects/sailing-go" || exit 1
 
-# Report the checked-out source version before launching the existing binary.
-# The binary may be older if it has not been rebuilt after a source update.
-SOURCE_FILE="$HOME/projects/sailing-go/main.go"
-if [[ -r "$SOURCE_FILE" ]]; then
-    APP_VERSION=$(awk -F '"' '/^[[:space:]]*appVersion[[:space:]]*=/ {print $2; exit}' "$SOURCE_FILE")
-    BUILD_VERSION=$(awk -F '"' '/^[[:space:]]*buildVersion[[:space:]]*=/ {print $2; exit}' "$SOURCE_FILE")
-    if [[ -n "$APP_VERSION" && -n "$BUILD_VERSION" ]]; then
-        printf 'SailGo source: Version %s · Build %s (compiled binary may differ)\n' "$APP_VERSION" "$BUILD_VERSION"
-    else
-        printf 'SailGo source version unavailable in main.go\n' >&2
-    fi
-else
-    printf 'SailGo source version unavailable: main.go not readable\n' >&2
-fi
-
 # Stop only the sailing Go application.
 pkill -x sailing-go 2>/dev/null || true
 
@@ -48,4 +33,7 @@ nohup "$HOME/Applications/cloudflared" tunnel run \
   > "$HOME/projects/sailing-go/.cloudflared/tunnel.log" 2>&1 < /dev/null &
 
 disown -a
+
+printf 'Started SailGo and its Cloudflare Tunnel.\\n'
+"$HOME/projects/sailing-go/sailing-go" --version
 
