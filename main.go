@@ -570,7 +570,7 @@ var alertCaliforniaDiagnosticSerial uint64
 func main() {
 	// Mirror ScraperGo: report the version embedded in the compiled executable.
 	if len(os.Args) == 2 && (os.Args[1] == "--version" || os.Args[1] == "-version") {
-		fmt.Printf("SailGo v%s · Build %s\\n", appVersion, buildVersion)
+		fmt.Printf("SailGo v%s · Build %s\n", appVersion, buildVersion)
 		return
 	}
 	loc, err := time.LoadLocation(timeZoneName)
