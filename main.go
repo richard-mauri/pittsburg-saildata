@@ -35,7 +35,7 @@ import (
 
 const (
 	appVersion                      = "1.16.0"
-	buildVersion                    = "v392"
+	buildVersion                    = "v393"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -568,6 +568,11 @@ func fetchNOAASaildroneFeed() SaildroneFeed {
 var alertCaliforniaDiagnosticSerial uint64
 
 func main() {
+	// Mirror ScraperGo: report the version embedded in the compiled executable.
+	if len(os.Args) == 2 && (os.Args[1] == "--version" || os.Args[1] == "-version") {
+		fmt.Printf("SailGo v%s · Build %s\n", appVersion, buildVersion)
+		return
+	}
 	loc, err := time.LoadLocation(timeZoneName)
 	if err != nil {
 		fatal(err)
