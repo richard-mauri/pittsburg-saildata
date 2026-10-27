@@ -248,3 +248,15 @@ a.details-link:focus-visible { outline:2px solid var(--accent);outline-offset:5p
   color:var(--ink);
   background:var(--panel);
 }
+
+/* Keep the Map Overlays clear action legible in either appearance. */
+.map-overlays-toolbar .map-overlay-clear {
+  background:var(--soft);
+  color:var(--ink);
+  border:1px solid var(--border);
+}
+.map-overlays-toolbar .map-overlay-clear:hover {
+  background:var(--panel);
+  color:var(--accent);
+  border-color:var(--accent);
+}
