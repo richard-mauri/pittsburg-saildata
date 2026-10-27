@@ -34,6 +34,6 @@ nohup "$HOME/Applications/cloudflared" tunnel run \
 
 disown -a
 
-printf 'Started SailGo and its Cloudflare Tunnel.\\n'
+printf 'Started SailGo and its Cloudflare Tunnel.\n'
 "$HOME/projects/sailing-go/sailing-go" --version
 
