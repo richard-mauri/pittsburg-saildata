@@ -216,3 +216,47 @@ a.details-link:focus-visible { outline:2px solid var(--accent);outline-offset:5p
 @media(max-width:640px) {
   .hero { min-height:300px;background-size:auto,cover; }
 }
+
+/* ALERTCalifornia's fixed camera panel and native display selector must use
+   the same light/dark surface and text tokens as the map overlay menu. */
+.alertcalifornia-panel,
+.alertcalifornia-panel-head {
+  background:var(--panel);
+  color:var(--ink);
+  border-color:var(--border);
+}
+.alertcalifornia-panel-title,
+.alertcalifornia-panel-body,
+.alertcalifornia-panel-body p,
+.alertcalifornia-panel-body strong { color:var(--ink); }
+.alertcalifornia-panel .camera-meta { color:var(--muted); }
+.alertcalifornia-panel .camera-link { color:var(--accent); }
+.alertcalifornia-panel-close {
+  background:var(--panel);
+  color:var(--ink);
+  border-color:var(--border);
+}
+.alertcalifornia-panel-close:hover { background:var(--soft); }
+.alertcamera-display-mode { color:var(--muted); }
+.alertcamera-display-mode select {
+  color:var(--ink);
+  background:var(--panel);
+  border-color:var(--border);
+  color-scheme:light dark;
+}
+.alertcamera-display-mode select option {
+  color:var(--ink);
+  background:var(--panel);
+}
+
+/* Keep the Map Overlays clear action legible in either appearance. */
+.map-overlays-toolbar .map-overlay-clear {
+  background:var(--soft);
+  color:var(--ink);
+  border:1px solid var(--border);
+}
+.map-overlays-toolbar .map-overlay-clear:hover {
+  background:var(--panel);
+  color:var(--accent);
+  border-color:var(--accent);
+}
