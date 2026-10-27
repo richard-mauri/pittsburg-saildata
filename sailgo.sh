@@ -10,6 +10,21 @@
 HOME=/Users/richardmauri
 cd "$HOME/projects/sailing-go" || exit 1
 
+# Report the checked-out source version before launching the existing binary.
+# The binary may be older if it has not been rebuilt after a source update.
+SOURCE_FILE="$HOME/projects/sailing-go/main.go"
+if [[ -r "$SOURCE_FILE" ]]; then
+    APP_VERSION=$(sed -n 's/^[[:space:]]*appVersion[[:space:]]*=[[:space:]]*"\\([^"]*\\)".*/\\1/p' "$SOURCE_FILE" | head -n 1)
+    BUILD_VERSION=$(sed -n 's/^[[:space:]]*buildVersion[[:space:]]*=[[:space:]]*"\\([^"]*\\)".*/\\1/p' "$SOURCE_FILE" | head -n 1)
+    if [[ -n "$APP_VERSION" && -n "$BUILD_VERSION" ]]; then
+        printf 'SailGo source: Version %s · Build %s (compiled binary may differ)\\n' "$APP_VERSION" "$BUILD_VERSION"
+    else
+        printf 'SailGo source version unavailable in main.go\\n' >&2
+    fi
+else
+    printf 'SailGo source version unavailable: main.go not readable\\n' >&2
+fi
+
 # Stop only the sailing Go application.
 pkill -x sailing-go 2>/dev/null || true
 
