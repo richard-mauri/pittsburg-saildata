@@ -1,25 +1,7 @@
-# Mauri's Weather & Water Conditions — current work
+# SailingGo — current work (2026-11-04)
 
-**Snapshot: October 30, 2026.** Reconfirm current branch/PR and reconcile newer local Mac changes before installing anything.
+Authoritative baseline: GitHub `main`. Active issue [#14](https://github.com/richard-mauri/pittsburg-saildata/issues/14), branch `fix/14-homepage-return`, [draft PR #15](https://github.com/richard-mauri/pittsburg-saildata/pull/15) targeting main. This is an independent part of Homepage Issue #11 / PR #12, which changes launcher navigation to same-tab. Scope: Adding a styled native same-tab Back to Homepage link on all four HTML views. Development build advances v394 to v395, semantic version stays 1.16.0. NOAA, selected location, current predictions, routes and overlays unchanged.
 
-## Verified merged baseline and candidate
+Owner Mac/Safari acceptance of return link, mobile visibility, light/dark contrast and same-tab navigation is pending. Go regression test checks presence of native link. GitHub CI must be checked at the exact final PR head. No merge, release or service restart authorized. Existing local work and Cloudflare configuration are unverified and must not be overwritten.
 
-- GitHub `main` was at `d77ec32e64a4fac8311ea6dd5704e67b7c9d4324` before this change. No open pull requests were found at the start of this session.
-- `main.go` declares application version `1.16.0` and baseline development build `v393`; this Issue #12 candidate increments development build to `v394` without changing appVersion.
-- Local owner's `~/projects/sailing-go` working tree, Safari appearance, running service, and any unpushed changes are **unverified**. The documented public service is owner-hosted via Cloudflare Tunnel; this PR does not touch the server or tunnel.
-
-## Active change — Issue #12
-
-- Issue: https://github.com/richard-mauri/pittsburg-saildata/issues/12
-- Branch: `fix/issue-12-welcome-theme`, forked from the verified `main` baseline.
-- Scope: `web/templates/welcome.html` replaces legacy stand-alone CSS palette and hard-coded white controls/backgrounds with the shared `web/static/theme.css` semantic tokens; keep the hero photo and existing layout. `main.go` increments buildVersion to v394. The obsolete `backup/` ignore entry was removed after owner-side broad Go tests exposed conflicting, untracked backup programs; the owner deleted the local backup directory and verified `go test -count=1 ./...`, `go build .`, and `git diff --check` passed. This handoff document tracks active work.
-- No intended changes to routing, NOAA observations, current predictions, station choice, map selection, overlays, other templates, or operational configuration.
-- The previous Issue #3 theme work is now included in `main`; its older October 26 active-branch notes were superseded, not continued as an append-only log.
-
-## Validation and owner acceptance
-
-- Owner reports local `go test -count=1 ./...`, `go build .`, and `git diff --check` all passed after removing `backup/`. The prior PR-head GitHub CI passed, but CI must be rechecked against the **new exact head** after the `.gitignore` and documentation update. No Mac/Safari visual pass is claimed.
-- Inspect welcome in **both Safari light and dark appearance**, mobile and desktop widths, hero primary/secondary actions, GitHub action grid, card readability, loading scrim/dialog and navigation functionality. Check other major views for unintended theme interactions; the shared stylesheet itself is unchanged.
-- CI cannot prove native Safari layout or live NOAA response. Preserve data semantics and existing station/map selection behavior.
-- Before installing candidate locally, inspect `git status --short --branch` and reconcile changes ahead of origin. Follow the complete branch-specific Mac handoff commands from DEVELOPMENT.md.
-- Owner must explicitly authorize merge, semantic version change, release, deployment and/or restart. Do not deploy directly from this working branch.
+Other work: existing owner local checkout may include newer or unpushed changes; verify git status/ahead-behind before build. Nested ui/ module remains independent and is not modified.
