@@ -27,3 +27,6 @@ Existing documented routes include `/report`, `/planning`, `/wind-readings`, `/w
 Unit tests and Linux CI do not establish Mac/Safari appearance, live NOAA availability or tunnel behavior. For UI changes inspect both major views, history including 1h/24h and mph/knots, manual and automatic station selection, click versus pan/zoom, affected overlays, dialogs and report routes. Preserve useful sailing status colors even when adopting another app's visual palette.
 
 See [DEVELOPMENT.md](DEVELOPMENT.md) for verification and owner acceptance, and [CURRENT_WORK.md](CURRENT_WORK.md) for active scope.
+
+## Return to Homepage navigation
+SailingGo's browser UI exposes a visible native anchor `<a href="https://home.themauris.org/">← Back to Homepage</a>` with no `target` and no JavaScript history manipulation. It navigates in the current tab and can be used regardless of account sign-in. The link adds no new server endpoints, exposes no credentials, and does not modify app-local state. This is coordinated with Homepage Issue #11 / draft PR #12, where card clicks now navigate in the same tab.
