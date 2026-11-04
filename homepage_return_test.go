@@ -17,6 +17,7 @@ func TestAllSailingViewsLinkBackToHomepage(t *testing.T) {
    if !strings.Contains(markup,`class="suite-home-link" href="https://home.themauris.org/"`){
     t.Fatalf("%s missing Homepage return",path)
    }
+   if !strings.Contains(markup,".suite-home-link:hover{background:rgba(96,151,172,.22);border-color:var(--accent,#69c6d3);text-decoration:none}") {t.Fatalf("%s standardized hover border style missing",path)}
    if strings.Contains(markup,`class="suite-home-link" target="_blank"`){
     t.Fatalf("%s Homepage return opens a new tab",path)
    }
