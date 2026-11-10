@@ -5774,7 +5774,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       "&max_lat=" + encodeURIComponent(requestBounds.getNorth().toFixed(5)) +
       "&min_lon=" + encodeURIComponent(requestBounds.getWest().toFixed(5)) +
       "&max_lon=" + encodeURIComponent(requestBounds.getEast().toFixed(5)) +
-      "&wind_unit={{.WindUnit}}" +
+      "&wind_unit=" + encodeURIComponent(document.getElementById("wind-unit-select").value === "mph" ? "mph" : "kts") +
       "&include_marine=" + (mapState.windBarbsVisible ? "1" : "0") +
       "&include_inland=" + (mapState.inlandWindBarbsVisible ? "1" : "0");
 
@@ -5798,6 +5798,16 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
         setWindBarbStatus("Wind barbs unavailable: " + err.message, true);
       });
   }
+
+  window.addEventListener("sailing:units-refreshed", function(event) {
+    if (!event.detail || !event.detail.windChanged) return;
+    ++windBarbRequestSerial;
+    windBarbObservationCache = Object.create(null);
+    windBarbObservations = [];
+    windBarbLoadedBounds = null;
+    windBarbLayer.clearLayers();
+    if (mapState.windBarbsVisible || mapState.inlandWindBarbsVisible) loadWindBarbsForViewport(true);
+  });
 
   function scheduleWindBarbRefresh() {
     if (!mapState.windBarbsVisible && !mapState.inlandWindBarbsVisible) return;
@@ -7844,7 +7854,9 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   unitSelect.addEventListener("change", function() {
     var target = new URL(window.location.href);
     target.searchParams.set("wind_unit", unitSelect.value === "mph" ? "mph" : "kts");
-    window.location.href = target.toString();
+    var previous = window.location.href;
+    window.history.replaceState(window.history.state, "", target.pathname + target.search);
+    window.dispatchEvent(new CustomEvent("sailing:unit-change", {detail:{url:target.toString(),previous:previous,key:"wind_unit"}}));
   });
 })();
 
@@ -7854,7 +7866,9 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   unitSelect.addEventListener("change", function() {
     var target = new URL(window.location.href);
     target.searchParams.set("distance_unit", unitSelect.value === "mi" ? "mi" : "nmi");
-    window.location.href = target.toString();
+    var previous = window.location.href;
+    window.history.replaceState(window.history.state, "", target.pathname + target.search);
+    window.dispatchEvent(new CustomEvent("sailing:unit-change", {detail:{url:target.toString(),previous:previous,key:"distance_unit"}}));
   });
 })();
 
