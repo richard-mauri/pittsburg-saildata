@@ -43,3 +43,9 @@ On authenticated startup, SailingGo GETs the revisioned `/api/storage/sailing` a
 
 The preference payload schema remains version 1, with selected URL settings, overlays, map type and marine-place categories. Panning/zooming the map does not become a selected sailing location. Homepage companion Issue #26 / draft PR #27 must provide the trusted origin, storage namespace and handoff. Mac/Safari/live-tunnel acceptance is an owner-side gate.
 
+
+## In-place unit changes and account restoration (build v399)
+
+The existing Wind units and Distance units controls now update the browser URL using `history.replaceState` and dispatch a unit-change event; they do **not** set `window.location.href` or destroy the page. The embedded `web/static/unit_refresh.js` fetches the equivalent server-rendered document and updates static display text and wind metrics in place, preserving the Leaflet map and bound UI handlers. Wind history uses its existing JSON refresh path to recalculate the chart/table in the selected units. Dynamic map and chart controllers are never replaced. A failed fetch rolls the selector and URL back to the previously rendered units rather than leaving misleading values visible.
+
+The account client applies *unit-only* saved preference differences using the same in-place mechanism, not `location.replace`. A brief bounded initialization mask on the unit-dependent controls/data prevents showing stale units while the authenticated Homepage storage read is pending. Selected station/location changes may still require server-side navigation, as they alter underlying report context. Authentication and user-data isolation are unchanged. Verify all dynamic map overlays, wind/history time ranges and unit-sensitive calculations in Safari before merge.
