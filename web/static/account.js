@@ -7,6 +7,14 @@
   const optInKey = "sailing.homepage.autosave.v1";
   const optInUserKey = "sailing.homepage.autosave-user.v1";
   const pendingKey = "sailing.homepage.restore.v1";
+  const navigationKey = "sailing.homepage.last-url.v1";
+  let navigationChanged = false;
+  try {
+    const currentURL = location.pathname + location.search;
+    const previousURL = sessionStorage.getItem(navigationKey);
+    navigationChanged = previousURL !== null && previousURL !== currentURL;
+    sessionStorage.setItem(navigationKey, currentURL);
+  } catch (_) {}
   const allowedParams = ["lat","lon","station","current_station","bin","wind_unit","distance_unit","wind_hours","map_center_lat","map_center_lon","map_zoom","map_layer","planning_start","planning_end","caution_ebb","caution_flood","max_ebb","max_flood","planning_buffer","current_distance_warning","current_days"];
   const overlayIds = ["map-show-marine-zone","map-show-smoke","map-show-fire-perimeters","map-show-fire-detections","map-show-air-temperature","map-show-clouds","map-show-radar","map-show-wind-barbs","map-show-inland-wind-barbs","map-show-pressure","map-show-swell","map-show-structure","map-show-saildrone"];
   const hostEnabled = location.protocol === "https:" && location.hostname === "weather.themauris.org";
@@ -202,7 +210,7 @@
         const existing=await accountRecord();
         if (existing && !valid(existing.data)) {autosave=false;message("Unsupported account settings; automatic saving disabled.");return;}
         revision=existing ? existing.revision : 0;
-        queueSave(); // Finish navigation-based preference changes after the new page loads.
+        if (navigationChanged) queueSave(); // Save changes that navigated/reloaded before the prior request finished.
       }
     } catch (err) {disableAccount("Account unavailable · browser settings retained.");}
   }
