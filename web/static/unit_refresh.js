@@ -54,6 +54,7 @@
         const hours = document.getElementById("wind-reading-hours");
         if (hours) hours.dispatchEvent(new Event("change",{bubbles:true}));
       }
+      window.dispatchEvent(new CustomEvent("sailing:units-refreshed",{detail:{windChanged:windChanged}}));
     } catch (error) {
       if (requestID !== serial) return;
       // Never leave newly selected units beside stale values.
