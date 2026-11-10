@@ -36,7 +36,7 @@ func readSailingUITemplate(path string) string {
 		}
 		// Hide only unit-sensitive content until account preferences are applied.
 		// The client always releases this brief mask, including on network errors.
-		const bootstrap = `<style>html.sailing-units-pending .page-preferences,html.sailing-units-pending .grid{visibility:hidden}</style><script>document.documentElement.classList.add("sailing-units-pending");setTimeout(function(){document.documentElement.classList.remove("sailing-units-pending")},4000)</script>`
+		const bootstrap = `<style>html.sailing-units-pending .page-preferences,html.sailing-units-pending #bottom-line-card .metrics,html.sailing-units-pending #bottom-line-card .planning-period-cause,html.sailing-units-pending .wind-card .metrics,html.sailing-units-pending .wind-card .wind-summary,html.sailing-units-pending .wind-card .wind-readings,html.sailing-units-pending .wind-card .wind-distance-warning{visibility:hidden}</style><script>document.documentElement.classList.add("sailing-units-pending");setTimeout(function(){document.documentElement.classList.remove("sailing-units-pending")},4000)</script>`
 		page = strings.Replace(page, "</head>", bootstrap+"</head>", 1)
 		page = strings.Replace(page, "</body>", "<script>"+string(units)+"</script><script>"+string(account)+"</script></body>", 1)
 	}
