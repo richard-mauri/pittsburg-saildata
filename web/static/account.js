@@ -88,12 +88,16 @@
       // A different view may omit parameters as part of normal navigation.
       // Only treat an omitted parameter as intentional on the same path.
       if (after.has(key) && before.get(key) !== after.get(key)) changed[key] = after.get(key).slice(0,256);
+      else if (before.has(key) && !after.has(key) && new URL(previous,location.origin).pathname === location.pathname) changed[key] = null;
     });
     return changed;
   }
   function mergeChangedNavigation(data, prior) {
     const copy = JSON.parse(JSON.stringify(data));
-    Object.assign(copy.params, actualParameterChanges(prior.url));
+    Object.entries(actualParameterChanges(prior.url)).forEach(function (pair) {
+      if (pair[1] === null) delete copy.params[pair[0]];
+      else copy.params[pair[0]] = pair[1];
+    });
     return copy;
   }
   function restoreMap(data) {
