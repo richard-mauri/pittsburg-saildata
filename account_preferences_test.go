@@ -5,22 +5,33 @@ import (
     "testing"
 )
 
-func TestSailingAccountScriptOnlyOnDashboard(t *testing.T) {
+func TestSailingAccountAutoSyncEmbeddedOnlyOnDashboard(t *testing.T) {
     dashboard := readSailingUITemplate("web/templates/sailing.html")
-    if !strings.Contains(dashboard, "sailing.homepage.handoff.v1") {
-        t.Fatal("SailingGo dashboard is missing Homepage handoff client")
+    required := []string{
+        "sailing.homepage.handoff.v1",
+        "/api/session/profile",
+        "/api/storage/sailing",
+        "suite_mode",
+        "suite_token",
+        "Signed in as ",
+        " (Homepage)",
+        "document.addEventListener(\"change\"",
+        "const existing = await record()",
+        "applySettings(desired,user)",
+        "response.status === 409",
+        "revision:revision",
+        "sailing.preferences.pending-account.v2",
+        "sailing.preferences.browser.v2",
     }
-    if !strings.Contains(dashboard, "/api/storage/sailing") {
-        t.Fatal("SailingGo dashboard is missing the account storage endpoint")
+    for _, needle := range required {
+        if !strings.Contains(dashboard, needle) {
+            t.Errorf("SailingGo auto-sync client missing %q", needle)
+        }
     }
-    if !strings.Contains(dashboard, "suite_mode") || !strings.Contains(dashboard, "suite_token") {
-        t.Fatal("SailingGo must support signed-in and browser-only launch modes")
-    }
-    if !strings.Contains(dashboard, "revision:revision") || !strings.Contains(dashboard, "response.status === 409") {
-        t.Fatal("Account settings must use revisioned writes and conflict detection")
-    }
-    if !strings.Contains(dashboard, "Save to account") || !strings.Contains(dashboard, "Load from account") {
-        t.Fatal("Explicit account sync controls must be available")
+    for _, forbidden := range []string{"Save to account", "Load from account", "sailing.homepage.autosave.v1", "window.confirm("} {
+        if strings.Contains(dashboard, forbidden) {
+            t.Errorf("obsolete manual account sync remains: %q", forbidden)
+        }
     }
     for _, path := range []string{"web/templates/welcome.html", "web/templates/details.html", "web/templates/stations.html"} {
         if strings.Contains(readSailingUITemplate(path), "sailing.homepage.handoff.v1") {
