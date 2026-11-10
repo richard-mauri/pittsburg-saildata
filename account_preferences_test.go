@@ -48,6 +48,8 @@ func TestUnitChangesUseInPlaceRefresh(t *testing.T) {
 		"X-Requested-With",
 		"new DOMParser()",
 		"sailing-units-pending",
+		"sailing:units-refreshed",
+		"windBarbObservationCache = Object.create(null)",
 	} {
 		if !strings.Contains(page, required) {
 			t.Errorf("unit refresh contract missing %q", required)
