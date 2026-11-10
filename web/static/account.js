@@ -20,6 +20,7 @@
   const hostEnabled = location.protocol === "https:" && location.hostname === "weather.themauris.org";
   let bearer = "", account = "", revision = null, authenticated = false, saving = false, queued = false, timer = null;
   let autosave = false;
+  let priorMap = null;
   try { autosave = sessionStorage.getItem(optInKey) === "yes"; } catch (_) {}
   const fragment = new URLSearchParams(location.hash.substring(1));
   if (fragment.has("suite_token") || fragment.get("suite_mode") === "local") {
@@ -80,18 +81,18 @@
     allowedParams.forEach(function (key) {
       if (query.has(key)) params[key] = query.get(key).slice(0, 256);
     });
-    const overlays = {};
+    const overlays = priorMap && priorMap.overlays ? Object.assign({}, priorMap.overlays) : {};
     overlayIds.forEach(function (id) {
       const el = document.getElementById(id);
       if (el) overlays[id] = !!el.checked;
     });
     const type = document.querySelector('input[name="map-type"]:checked');
-    const categories = {};
+    const categories = priorMap && priorMap.marineCategories ? Object.assign({}, priorMap.marineCategories) : {};
     document.querySelectorAll(".map-marine-place-toggle").forEach(function (el) {
       const category = el.getAttribute("data-marine-category");
       if (category && /^[a-z_]+$/.test(category)) categories[category] = !!el.checked;
     });
-    return {schema:1,params:params,overlays:overlays,mapType:type ? type.value : "",marineCategories:categories};
+    return {schema:1,params:params,overlays:overlays,mapType:type ? type.value : (priorMap ? priorMap.mapType : ""),marineCategories:categories};
   }
   function valid(data) {
     if (!data || data.schema !== 1 || typeof data.params !== "object" || !data.params ||
@@ -119,6 +120,7 @@
       if (revision === null) {
         const existing = await accountRecord();
         if (existing && !valid(existing.data)) throw Error("Saved account format is unsupported; nothing overwritten.");
+        if (existing) priorMap = existing.data;
         if (existing && !autosave && !window.confirm("Replace existing SailingGo account preferences with this browser's settings?")) {
           message("Account unchanged; browser settings preserved."); return;
         }
@@ -136,6 +138,7 @@
       if (!response.ok) throw Error("Account save failed (HTTP " + response.status + "); browser settings retained.");
       const result = await response.json();
       revision = result.revision;
+      priorMap = snapshot();
       autosave = true;
       try { sessionStorage.setItem(optInKey, "yes"); sessionStorage.setItem(optInUserKey, account); } catch (_) {}
       message("Saved for " + account + " · automatic saving enabled.");
@@ -162,6 +165,7 @@
       Object.entries(record.data.params).forEach(function (pair) {url.searchParams.set(pair[0],pair[1]);});
       try {sessionStorage.setItem(pendingKey, JSON.stringify(record.data));} catch (_) {throw Error("Browser session storage unavailable; settings not loaded.");}
       revision = record.revision;
+      priorMap = record.data;
       autosave = true;
       try {sessionStorage.setItem(optInKey, "yes"); sessionStorage.setItem(optInUserKey, account);} catch (_) {}
       location.assign(url.toString());
@@ -210,6 +214,7 @@
         const existing=await accountRecord();
         if (existing && !valid(existing.data)) {autosave=false;message("Unsupported account settings; automatic saving disabled.");return;}
         revision=existing ? existing.revision : 0;
+        if (existing) priorMap = existing.data;
         if (navigationChanged) queueSave(); // Save changes that navigated/reloaded before the prior request finished.
       }
     } catch (err) {disableAccount("Account unavailable · browser settings retained.");}
