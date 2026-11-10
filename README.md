@@ -38,3 +38,7 @@ The documented public service is hosted by a locally running Go application expo
 ## Development documentation
 
 This README is for users. For contributors and coding agents, see [AGENTS.md](AGENTS.md) (mandatory agent instructions), [ARCHITECTURE.md](ARCHITECTURE.md) (system and behavior contracts), [DEVELOPMENT.md](DEVELOPMENT.md) (GitHub Issues, branches, draft PRs, CI and acceptance), and [CURRENT_WORK.md](CURRENT_WORK.md) (current active handoff). Development changes follow GitHub PRs rather than downloadable replacement-file handoffs.
+
+## Optional account preferences
+
+For per-user storage across browser sessions, first sign in at [Homepage](https://home.themauris.org/) and launch **Sailing Outlook** from its card. On Conditions Now or Planning and Details, use **Save to account** to store your current supported preferences. This first explicit save (or **Load from account**) enables automatic account saves for subsequent changes in the same browser tab. **Load from account** asks before replacing your current browser selections. Account settings include wind/distance units, selected sailing location and station URL settings, planning parameters, and available map type/overlay selections. A browser-only visit remains usable, and account loss or a conflicting update does not erase the current browser settings. Homepage's companion storage/handoff change must be deployed before these actions work; see draft PR #18 and Homepage draft PR #27.
