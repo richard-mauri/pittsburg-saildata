@@ -5799,6 +5799,16 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       });
   }
 
+  window.addEventListener("sailing:units-refreshed", function(event) {
+    if (!event.detail || !event.detail.windChanged) return;
+    ++windBarbRequestSerial;
+    windBarbObservationCache = Object.create(null);
+    windBarbObservations = [];
+    windBarbLoadedBounds = null;
+    windBarbLayer.clearLayers();
+    if (mapState.windBarbsVisible || mapState.inlandWindBarbsVisible) loadWindBarbsForViewport(true);
+  });
+
   function scheduleWindBarbRefresh() {
     if (!mapState.windBarbsVisible && !mapState.inlandWindBarbsVisible) return;
     if (windBarbRefreshTimer) window.clearTimeout(windBarbRefreshTimer);
