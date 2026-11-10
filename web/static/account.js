@@ -5,6 +5,7 @@
   const base = "https://home.themauris.org";
   const handoffKey = "sailing.homepage.handoff.v1";
   const optInKey = "sailing.homepage.autosave.v1";
+  const optInUserKey = "sailing.homepage.autosave-user.v1";
   const pendingKey = "sailing.homepage.restore.v1";
   const allowedParams = ["lat","lon","station","current_station","bin","wind_unit","distance_unit","wind_hours","map_center_lat","map_center_lon","map_zoom","map_layer","planning_start","planning_end","caution_ebb","caution_flood","max_ebb","max_flood","planning_buffer","current_distance_warning","current_days"];
   const overlayIds = ["map-show-marine-zone","map-show-smoke","map-show-fire-perimeters","map-show-fire-detections","map-show-air-temperature","map-show-clouds","map-show-radar","map-show-wind-barbs","map-show-inland-wind-barbs","map-show-pressure","map-show-swell","map-show-structure","map-show-saildrone"];
@@ -19,6 +20,7 @@
       if (fragment.get("suite_mode") === "local" || !/^[a-f0-9]{64}$/.test(issued || "")) {
         sessionStorage.removeItem(handoffKey);
         sessionStorage.removeItem(optInKey);
+        sessionStorage.removeItem(optInUserKey);
         autosave = false;
       } else {
         sessionStorage.setItem(handoffKey, issued);
@@ -58,7 +60,7 @@
     const result = await fetch(base + path, Object.assign({credentials:"omit",cache:"no-store"}, opts, {headers:headers}));
     if (result.status === 401 || result.status === 403) {
       bearer = ""; authenticated = false;
-      try { sessionStorage.removeItem(handoffKey); sessionStorage.removeItem(optInKey); } catch (_) {}
+      try { sessionStorage.removeItem(handoffKey); sessionStorage.removeItem(optInKey); sessionStorage.removeItem(optInUserKey); } catch (_) {}
       autosave = false;
       disableAccount("Account session expired; browser preferences preserved.");
     }
@@ -127,7 +129,7 @@
       const result = await response.json();
       revision = result.revision;
       autosave = true;
-      try { sessionStorage.setItem(optInKey, "yes"); } catch (_) {}
+      try { sessionStorage.setItem(optInKey, "yes"); sessionStorage.setItem(optInUserKey, account); } catch (_) {}
       message("Saved for " + account + " · automatic saving enabled.");
     } catch (err) { message(err.message); }
     finally { saving = false; saveButton.disabled = !authenticated; if (queued) {queued=false; queueSave();} }
@@ -153,7 +155,7 @@
       try {sessionStorage.setItem(pendingKey, JSON.stringify(record.data));} catch (_) {throw Error("Browser session storage unavailable; settings not loaded.");}
       revision = record.revision;
       autosave = true;
-      try {sessionStorage.setItem(optInKey, "yes");} catch (_) {}
+      try {sessionStorage.setItem(optInKey, "yes"); sessionStorage.setItem(optInUserKey, account);} catch (_) {}
       location.assign(url.toString());
     } catch (err) {message(err.message);} finally {loadButton.disabled = !authenticated;}
   });
@@ -189,7 +191,9 @@
       if (!response.ok) throw Error("Authentication check failed (HTTP "+response.status+").");
       const profile = await response.json();
       if (typeof profile.user !== "string" || !profile.user || !(Date.parse(profile.expiresAt)>Date.now())) throw Error("Homepage session unavailable.");
-      if (account && account !== profile.user) {revision=null;autosave=false;try{sessionStorage.removeItem(optInKey);}catch(_){}}
+      let allowedUser = "";
+      try { allowedUser = sessionStorage.getItem(optInUserKey) || ""; } catch (_) {}
+      if (allowedUser !== profile.user) {revision=null;autosave=false;try{sessionStorage.removeItem(optInKey);sessionStorage.removeItem(optInUserKey);}catch(_){}}
       account = profile.user;
       authenticated = true;
       saveButton.disabled = false;loadButton.disabled = false;
@@ -198,6 +202,7 @@
         const existing=await accountRecord();
         if (existing && !valid(existing.data)) {autosave=false;message("Unsupported account settings; automatic saving disabled.");return;}
         revision=existing ? existing.revision : 0;
+        queueSave(); // Finish navigation-based preference changes after the new page loads.
       }
     } catch (err) {disableAccount("Account unavailable · browser settings retained.");}
   }
