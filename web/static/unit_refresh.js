@@ -40,6 +40,14 @@
             oldCards[i].classList.contains("offshore-trip-card")) continue;
         patch(oldCards[i],newCards[i]);
       }
+      // Live data can change the number of server-rendered child nodes.
+      // Refresh the stable wind metrics even when the general tree differs.
+      for (const selector of ["#bottom-line-card .metric .value", ".wind-card .metric .value"]) {
+        const current = document.querySelectorAll(selector);
+        const updated = doc.querySelectorAll(selector);
+        if (current.length !== updated.length) continue;
+        for (let i=0; i<current.length; i++) current[i].textContent = updated[i].textContent;
+      }
       // Existing wind-history code owns its table/chart and already refreshes
       // from the JSON endpoint in the selected unit, preserving handlers.
       if (windChanged) {
