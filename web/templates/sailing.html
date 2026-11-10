@@ -7844,7 +7844,9 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   unitSelect.addEventListener("change", function() {
     var target = new URL(window.location.href);
     target.searchParams.set("wind_unit", unitSelect.value === "mph" ? "mph" : "kts");
-    window.location.href = target.toString();
+    var previous = window.location.href;
+    window.history.replaceState(window.history.state, "", target.pathname + target.search);
+    window.dispatchEvent(new CustomEvent("sailing:unit-change", {detail:{url:target.toString(),previous:previous,key:"wind_unit"}}));
   });
 })();
 
@@ -7854,7 +7856,9 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   unitSelect.addEventListener("change", function() {
     var target = new URL(window.location.href);
     target.searchParams.set("distance_unit", unitSelect.value === "mi" ? "mi" : "nmi");
-    window.location.href = target.toString();
+    var previous = window.location.href;
+    window.history.replaceState(window.history.state, "", target.pathname + target.search);
+    window.dispatchEvent(new CustomEvent("sailing:unit-change", {detail:{url:target.toString(),previous:previous,key:"distance_unit"}}));
   });
 })();
 
