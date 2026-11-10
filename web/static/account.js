@@ -118,19 +118,35 @@
       });
     } finally { applying = false; }
   }
-  function applySettings(data, identity) {
+  async function applySettings(data, identity) {
     if (!valid(data)) return;
+    const previous = new URL(location.href);
     const next = new URL(location.href);
     params.forEach(function (key) { next.searchParams.delete(key); });
     Object.entries(data.params).forEach(function (pair) { next.searchParams.set(pair[0],pair[1]); });
-    // Leave navigation-only query parameters intact and preserve the current
-    // route: Conditions Now and Planning must remain distinct views.
-    if (next.pathname + next.search !== pageURL) {
-      putSession(restoreKey, JSON.stringify({user:identity,url:next.pathname+next.search}));
-      location.replace(next.toString());
-      return;
+    if (next.pathname + next.search !== previous.pathname + previous.search) {
+      const changed = params.filter(function(key) {
+        return previous.searchParams.get(key) !== next.searchParams.get(key);
+      });
+      if (changed.every(function(key) { return key === "wind_unit" || key === "distance_unit"; }) &&
+          typeof window.sailingRefreshUnits === "function") {
+        // In-place unit application: do not tear down the map, charts or page.
+        const wind = document.getElementById("wind-unit-select");
+        const distance = document.getElementById("distance-unit-select");
+        if (wind) wind.value = next.searchParams.get("wind_unit") === "mph" ? "mph" : "kts";
+        if (distance) distance.value = next.searchParams.get("distance_unit") === "mi" ? "mi" : "nmi";
+        history.replaceState(history.state,"",next.pathname + next.search);
+        await window.sailingRefreshUnits(next,previous,changed.includes("wind_unit"));
+      } else {
+        // Location/station/planning changes may require server recomputation;
+        // preserve the current route and the user's account on navigation.
+        putSession(restoreKey, JSON.stringify({user:identity,url:next.pathname+next.search}));
+        location.replace(next.toString());
+        return;
+      }
     }
     restoreMap(data);
+    document.documentElement.classList.remove("sailing-units-pending");
   }
   function keepNavigation(identity) {
     putJSON(navKey,{user:identity,url:pageURL},false);
@@ -138,7 +154,7 @@
   function saveLocal(data) {
     if (valid(data)) putJSON(localKey,data,true);
   }
-  function browserOnly() {
+  async function browserOnly() {
     signedIn = false;
     status("Not signed in");
     const old = getJSON(localKey,true);
@@ -148,7 +164,7 @@
       saveLocal(data);
       keepNavigation("local");
     } else if (!valid(old)) saveLocal(data);
-    applySettings(data,"local");
+    await applySettings(data,"local");
     keepNavigation("local");
   }
   // A handoff is transferred only through the fragment. Clear it immediately.
@@ -228,7 +244,7 @@
     }
   }
   async function hydrate() {
-    if (!onPublicHost || !bearer || explicitlyLocal) {initializing=false;browserOnly();return;}
+    if (!onPublicHost || !bearer || explicitlyLocal) {initializing=false;await browserOnly();return;}
     try {
       const profile = await request("/api/session/profile");
       if (!profile.ok) throw Error("Homepage verification HTTP "+profile.status);
@@ -267,13 +283,14 @@
         dirty = true;
         await flush();
       }
-      applySettings(desired,user);
+      await applySettings(desired,user);
     } catch (err) {
       initializing = false;
       // A network fault is not an identity: preserve current browser settings,
       // but do not mutate the account or claim a valid login.
       signedIn = false;
       status("Not signed in · account unavailable");
+      document.documentElement.classList.remove("sailing-units-pending");
     }
   }
   // Capture change events before existing page handlers navigate/reload.
@@ -298,7 +315,7 @@
     if (!initializing) keepNavigation(signedIn ? user : "local");
   });
   if (!onPublicHost || !bearer || explicitlyLocal) {
-    initializing=false;browserOnly();
+    initializing=false;void browserOnly();
   } else {
     void hydrate();
   }
