@@ -39,3 +39,29 @@ func TestSailingAccountAutoSyncEmbeddedOnlyOnDashboard(t *testing.T) {
 		}
 	}
 }
+
+func TestUnitChangesUseInPlaceRefresh(t *testing.T) {
+	page := readSailingUITemplate("web/templates/sailing.html")
+	for _, required := range []string{
+		"sailing:unit-change",
+		"sailingRefreshUnits",
+		"X-Requested-With",
+		"new DOMParser()",
+		"sailing-units-pending",
+	} {
+		if !strings.Contains(page, required) {
+			t.Errorf("unit refresh contract missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"window.location.href = target.toString();",
+	} {
+		if strings.Contains(page, forbidden) {
+			t.Errorf("unit selector must not navigate: %q", forbidden)
+		}
+	}
+	client := readSailingUITemplate("web/templates/sailing.html")
+	if !strings.Contains(client, "await window.sailingRefreshUnits(next,previous") {
+		t.Fatal("account restore must refresh units in place")
+	}
+}
