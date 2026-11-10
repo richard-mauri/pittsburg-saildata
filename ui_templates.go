@@ -9,7 +9,7 @@ import (
 // Browser page templates are embedded at build time so local and deployed
 // binaries retain their original self-contained behavior.
 //
-//go:embed web/templates/*.html web/static/theme.css
+//go:embed web/templates/*.html web/static/theme.css web/static/account.js
 var sailingUIFiles embed.FS
 
 func readSailingUITemplate(path string) string {
@@ -23,7 +23,14 @@ func readSailingUITemplate(path string) string {
 	}
 	// Each page retains its own structural styles; the shared theme is the
 	// final stylesheet and is embedded directly into the rendered HTML.
-	return strings.Replace(string(data), "</style>", "</style><style>"+string(theme)+"</style>", 1)
+	page := strings.Replace(string(data), "</style>", "</style><style>"+string(theme)+"</style>", 1)
+	// Account behavior is opt-in and applies only to the two report views.
+	if path == "web/templates/sailing.html" {
+		account, err := sailingUIFiles.ReadFile("web/static/account.js")
+		if err != nil { panic(err) }
+		page = strings.Replace(page, "</body>", "<script>"+string(account)+"</script></body>", 1)
+	}
+	return page
 }
 
 var welcomeHTMLTemplate = template.Must(template.New("welcome").Parse(readSailingUITemplate("web/templates/welcome.html")))
