@@ -173,8 +173,11 @@
   });
   function restoreMapChoices() {
     let saved;
-    try {saved=JSON.parse(sessionStorage.getItem(pendingKey)||"null");sessionStorage.removeItem(pendingKey);} catch (_) {return;}
+    try {saved=JSON.parse(sessionStorage.getItem(pendingKey)||"null");} catch (_) {return;}
     if (!valid(saved)) return;
+    // Conditions Now has no map controls; defer this part of restoration to Planning.
+    if (!document.querySelector('input[name="map-type"]')) return;
+    try {sessionStorage.removeItem(pendingKey);} catch (_) {}
     if (saved.mapType) {
       const selected = Array.from(document.querySelectorAll('input[name="map-type"]')).find(function(el){return el.value===saved.mapType;});
       if (selected && !selected.checked) selected.click();
