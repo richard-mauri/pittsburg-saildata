@@ -67,3 +67,17 @@ func TestUnitChangesUseInPlaceRefresh(t *testing.T) {
 		t.Fatal("account restore must refresh units in place")
 	}
 }
+
+func TestSailingDirectVisitRecoversExistingHomepageSession(t *testing.T) {
+	page := readSailingUITemplate("web/templates/sailing.html")
+	for _, wanted := range []string{
+		"location.replace(home + \"/launch/sailing\")",
+		"onPublicHost && !bearer && !explicitlyLocal",
+		"fragment.get(\"suite_mode\") === \"local\"",
+		"clearSession(handoffKey)",
+	} {
+		if !strings.Contains(page, wanted) {
+			t.Errorf("SailingGo direct-visit recovery missing %q", wanted)
+		}
+	}
+}

@@ -314,6 +314,14 @@
   window.addEventListener("pagehide",function () {
     if (!initializing) keepNavigation(signedIn ? user : "local");
   });
+  if (onPublicHost && !bearer && !explicitlyLocal) {
+    // A fresh Safari tab has no transferable bearer. Recover an existing
+    // Homepage login through its allowlisted same-origin bridge. An absent,
+    // expired or revoked parent returns once with #suite_mode=local, avoiding
+    // loops and preserving browser-only settings.
+    location.replace(home + "/launch/sailing");
+    return;
+  }
   if (!onPublicHost || !bearer || explicitlyLocal) {
     initializing=false;void browserOnly();
   } else {

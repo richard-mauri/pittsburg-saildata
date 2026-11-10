@@ -49,3 +49,7 @@ Persisted choices include wind/distance units, selected-location and station URL
 ## Unit changes without a page reload
 
 Wind and distance unit selectors update visible values in place without navigating or rebuilding the sailing map. Returning from Homepage applies saved units without first showing the wrong units and reloading the page. SailingGo fetches updated report values from its existing Go service and updates wind history using its existing data endpoint. If the update fails, the selector returns to the previous units instead of mislabeling displayed data. Selected sailing-location and station changes remain distinct from unit preferences and can require full report navigation.
+
+## Direct-visit recovery of an existing Homepage login
+
+If you open SailingGo directly in a fresh Safari tab with no transferable session bearer, the dashboard briefly navigates to Homepage's fixed `/launch/sailing` recovery route. Homepage verifies its existing unexpired and unrevoked parent session and returns SailingGo with a new parent-bound, fragment-only child bearer. SailingGo then automatically restores that user's saved preferences. If Homepage has no valid login, the bridge returns the dashboard once with `#suite_mode=local` and SailingGo remains usable with independent browser-only settings. There is no separate SailingGo login, automatic session renewal or credential transfer. This requires Homepage Issue #24 / PR #25 to be installed in addition to SailingGo Issue #19.
