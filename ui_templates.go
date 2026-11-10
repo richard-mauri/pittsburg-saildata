@@ -27,7 +27,9 @@ func readSailingUITemplate(path string) string {
 	// Account behavior is opt-in and applies only to the two report views.
 	if path == "web/templates/sailing.html" {
 		account, err := sailingUIFiles.ReadFile("web/static/account.js")
-		if err != nil { panic(err) }
+		if err != nil {
+			panic(err)
+		}
 		page = strings.Replace(page, "</body>", "<script>"+string(account)+"</script></body>", 1)
 	}
 	return page
