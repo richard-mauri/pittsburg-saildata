@@ -94,7 +94,7 @@ func (a *ActivityReporter) ping(w http.ResponseWriter,r *http.Request) {
  var p activityPing
  dec:=json.NewDecoder(r.Body);dec.DisallowUnknownFields()
  if err:=dec.Decode(&p);err!=nil{http.Error(w,"invalid activity ping",400);return}
- var extra any
+ var extra interface{}
  if dec.Decode(&extra)!=io.EOF || len(p.ID)!=32 || strings.Trim(p.ID,"0123456789abcdef")!=""{
   http.Error(w,"invalid activity ID",400);return
  }
