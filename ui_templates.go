@@ -40,6 +40,10 @@ func readSailingUITemplate(path string) string {
 		page = strings.Replace(page, "</head>", bootstrap+"</head>", 1)
 		page = strings.Replace(page, "</body>", "<script>"+string(units)+"</script><script>"+string(account)+"</script></body>", 1)
 	}
+	// Only embed browser telemetry when server-only reporting is explicitly configured.
+	if sailingActivityConfigured() {
+		page = strings.Replace(page, "</body>", `<script defer src="/activity.js"></script></body>`, 1)
+	}
 	return page
 }
 
