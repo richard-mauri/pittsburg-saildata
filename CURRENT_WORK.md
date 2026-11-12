@@ -1,25 +1,25 @@
 # Current work — SailingGo
 
-## Issue #19 — direct-visit Homepage session recovery (November 10, 2026)
+## Issue #21 — optional Homepage activity telemetry (November 12, 2026)
 
-- **Merged baseline:** GitHub `main` at `d5ccd2c712ab3fc9d2da559148bf6bee069729d0` (SailingGo issue #17 / PR #18), app v1.16.0 build v400. Candidate build v401, semantic version unchanged.
-- **Branch:** `fix/19-direct-visit-session-recovery`. Homepage Issue #24 / PR #25 was reconciled against Homepage main with fixed `/launch/sailing` route added; companion NewsGo PR #80 and already-merged MauriStocks PR #12 use the same recovery pattern.
-- **Behavior:** Without bearer, a public direct SailingGo visit redirects to trusted Homepage recovery. A previously valid parent session issues a fresh handoff and per-user preferences restore. Missing/revoked/expired session returns explicit browser-only mode, with no loop. Existing account saving and map/unit UX are unchanged.
-- **Checks:** JavaScript syntax checked; Go static regression test added. GitHub CI latest head must be checked; local Mac, Safari, Cloudflare, browser-close and dual-account acceptance not performed remotely.
-- **Authorization:** Owner requested coordinated reconciliation and merge. GitHub merge will be performed only after CI passes and dependency constraints are satisfied. No remote server restart or tunnel change authorized.
+- **Authoritative base:** GitHub `main` (before this branch: v1.16.0, build v401), existing Homepage direct-visit recovery integration already on main. **New draft:** [Issue #21](https://github.com/richard-mauri/pittsburg-saildata/issues/21), branch `feat/21-suite-activity`, [PR #22](https://github.com/richard-mauri/pittsburg-saildata/pull/22).
+- **Scope:** optional browser-tab presence and server work instrumentation, including bounded background swell prefetch. Separate service-only `HOMEPAGE_ACTIVITY_KEY_SAILING` and `SAILING_ACTIVITY_URL`, with service name `sailing` and 60-second aggregate reports to Homepage draft collector PR #30. Browser IDs remain local to SailingGo; personal coordinates, station IDs, tokens and query data are excluded. Signed-in classification is unverified and included in anonymous counts.
+- **Preserved:** NOAA observed wind, predicted tidal currents, station/units/overlays, all HTML/text/JSON routes, Homepage identity and per-user persistence. Production listener unchanged. Development `buildVersion` increments v401→v402; semantic `appVersion` remains 1.16.0. No deployment/restart/release/merge.
+- **Validation:** Go unit tests for reporter opt-in, same-origin validation, protocol, presence windows and template wiring; exact-head GitHub CI pending; Mac/Safari and live NOAA/tunnel behavior not yet tested.
+- **Next:** verify CI, then run a detached isolated Mac test binary on loopback 8087 alongside the existing disposable Homepage test server on 8788 with a fresh matching private key. Confirm the SailingGo row changes from unknown to reporting in the admin dashboard, without stopping production. Owner approval required before any merge or restart.
 
-## Owner-side Mac validation
+## Full owner Mac acceptance procedure (runtime restart separately authorized)
 
 ```sh
 cd ~/projects/sailing-go
 git status --short --branch
 git fetch origin
-git switch main
-git pull --ff-only origin main
-gofmt -l main.go wind.go currents.go ui_templates.go account_preferences_test.go
+git checkout feat/21-suite-activity
+git pull --ff-only origin feat/21-suite-activity
+gofmt -l main.go wind.go currents.go activity.go activity_test.go ui_templates.go
 go test -count=1 ./...
 go build .
 git diff --check
 ```
 
-After authorized build/server restart, test direct SailingGo visit from a new tab with valid Homepage login, direct visit with expired/no login, explicit `#suite_mode=local`, cross-account isolation, and account preference hydration, plus both views, wind units, overlays, report text/JSON and live Cloudflare behavior.
+Do not launch the owner’s production process or change Cloudflare tunnel settings without explicit permission. This procedure could disturb local unpushed work, so inspect status/diffs and use a separate worktree for the isolated UI smoke test.
