@@ -46,7 +46,6 @@
   const signInDialog = document.createElement("dialog");
   signInDialog.className = "sailing-suite-signin";
   signInDialog.setAttribute("aria-labelledby","sailing-suite-signin-title");
-  signInDialog.style.cssText = "max-width:min(440px,calc(100vw - 36px));padding:24px;border:1px solid #69cbd5;border-radius:12px;background:#172b39;color:#f1f7fa;box-shadow:0 20px 60px #0009";
   const signInTitle = document.createElement("h2");
   signInTitle.id = "sailing-suite-signin-title";
   signInTitle.textContent = "Suite sign-in required";
@@ -55,7 +54,6 @@
   const signInLink = document.createElement("a");
   signInLink.href = home; signInLink.target = "_blank";signInLink.rel = "noopener noreferrer";
   signInLink.textContent = "Go to Homepage";
-  signInLink.style.cssText = "display:inline-block;margin-top:12px;padding:10px 14px;color:#69cbd5;border:1px solid #69cbd5;border-radius:7px";
   signInDialog.addEventListener("cancel",function(event){event.preventDefault();});
   signInDialog.append(signInTitle,signInInfo,signInLink);
   document.body.append(signInDialog);
