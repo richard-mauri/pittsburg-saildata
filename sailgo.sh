@@ -10,6 +10,16 @@
 HOME=/Users/richardmauri
 cd "$HOME/projects/sailing-go" || exit 1
 
+# BEGIN SUITE ACTIVITY ENV - managed by setup-suite-activity.sh
+ACTIVITY_ENV="$HOME/projects/sailing-go/.activity.env"
+if [[ ! -r "$ACTIVITY_ENV" ]]; then
+  echo "Missing readable activity configuration: $ACTIVITY_ENV" >&2
+  exit 1
+fi
+# Private file is generated with export-only assignments; never print it.
+# shellcheck disable=SC1090
+source "$ACTIVITY_ENV"
+# END SUITE ACTIVITY ENV
 # Stop only the sailing Go application.
 pkill -x sailing-go 2>/dev/null || true
 
