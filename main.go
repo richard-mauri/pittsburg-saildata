@@ -35,7 +35,7 @@ import (
 
 const (
 	appVersion                      = "1.16.0"
-	buildVersion                    = "v401"
+	buildVersion                    = "v402"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -2111,6 +2111,7 @@ func prefetchSwellRaw(upstreamURL string) {
 		select {
 		case swellPrefetchSlots <- struct{}{}:
 			defer func() { <-swellPrefetchSlots }()
+			if sailingActivity!=nil {done:=sailingActivity.working();defer done()}
 		default:
 			return
 		}
@@ -2127,9 +2128,26 @@ func runServer(
 	defaultEnd int,
 	loc *time.Location,
 ) {
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+ reporter,reporterErr:=NewActivityReporter(os.Getenv("SAILING_ACTIVITY_URL"),os.Getenv("HOMEPAGE_ACTIVITY_KEY_SAILING"))
+ if reporterErr!=nil {log.Print("Sailing activity reporting disabled: invalid configuration")}
+ sailingActivity=reporter
+ if reporter!=nil {
+  ctx,cancel:=context.WithCancel(context.Background())
+  defer cancel()
+  go reporter.Run(ctx)
+ }
+ mux := http.NewServeMux()
+ if reporter!=nil {
+  mux.HandleFunc("/api/activity/ping",reporter.ping)
+  mux.HandleFunc("/activity.js",func(w http.ResponseWriter,r *http.Request){
+   if r.Method!=http.MethodGet {w.Header().Set("Allow","GET");http.Error(w,"method not allowed",http.StatusMethodNotAllowed);return}
+   w.Header().Set("Content-Type","application/javascript; charset=utf-8")
+   w.Header().Set("Cache-Control","no-store")
+   w.Header().Set("X-Content-Type-Options","nosniff")
+   _,_=io.WriteString(w,sailingActivityJS)
+  })
+ }
+ mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -4136,7 +4154,28 @@ func runServer(
 	fmt.Printf("Default wind station: %s\n", defaultStation)
 	fmt.Printf("Listening on http://localhost%s\n", addr)
 
-	if err := http.ListenAndServe(addr, mux); err != nil {
+ handler:=http.Handler(mux)
+ if reporter!=nil {
+  handler=http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
+   switch r.URL.Path {
+   case "/health","/api/activity/ping","/activity.js","/assets/hero.jpg","/assets/marine_places.json":
+    mux.ServeHTTP(w,r);return
+   }
+   done:=reporter.working()
+   defer done()
+   mux.ServeHTTP(w,r)
+  })
+ }
+ // The normal listener is unchanged. A loopback-only test override prevents
+ // isolated test instances from binding all network interfaces.
+ if localAddr:=os.Getenv("SAILING_ACTIVITY_TEST_LISTEN");localAddr!="" {
+  host,_,parseErr:=net.SplitHostPort(localAddr)
+  if parseErr!=nil || (host!="127.0.0.1" && host!="::1") {
+   fatal(fmt.Errorf("invalid loopback test address"))
+  }
+  addr=localAddr
+ }
+ if err := http.ListenAndServe(addr, handler); err != nil {
 		fatal(err)
 	}
 }
