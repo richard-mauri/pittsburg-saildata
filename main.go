@@ -35,7 +35,7 @@ import (
 
 const (
 	appVersion                      = "1.16.0"
-	buildVersion                    = "v402"
+	buildVersion                    = "v403"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -2139,6 +2139,7 @@ func runServer(
  mux := http.NewServeMux()
  if reporter!=nil {
   mux.HandleFunc("/api/activity/ping",reporter.ping)
+  mux.HandleFunc("/api/activity/identity",reporter.identity)
   mux.HandleFunc("/activity.js",func(w http.ResponseWriter,r *http.Request){
    if r.Method!=http.MethodGet {w.Header().Set("Allow","GET");http.Error(w,"method not allowed",http.StatusMethodNotAllowed);return}
    w.Header().Set("Content-Type","application/javascript; charset=utf-8")
@@ -4158,7 +4159,7 @@ func runServer(
  if reporter!=nil {
   handler=http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
    switch r.URL.Path {
-   case "/health","/api/activity/ping","/activity.js","/assets/hero.jpg","/assets/marine_places.json":
+   case "/health","/api/activity/ping","/api/activity/identity","/activity.js","/assets/hero.jpg","/assets/marine_places.json":
     mux.ServeHTTP(w,r);return
    }
    done:=reporter.working()
