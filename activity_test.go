@@ -70,7 +70,7 @@ func TestSailingReporterHomepageWireProtocol(t *testing.T){
 
 func TestSailingReporterDoesNotMutateWeatherContracts(t *testing.T){
  if appVersion!="1.16.0"{t.Fatal("semantic app version changed")}
- if buildVersion!="v403"{t.Fatal("expected next development build lineage")}
+ if buildVersion!="v404"{t.Fatal("expected next development build lineage")}
  if os.Getenv("SAILING_ACTIVITY_URL")=="" && sailingActivityConfigured(){t.Fatal("unexpected reporter configuration")}
 }
 
@@ -107,5 +107,8 @@ func TestSailingVerifiedPresenceAndGuestSession(t *testing.T) {
  if err!=nil{t.Fatal(err)}
  for _,part:=range []string{"info.role === \"guest\"","Guest (browser-only preferences)","event.preventDefault()","Go to Homepage"} {
   if !strings.Contains(string(account),part){t.Errorf("missing guest/session UI contract %q",part)}
+ }
+ for _,part:=range []string{"guestIdentity = user","await browserOnly(user)","Local preference restoration", "Signed in as \"+user+\" · Guest (browser-only preferences)"} {
+  if !strings.Contains(string(account),part){t.Errorf("verified guest must survive local preference failure: %q",part)}
  }
 }

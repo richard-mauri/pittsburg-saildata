@@ -16,7 +16,7 @@
   const fragment = new URLSearchParams(location.hash.substring(1));
   const handedOff = fragment.has("suite_token") || fragment.has("suite_mode");
   const explicitlyLocal = fragment.get("suite_mode") === "local";
-  let bearer = "", user = "", revision = null, baseline = null;
+  let bearer = "", user = "", guestIdentity = "", revision = null, baseline = null;
   let signedIn = false, initializing = true, applying = false;
   let saving = false, dirty = false, pendingSave = null, blocked = false;
   let priorNavigation = null, restoredNavigation = false;
@@ -173,7 +173,8 @@
   }
   async function browserOnly(guestName) {
     signedIn = false;
-    status(guestName ? "Signed in as "+guestName+" · Guest (browser-only preferences)" : "Not signed in");
+    const localIdentity = guestName || guestIdentity;
+    status(localIdentity ? "Signed in as "+localIdentity+" · Guest (browser-only preferences)" : "Not signed in");
     const old = getJSON(localKey,true);
     let data = valid(old) ? old : settingsFromPage(null);
     if (priorNavigation && priorNavigation.user === "local" && priorNavigation.url !== pageURL) {
@@ -272,10 +273,19 @@
       user = info.user;
       clearSignIn();
       if(info.role === "guest") {
+        // Identity is already verified. Local preference restoration is
+        // independent and must never erase or downgrade that identity.
+        guestIdentity = user;
         initializing = false;
-        await browserOnly(user);
+        try {
+          await browserOnly(user);
+        } catch (_) {
+          document.documentElement.classList.remove("sailing-units-pending");
+          status("Signed in as "+user+" · Guest (browser-only preferences)");
+        }
         return;
       }
+      guestIdentity = "";
       status("Signed in as "+user+" (Homepage)");
       const existing = await record();
       if (existing && (!valid(existing.data) || !Number.isSafeInteger(existing.revision) || existing.revision < 0))
@@ -313,7 +323,9 @@
       // A network fault is not an identity: preserve current browser settings,
       // but do not mutate the account or claim a valid login.
       signedIn = false;
-      status("Not signed in · account unavailable");
+      status(guestIdentity ? "Signed in as "+guestIdentity+" · Guest (browser-only preferences)" :
+        /HTTP (401|403)|Invalid session/.test(String(err.message)) ? "Session expired or revoked — Sign in again" :
+        "Not signed in · Homepage verification unavailable");
       if(/HTTP (401|403)|Invalid session/.test(String(err.message))) requireSignIn();
       document.documentElement.classList.remove("sailing-units-pending");
     }
