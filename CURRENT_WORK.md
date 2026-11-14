@@ -1,6 +1,6 @@
 # Current work — SailingGo
 
-**Active documentation review:** Issue #25, branch `docs/25-session-markdown-refresh` based on the merged `main` snapshot; documentation-only draft PR, awaiting owner approval. This branch does not change runtime behavior.
+**Active documentation review:** [Issue #25](https://github.com/richard-mauri/pittsburg-saildata/issues/25), branch `docs/25-session-markdown-refresh` targeting `main`, [draft PR #26](https://github.com/richard-mauri/pittsburg-saildata/pull/26). This branch changes only Markdown; exact-head CI and owner merge approval are pending.
 
 GitHub `main` at `bb23d2b` contains merged Issue #23 / PR #24: verified Homepage guest/named identity, browser-local guest preferences, per-user activity and a non-dismissible sign-in dialog. No issues or PRs remain open and no implementation branch is active. The owner verified Safari guest identity, revocation and absence of the white details-transition flash after the companion Homepage bridge fix. Development build v404; semantic appVersion 1.16.0.
 
