@@ -70,6 +70,45 @@ func TestSailingReporterHomepageWireProtocol(t *testing.T){
 
 func TestSailingReporterDoesNotMutateWeatherContracts(t *testing.T){
  if appVersion!="1.16.0"{t.Fatal("semantic app version changed")}
- if buildVersion!="v402"{t.Fatal("expected next development build lineage")}
+ if buildVersion!="v404"{t.Fatal("expected next development build lineage")}
  if os.Getenv("SAILING_ACTIVITY_URL")=="" && sailingActivityConfigured(){t.Fatal("unexpected reporter configuration")}
+}
+
+func TestSailingVerifiedPresenceAndGuestSession(t *testing.T) {
+ valid:=true
+ homepage:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
+  if r.URL.Path!="/api/session/profile" || r.Header.Get("Origin")!="https://weather.themauris.org" {t.Errorf("wrong profile validation request %s",r.URL.Path);http.Error(w,"invalid origin",403);return}
+  if !valid || r.Header.Get("Authorization")!="Bearer "+strings.Repeat("a",64) {http.Error(w,"revoked",401);return}
+  w.Header().Set("Content-Type","application/json")
+  _=json.NewEncoder(w).Encode(map[string]string{"user":"guest-example","activitySession":strings.Repeat("b",64),"activityUser":strings.Repeat("c",64)})
+ }))
+ defer homepage.Close()
+ a,err:=NewActivityReporter(homepage.URL+"/api/admin/activity/ingest",strings.Repeat("k",40))
+ if err!=nil{t.Fatal(err)}
+ for _,id:=range []string{strings.Repeat("d",32),strings.Repeat("e",32)} {
+  req:=httptest.NewRequest(http.MethodPost,"http://localhost:8087/api/activity/ping",strings.NewReader(`{"id":"`+id+`","visible":true}`))
+  req.Header.Set("Origin","http://localhost:8087");req.Header.Set("Content-Type","application/json")
+  req.Header.Set("Authorization","Bearer "+strings.Repeat("a",64))
+  rec:=httptest.NewRecorder();a.ping(rec,req)
+  if rec.Code!=204{t.Fatalf("authenticated ping %d",rec.Code)}
+ }
+ p:=a.snapshot()
+ if p.Active2!=1||p.Authenticated!=1||p.UniqueUsers!=1||p.Anonymous!=0||len(p.Users)!=1||p.Users[0].Sessions!=1{t.Fatalf("duplicate session attribution %+v",p)}
+ valid=false
+ req:=httptest.NewRequest(http.MethodPost,"http://localhost:8087/api/activity/ping",strings.NewReader(`{"id":"`+strings.Repeat("d",32)+`","visible":true}`))
+ req.Header.Set("Origin","http://localhost:8087");req.Header.Set("Content-Type","application/json")
+ req.Header.Set("Authorization","Bearer "+strings.Repeat("a",64))
+ rec:=httptest.NewRecorder();a.ping(rec,req)
+ if rec.Code!=401{t.Fatalf("revoked guest status %d",rec.Code)}
+ for _,part:=range []string{"/api/activity/identity","sailing-session-invalid","initialIdentityChecked"} {
+  if !strings.Contains(sailingActivityJS,part){t.Errorf("missing activity identity contract %q",part)}
+ }
+ account,err:=sailingUIFiles.ReadFile("web/static/account.js")
+ if err!=nil{t.Fatal(err)}
+ for _,part:=range []string{"info.role === \"guest\"","Guest (browser-only preferences)","event.preventDefault()","Go to Homepage"} {
+  if !strings.Contains(string(account),part){t.Errorf("missing guest/session UI contract %q",part)}
+ }
+ for _,part:=range []string{"guestIdentity = user","await browserOnly(user)","Local preference restoration", "Signed in as \"+user+\" · Guest (browser-only preferences)"} {
+  if !strings.Contains(string(account),part){t.Errorf("verified guest must survive local preference failure: %q",part)}
+ }
 }

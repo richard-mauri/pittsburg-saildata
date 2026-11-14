@@ -16,7 +16,7 @@
   const fragment = new URLSearchParams(location.hash.substring(1));
   const handedOff = fragment.has("suite_token") || fragment.has("suite_mode");
   const explicitlyLocal = fragment.get("suite_mode") === "local";
-  let bearer = "", user = "", revision = null, baseline = null;
+  let bearer = "", user = "", guestIdentity = "", revision = null, baseline = null;
   let signedIn = false, initializing = true, applying = false;
   let saving = false, dirty = false, pendingSave = null, blocked = false;
   let priorNavigation = null, restoredNavigation = false;
@@ -43,6 +43,23 @@
   }
   const label = makeLabel();
   function status(value) { if (label) label.textContent = value; }
+  const signInDialog = document.createElement("dialog");
+  signInDialog.className = "sailing-suite-signin";
+  signInDialog.setAttribute("aria-labelledby","sailing-suite-signin-title");
+  const signInTitle = document.createElement("h2");
+  signInTitle.id = "sailing-suite-signin-title";
+  signInTitle.textContent = "Suite sign-in required";
+  const signInInfo = document.createElement("p");
+  signInInfo.textContent = "Go to Homepage to sign in with your personal token or obtain a temporary authenticated guest session valid for one hour. Guest preferences remain browser-only.";
+  const signInLink = document.createElement("a");
+  signInLink.href = home; signInLink.target = "_blank";signInLink.rel = "noopener noreferrer";
+  signInLink.textContent = "Go to Homepage";
+  signInDialog.addEventListener("cancel",function(event){event.preventDefault();});
+  signInDialog.append(signInTitle,signInInfo,signInLink);
+  document.body.append(signInDialog);
+  function requireSignIn(){if(onPublicHost && !signInDialog.open)signInDialog.showModal();}
+  function clearSignIn(){if(signInDialog.open)signInDialog.close();}
+  window.addEventListener("sailing-session-invalid",function(){signedIn=false;bearer="";clearSession(handoffKey);status("Session expired or revoked — Sign in again");requireSignIn();});
   function settingsFromPage(fallback) {
     const source = new URL(location.href).searchParams;
     const urlParams = {};
@@ -154,9 +171,10 @@
   function saveLocal(data) {
     if (valid(data)) putJSON(localKey,data,true);
   }
-  async function browserOnly() {
+  async function browserOnly(guestName) {
     signedIn = false;
-    status("Not signed in");
+    const localIdentity = guestName || guestIdentity;
+    status(localIdentity ? "Signed in as "+localIdentity+" · Guest (browser-only preferences)" : "Not signed in");
     const old = getJSON(localKey,true);
     let data = valid(old) ? old : settingsFromPage(null);
     if (priorNavigation && priorNavigation.user === "local" && priorNavigation.url !== pageURL) {
@@ -190,6 +208,7 @@
     if (response.status === 401 || response.status === 403) {
       bearer = ""; clearSession(handoffKey); signedIn = false;
       status("Not signed in");
+      requireSignIn();
     }
     return response;
   }
@@ -252,6 +271,21 @@
       if (typeof info.user !== "string" || !info.user || !(Date.parse(info.expiresAt)>Date.now()))
         throw Error("Invalid session");
       user = info.user;
+      clearSignIn();
+      if(info.role === "guest") {
+        // Identity is already verified. Local preference restoration is
+        // independent and must never erase or downgrade that identity.
+        guestIdentity = user;
+        initializing = false;
+        try {
+          await browserOnly(user);
+        } catch (_) {
+          document.documentElement.classList.remove("sailing-units-pending");
+          status("Signed in as "+user+" · Guest (browser-only preferences)");
+        }
+        return;
+      }
+      guestIdentity = "";
       status("Signed in as "+user+" (Homepage)");
       const existing = await record();
       if (existing && (!valid(existing.data) || !Number.isSafeInteger(existing.revision) || existing.revision < 0))
@@ -289,7 +323,10 @@
       // A network fault is not an identity: preserve current browser settings,
       // but do not mutate the account or claim a valid login.
       signedIn = false;
-      status("Not signed in · account unavailable");
+      status(guestIdentity ? "Signed in as "+guestIdentity+" · Guest (browser-only preferences)" :
+        /HTTP (401|403)|Invalid session/.test(String(err.message)) ? "Session expired or revoked — Sign in again" :
+        "Not signed in · Homepage verification unavailable");
+      if(/HTTP (401|403)|Invalid session/.test(String(err.message))) requireSignIn();
       document.documentElement.classList.remove("sailing-units-pending");
     }
   }
@@ -323,7 +360,7 @@
     return;
   }
   if (!onPublicHost || !bearer || explicitlyLocal) {
-    initializing=false;void browserOnly();
+    initializing=false;void browserOnly().then(function(){if(explicitlyLocal)requireSignIn();});
   } else {
     void hydrate();
   }

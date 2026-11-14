@@ -1,25 +1,28 @@
 # Current work — SailingGo
 
-## Issue #21 — optional Homepage activity telemetry (November 12, 2026)
+## Issue #23 — Homepage guest/session identity and activity
 
-- **Authoritative base:** GitHub `main` (before this branch: v1.16.0, build v401), existing Homepage direct-visit recovery integration already on main. **New draft:** [Issue #21](https://github.com/richard-mauri/pittsburg-saildata/issues/21), branch `feat/21-suite-activity`, [PR #22](https://github.com/richard-mauri/pittsburg-saildata/pull/22).
-- **Scope:** optional browser-tab presence and server work instrumentation, including bounded background swell prefetch. Separate service-only `HOMEPAGE_ACTIVITY_KEY_SAILING` and `SAILING_ACTIVITY_URL`, with service name `sailing` and 60-second aggregate reports to Homepage draft collector PR #30. Browser IDs remain local to SailingGo; personal coordinates, station IDs, tokens and query data are excluded. Signed-in classification is unverified and included in anonymous counts.
-- **Preserved:** NOAA observed wind, predicted tidal currents, station/units/overlays, all HTML/text/JSON routes, Homepage identity and per-user persistence. Production listener unchanged. Development `buildVersion` increments v401→v402; semantic `appVersion` remains 1.16.0. No deployment/restart/release/merge.
-- **Validation:** Go unit tests for reporter opt-in, same-origin validation, protocol, presence windows and template wiring. GitHub Actions Go CI #144 passed tests and build at code checkpoint `db11e9e` after replacing a Go 1.18-only alias to respect the root Go 1.16 language version; this documentation head needs recheck. Mac/Safari and live NOAA/tunnel behavior not yet tested.
-- **Next:** verify CI, then run a detached isolated Mac test binary on loopback 8087 alongside the existing disposable Homepage test server on 8788 with a fresh matching private key. Confirm the SailingGo row changes from unknown to reporting in the admin dashboard, without stopping production. Owner approval required before any merge or restart.
+- **Owner Safari defect (Nov 13):** After signing in as a Homepage guest and visiting Sailing-Go, the hero displayed `Not signed in · account unavailable` with no sign-in modal. This is the generic `hydrate()` catch status; it does not by itself prove whether Homepage profile verification failed or browser-local preference restoration threw. Follow-up now keeps verified guest identity independent of local preference application, uses a more specific unavailable-verification label, and expands regression assertions. Must retest live guest handoff before merging.
 
-## Full owner Mac acceptance procedure (runtime restart separately authorized)
+- **Baseline:** GitHub `main` includes optional Homepage activity and persistent direct-visit Homepage recovery (baseline `2e38845`, build v402). Branch `feat/23-session-aware-activity` starts from clean GitHub main. Issue https://github.com/richard-mauri/pittsburg-saildata/issues/23; draft PR https://github.com/richard-mauri/pittsburg-saildata/pull/24.
+- **Server change:** When optional activity reporting is configured, validate each supplied Homepage child bearer against `/api/session/profile` using the trusted SailingGo origin. Count verified parent sessions and distinct users using Homepage's origin-scoped pseudonymous aliases. Duplicate tabs share one signed-in session; names are summarized privately to the existing Homepage collector, but bearer values and aliases never leave SailingGo in telemetry. Revoked/invalid supplied bearer yields 401; temporary Homepage verification failure yields 503; anonymous pings remain distinct.
+- **Browser and preferences:** The existing account client recognizes verified one-hour guests without attempting `/api/storage/sailing`; guest changes stay browser-only. A non-dismissible sign-in dialog offers an explicit Go to Homepage link when a public site's handoff is absent/expired/revoked. No automatic redirection on revocation. The existing fixed Homepage `/launch/sailing` recovery handles first direct visits, and existing named-user revisioned storage is unchanged.
+- **Preserved:** NOAA observations, predictions, station selection, map location/viewport, history, wind and distance units, overlays, Planning, HTML/text/JSON routes, listener and Cloudflare tunnel. Development build v404; semantic appVersion remains 1.16.0.
+- **Validation:** JavaScript parse and whitespace/source checks passed locally. GitHub Go CI #148 passed both root package tests and build at code commit `3bcc97c22385d63e69637b94263f0c24837649a5`; this documentation status update needs its own exact-head check if committed. Mac Safari/live weather/tunnel acceptance not performed by agent. No merge, restart, tag, release, credential edit or deployment authorized.
+
+## Owner Mac acceptance (no automatic restart)
 
 ```sh
 cd ~/projects/sailing-go
 git status --short --branch
 git fetch origin
-git checkout feat/21-suite-activity
-git pull --ff-only origin feat/21-suite-activity
-gofmt -l main.go wind.go currents.go activity.go activity_test.go ui_templates.go
+git checkout feat/23-session-aware-activity
+git pull --ff-only origin feat/23-session-aware-activity
+gofmt -l main.go wind.go currents.go activity.go activity_test.go
 go test -count=1 ./...
-go build .
+go build -o /tmp/sailing-session-check .
 git diff --check
+/tmp/sailing-session-check -version
 ```
 
-Do not launch the owner’s production process or change Cloudflare tunnel settings without explicit permission. This procedure could disturb local unpushed work, so inspect status/diffs and use a separate worktree for the isolated UI smoke test.
+Review status and local unpushed changes before checkout; use a separate worktree if needed. Do not run the owner's normal launcher or compete for port 8080 without separate authorization. Safari acceptance: named and one-hour guest handoffs, browser-only guest preferences, revoked-session modal, Homepage per-user activity, duplicate-tab session count, Conditions Now/Planning/History, units, NOAA wind/current interpretation, map pan versus location selection, overlays and JSON/text routes.
