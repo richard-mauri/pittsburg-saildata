@@ -1,0 +1,30 @@
+name: Suite Policy
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  policy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify local generated policy and Homepage main freshness
+        run: python3 scripts/suite_policy.py
+      - name: Check visible handoff evidence on policy PRs
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          python3 - <<'PY'
+          import os
+          body = os.environ.get("PR_BODY") or ""
+          expected = ["Baseline and scope", "Data safety", "Documentation current",
+                      "Verification", "Local handoff", "Promotion authority"]
+          missing = [heading for heading in expected if heading.lower() not in body.lower()]
+          if missing:
+              raise SystemExit("Missing PR handoff sections: " + ", ".join(missing))
+          print("Six-section handoff evidence present (not independently attested).")
+          PY
