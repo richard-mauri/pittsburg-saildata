@@ -1,20 +1,10 @@
-# Mauri's Weather & Water Conditions — development and validation
+# SailingGo — app-specific development and validation
 
-This is the **authoritative reusable GitHub workflow**, modeled on ScraperGo. Start with [AGENTS.md](AGENTS.md), check [CURRENT_WORK.md](CURRENT_WORK.md), and respect [ARCHITECTURE.md](ARCHITECTURE.md). Normal development takes place in GitHub Issues, short-lived branches and draft PRs; it is **not** a sequence of downloadable replacement-file archives.
-
-## Baseline, Issues, branches and PRs
-
-GitHub `main` is the authoritative merged baseline. Before modifying *local* code, reconcile it with the owner's potentially newer/unpushed `~/projects/sailing-go` tree: inspect status, branches, changes and ahead/behind rather than overwriting it. Check open GitHub PRs and branches at the start of each session.
-
-For a defect, reproduce it and open an Issue with observed versus expected behavior, build, steps, evidence and regression risk. For scoped features or documentation changes, track the agreed change in an Issue as appropriate. Create a dedicated branch from current `main` for that task, e.g. `docs/issue-1-five-file-workflow` or `feature/scrapergo-ui-theme`; avoid reusing stale shared `dev` branches. Open a **draft PR targeting main** with Issue reference, rationale, file/scope inventory, regression risks, test results and owner-side acceptance still required. Unrelated findings belong in new Issues and independent PRs.
-
-Check the PR's **latest exact head commit** before claiming CI passed. No automatic merges. Owner authorization is required before merge, semantic version change, tag, release, deployment or restart.
-
-After an authorized and verified merge, delete a short-lived branch only after confirming its work is merged, it is not used by an open PR, and it has no unmerged unique work. Never bulk-delete historical branches or force-push casually.
+Read [AGENTS.md](AGENTS.md) and [Homepage's authoritative suite development policy](https://github.com/richard-mauri/homepage/blob/main/SUITE_DEVELOPMENT_POLICY.md). Shared Issues, branch/PR rules, six-part handoff, FINISH and cleanup are exclusively Homepage policy. These sections retain SailingGo's unique CI, local divergence, build and Mac/Safari requirements.
 
 ## GitHub Actions and limitations
 
-ScraperGo uses `.github/workflows/go-ci.yml` for non-blocking gofmt reporting, `go test -count=1 ./...` and `go build ./...` on PRs targeting `main`, with manual invocation. **As of this documentation PR, the sailing repository has no corresponding workflow.** Add a sailing-specific GitHub Actions workflow in a **separate scoped PR**. Sailing's root `go.mod` currently declares Go 1.13, whereas ScraperGo declares Go 1.23.2. Select a supported CI Go version deliberately and test compatibility rather than copying blindly. If changing the nested `ui/` module, explicitly validate it too.
+ScraperGo uses `.github/workflows/go-ci.yml` for non-blocking gofmt reporting, `go test -count=1 ./...` and `go build ./...` on PRs targeting `main`, with manual invocation. **SailingGo has its own Go CI workflow**, which must be verified on the exact PR head. The shared Homepage policy does not replace these Go checks. Sailing's root `go.mod` currently declares Go 1.13, whereas ScraperGo declares Go 1.23.2. Select a supported CI Go version deliberately and test compatibility rather than copying blindly. If changing the nested `ui/` module, explicitly validate it too.
 
 A CI pass covers only performed jobs; it cannot verify local server startup, Safari, NOAA's current responses or Cloudflare Tunnel. Documentation-only changes require Markdown/content/link/path review and applicable CI, **not** a Mac build/restart.
 
@@ -25,6 +15,7 @@ After checking for uncommitted local changes, substitute the **actual PR branch 
 ```sh
 cd ~/projects/sailing-go
 git status --short --branch
+# Stop if uncommitted changes are shown.
 git fetch origin
 git checkout ACTUAL-PR-BRANCH
 git pull --ff-only origin ACTUAL-PR-BRANCH
