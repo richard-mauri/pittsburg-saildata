@@ -1,10 +1,10 @@
 # SailingGo — app-specific development and validation
 
-Read [AGENTS.md](AGENTS.md) and the complete [generated suite policy](docs/suite-development-policy.md). Shared Issues, branch/PR rules, six-part handoff, FINISH and cleanup are exclusively Homepage policy. These sections retain SailingGo's unique CI, local divergence, build and Mac/Safari requirements.
+Read [AGENTS.md](AGENTS.md) and [Homepage's authoritative suite development policy](https://github.com/richard-mauri/homepage/blob/main/SUITE_DEVELOPMENT_POLICY.md). Shared Issues, branch/PR rules, six-part handoff, FINISH and cleanup are exclusively Homepage policy. These sections retain SailingGo's unique CI, local divergence, build and Mac/Safari requirements.
 
 ## GitHub Actions and limitations
 
-ScraperGo uses `.github/workflows/go-ci.yml` for non-blocking gofmt reporting, `go test -count=1 ./...` and `go build ./...` on PRs targeting `main`, with manual invocation. **The repository now has a documentation policy validation workflow; it is **not** a Go CI workflow.** A sailing-specific Go Actions workflow remains a separate scoped runtime/CI decision. Sailing's root `go.mod` currently declares Go 1.13, whereas ScraperGo declares Go 1.23.2. Select a supported CI Go version deliberately and test compatibility rather than copying blindly. If changing the nested `ui/` module, explicitly validate it too.
+ScraperGo uses `.github/workflows/go-ci.yml` for non-blocking gofmt reporting, `go test -count=1 ./...` and `go build ./...` on PRs targeting `main`, with manual invocation. **SailingGo has its own Go CI workflow**, which must be verified on the exact PR head. The shared Homepage policy does not replace these Go checks. Sailing's root `go.mod` currently declares Go 1.13, whereas ScraperGo declares Go 1.23.2. Select a supported CI Go version deliberately and test compatibility rather than copying blindly. If changing the nested `ui/` module, explicitly validate it too.
 
 A CI pass covers only performed jobs; it cannot verify local server startup, Safari, NOAA's current responses or Cloudflare Tunnel. Documentation-only changes require Markdown/content/link/path review and applicable CI, **not** a Mac build/restart.
 
