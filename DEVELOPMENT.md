@@ -4,7 +4,7 @@ Read [AGENTS.md](AGENTS.md) and [Homepage's authoritative suite development poli
 
 ## GitHub Actions and limitations
 
-ScraperGo uses `.github/workflows/go-ci.yml` for non-blocking gofmt reporting, `go test -count=1 ./...` and `go build ./...` on PRs targeting `main`, with manual invocation. **SailingGo has its own Go CI workflow**, which must be verified on the exact PR head. The shared Homepage policy does not replace these Go checks. Sailing's root `go.mod` currently declares Go 1.13, whereas ScraperGo declares Go 1.23.2. Select a supported CI Go version deliberately and test compatibility rather than copying blindly. If changing the nested `ui/` module, explicitly validate it too.
+SailingGo has its own `.github/workflows/go-ci.yml`: non-blocking formatting report, root Go tests and a root build on PRs targeting `main`. Verify its actual outcome on the exact PR head. The root `go.mod` now declares Go 1.22 because Homepage's pinned shared UI module requires it; CI uses Go 1.23. The nested `ui/` module remains independent and requires separate testing when edited. The shared Homepage policy does not replace app-specific CI.
 
 A CI pass covers only performed jobs; it cannot verify local server startup, Safari, NOAA's current responses or Cloudflare Tunnel. Documentation-only changes require Markdown/content/link/path review and applicable CI, **not** a Mac build/restart.
 
@@ -19,13 +19,11 @@ git status --short --branch
 git fetch origin
 git checkout ACTUAL-PR-BRANCH
 git pull --ff-only origin ACTUAL-PR-BRANCH
-gofmt -l main.go wind.go currents.go
-go test -count=1 ./...
-go build .
-git diff --check
+./devbuild.sh
+./sailing-go -version
 ```
 
-Review **all** changed Go files for formatting, not only the three listed. Run relevant checks from `ui/` if that module changed. Do not start a competing listener or alter the local Cloudflare launcher. A manual `go run . -server -port 8080` is only appropriate if the existing instance has been stopped and current flags support it.
+`./devbuild.sh` is the **single** owner build/test command: it tests the root application package and builds the root binary. Do not separately request `go test` or `go build` from the owner. Review changed Go files for formatting; the CI formatting report is informational. Run relevant checks from `ui/` if that module changed. Do not start a competing listener or alter the local Cloudflare launcher. The production launcher `./sailgo.sh` may be run **only with separate owner authorization**, since it restarts the app and tunnel.
 
 ## Safari and operational acceptance
 

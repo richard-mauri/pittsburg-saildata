@@ -4,6 +4,8 @@ import (
 	"embed"
 	"html/template"
 	"strings"
+
+	suiteui "github.com/richard-mauri/homepage/shared/ui"
 )
 
 // Browser page templates are embedded at build time so local and deployed
@@ -23,7 +25,7 @@ func readSailingUITemplate(path string) string {
 	}
 	// Each page retains its own structural styles; the shared theme is the
 	// final stylesheet and is embedded directly into the rendered HTML.
-	page := strings.Replace(string(data), "</style>", "</style><style>"+string(theme)+"</style>", 1)
+	page := strings.Replace(string(data), "</style>", "</style><style>"+string(theme)+"\n"+string(suiteui.ButtonCSS)+"</style>", 1)
 	// Account behavior is opt-in and applies only to the two report views.
 	if path == "web/templates/sailing.html" {
 		account, err := sailingUIFiles.ReadFile("web/static/account.js")
