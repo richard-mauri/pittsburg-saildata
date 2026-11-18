@@ -8,6 +8,12 @@ The root Go service includes `main.go` (routing/report preparation), `ui_templat
 
 The public site at https://weather.themauris.org currently uses a locally running Go server exposed through the owner's Cloudflare Tunnel. Do not change listener/process ownership, launchers, private credentials, or tunnel behavior as an incidental code or theme change.
 
+## Homepage canonical button component
+
+The root application pins `github.com/richard-mauri/homepage/shared/ui`, whose embedded `buttons.css` is included **after** SailingGo's own `web/static/theme.css` in each of the four rendered page templates. The existing server-side template assembly embeds the bytes into the response, with no runtime call to Homepage or changes to CSP. `--text` aliases SailingGo's `--ink`; its existing `--soft`, `--line`, and `--accent` provide the other canonical tokens.
+
+Standard text actions in Conditions Now—Clear location & stations, Clear all overlays, information-popup launchers and Tidal & Lunar Context—use `button.ui-button` and must not reintroduce local appearance/hover/disabled/focus rules. Structural width/alignment styles are allowed. Compact map navigation menus, playback transports, icon-only close actions, station-camera controls and chart interactions are deliberately specialized for their distinct size and context; this is a first-phase adoption, not a blanket restyling. Later phases should review those components deliberately against Homepage's canonical design system.
+
 ## Environmental data semantics
 
 **Observed wind** comes from NOAA/NDBC and selected validated NOAA CO-OPS mappings. Show timestamps, source and freshness; station height/exposure matters. Existing documented fallback mappings include PSBC1 (9415115), MZXC1 (9415102), PPXC1 (9414847); do not double-count overlapping samples from different feeds. Automatic nearest-usable wind selection has a documented 30-minute freshness rule; check source before editing.

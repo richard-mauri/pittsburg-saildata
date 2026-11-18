@@ -2,3 +2,5 @@ github.com/batchatco/go-thrower v0.0.0-20200827035905-5cb7337f6be6 h1:gDf4IUqKDn
 github.com/batchatco/go-thrower v0.0.0-20200827035905-5cb7337f6be6/go.mod h1:hJ9Ll7FOzcIr57sd7RHga7StcCVAL0vFBUsNpnGntNg=
 github.com/harel/go-native-netcdf v0.1.0 h1:w4u1Jt8r2vZE5XaYlBhGpubPy4aOd1DYZpfzo0NiETA=
 github.com/harel/go-native-netcdf v0.1.0/go.mod h1:2j26rMzd5YQUgk9Iiz0OZE5rJHd6+aJMbpG82UShpJo=
+github.com/richard-mauri/homepage/shared/ui v0.0.0-20261118145337-1ce69470b53c h1:h/1g0Ww7QU1N0X6WqcGHxBWgxz6HLYZAvwTvbi4YUZU=
+github.com/richard-mauri/homepage/shared/ui v0.0.0-20261118145337-1ce69470b53c/go.mod h1:8o5LPN0ziOWOzyyuMYbJ+CaO6hED6uIkmwfwdITSX3o=

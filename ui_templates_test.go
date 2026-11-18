@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	suiteui "github.com/richard-mauri/homepage/shared/ui"
 )
 
 func TestEmbeddedPageTemplates(t *testing.T) {
@@ -18,6 +20,9 @@ func TestEmbeddedPageTemplates(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			markup := readSailingUITemplate(tc.file)
+			if !strings.Contains(markup, string(suiteui.ButtonCSS)) {
+				t.Fatalf("%s does not embed the pinned Homepage canonical button stylesheet", tc.file)
+			}
 			if !strings.Contains(markup, "--panel:") || !strings.Contains(markup, "--accent:") {
 				t.Fatalf("%s missing shared theme", tc.file)
 			}
@@ -25,5 +30,42 @@ func TestEmbeddedPageTemplates(t *testing.T) {
 				t.Fatalf("%s does not contain an HTML page", tc.file)
 			}
 		})
+	}
+}
+
+func TestSailingStandardButtonsUseHomepageCSS(t *testing.T) {
+	data, err := sailingUIFiles.ReadFile("web/templates/sailing.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(data)
+	for _, expected := range []string{
+		`class="map-reset ui-button"`,
+		`class="map-overlay-clear ui-button"`,
+		`class="info-popup-open ui-button"`,
+		`class="tide-context-open ui-button"`,
+	} {
+		if !strings.Contains(source, expected) {
+			t.Errorf("missing canonical style on ordinary control: %s", expected)
+		}
+	}
+	for _, special := range []string{
+		`class="map-center-action"`,
+		`class="map-swell-cache-reload"`,
+		`class="info-popup-close"`,
+	} {
+		if !strings.Contains(source, special) {
+			t.Errorf("specialized map control changed: %s", special)
+		}
+	}
+	for _, obsolete := range []string{
+		".info-popup-open:hover{background:",
+		".tide-context-open:hover{background:",
+		".map-overlay-clear:hover{background:",
+		".map-reset:disabled{opacity:",
+	} {
+		if strings.Contains(source, obsolete) {
+			t.Errorf("obsolete local ordinary-button appearance retained: %s", obsolete)
+		}
 	}
 }
