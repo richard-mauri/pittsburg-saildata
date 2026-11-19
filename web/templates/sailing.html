@@ -2029,8 +2029,10 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 
   function updateAirTemperatureArrowStates() {
     var active=!!mapState.airTemperatureOverlayVisible;
+    var now=document.getElementById("map-air-temperature-now");
     var prev=document.getElementById("map-air-temperature-prev");
     var next=document.getElementById("map-air-temperature-next");
+    if (now) now.disabled=!active || airTemperatureRequestedHours<=0;
     if (prev) prev.disabled=!active || airTemperatureRequestedHours<=0;
     if (next) next.disabled=!active || airTemperatureRequestedHours>=airTemperatureForecastMaxHours;
   }
@@ -2384,7 +2386,12 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     var key=airTemperatureForecastGridKey(spec,hours);
     if (!force && airTemperatureForecastGridCache[key]) return Promise.resolve(airTemperatureForecastGridCache[key]);
     return fetch(airTemperatureForecastGridURL(spec,hours),{headers:{"Accept":"application/json"},cache:"no-store"})
-      .then(function(response){if(!response.ok) throw new Error("HTTP "+response.status);return response.json();})
+      .then(function(response){
+        if (!response.ok) return response.text().then(function(message){
+          throw new Error("HTTP "+response.status+": "+String(message||"forecast service unavailable").trim().slice(0,160));
+        });
+        return response.json();
+      })
       .then(function(payload){
         var grid=decodeAirTemperatureForecastGrid(payload);
         airTemperatureForecastGridCache[key]=grid;
@@ -2504,12 +2511,26 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     if (!el) return;
     var hours = Number.isFinite(Number(previewHours)) ? Number(previewHours) : Number(airTemperatureForecastDisplayHours||mapState.airTemperatureForecastHours||0);
     el.hidden = !mapState.airTemperatureOverlayVisible;
+    el.classList.remove("is-error");
+    el.removeAttribute("title");
     if (hours<=0.001) {
       el.textContent = "Air Temperature · NOW · Observed";
     } else {
       el.textContent = "Air Temperature · "+formatAirTemperatureOffset(hours)+" · Forecast";
     }
     updateAirTemperatureLegendContext(hours);
+  }
+
+  function showAirTemperatureForecastFailure(requested, reason) {
+    var message=String(reason&&reason.message?reason.message:reason||"unknown error");
+    var badge=document.getElementById("map-air-temperature-time");
+    if (badge) {
+      badge.textContent="Air Temperature · +"+requested+"h unavailable · "+message+" · Showing "+formatAirTemperatureOffset(airTemperatureForecastDisplayHours);
+      badge.classList.add("is-error");
+      badge.title=badge.textContent;
+    }
+    setAirTemperatureStatus("Air Temperature · +"+requested+"h forecast unavailable: "+message,true);
+    updateAirTemperatureArrowStates();
   }
 
   function showAirTemperatureForecastAtManual(hours) {
@@ -2519,12 +2540,14 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     ++airTemperatureRequestSerial;
     if (!visibleBounds) {
       showAirTemperatureLegend(false);
-      setAirTemperatureStatus("Air Temperature · Forecast available over CONUS at Zoom 4+.",true);
-      updateAirTemperatureForecastTimeLabel(airTemperatureForecastDisplayHours);
+      showAirTemperatureForecastFailure(requested,"Forecast available over CONUS at Zoom 4+");
       return;
     }
     var spec=airTemperatureForecastGridSpec(visibleBounds);
-    if (!spec) return;
+    if (!spec) {
+      showAirTemperatureForecastFailure(requested,"Invalid map bounds");
+      return;
+    }
     setAirTemperatureStatus("Air Temperature · Loading NOAA/NWS NDFD +"+requested+"h forecast…",false);
     // Keep the last rendered map visible while fetching the requested frame.
     var timeStatus=document.getElementById("map-air-temperature-time");
@@ -2542,17 +2565,11 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
         showAirTemperatureLegend(true);
         setAirTemperatureStatus("Air Temperature · Forecast · NOAA/NWS NDFD +"+requested+"h.",false);
       })) {
-        airTemperatureRequestedHours=airTemperatureForecastDisplayHours;
-        updateAirTemperatureArrowStates();
-        setAirTemperatureStatus("Air Temperature forecast frame could not be displayed.",true);
-        updateAirTemperatureForecastTimeLabel(airTemperatureForecastDisplayHours);
+        showAirTemperatureForecastFailure(requested,"Forecast frame could not be rendered");
       }
     }).catch(function(err) {
       if (!mapState.airTemperatureOverlayVisible || targetSerial!==airTemperatureManualTargetSerial) return;
-      airTemperatureRequestedHours=airTemperatureForecastDisplayHours;
-      updateAirTemperatureArrowStates();
-      setAirTemperatureStatus("Air Temperature forecast unavailable: "+String(err&&err.message?err.message:err||"unknown error"),true);
-      updateAirTemperatureForecastTimeLabel(airTemperatureForecastDisplayHours);
+      showAirTemperatureForecastFailure(requested,err);
     });
   }
 

@@ -58,6 +58,9 @@ input,select,textarea {
 .map-air-temperature-footer-status {
   margin-left:10px;white-space:nowrap;
 }
+.map-air-temperature-footer-status.is-error {
+  color:#e6786d;white-space:normal;line-height:1.35;
+}
 .map-air-temperature-transport button,.map-air-temperature-transport select,
 .map-swell-transport button,.map-swell-transport select {
   background:var(--soft);color:var(--text);border-color:var(--line);
