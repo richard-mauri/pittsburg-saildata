@@ -106,3 +106,22 @@ func TestMapResizeHandleUsesSharedTheme(t *testing.T) {
 		}
 	}
 }
+
+func TestMapOverlayHelpIsConcise(t *testing.T) {
+	data, err := sailingUIFiles.ReadFile("web/templates/sailing.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(data)
+	for _, obsolete := range []string{
+		`class="map-air-temperature-overlay-note"`,
+		`<summary>Map overlay details</summary>`,
+	} {
+		if strings.Contains(source, obsolete) {
+			t.Errorf("obsolete map overlay explanatory text retained: %s", obsolete)
+		}
+	}
+	if !strings.Contains(source, `id="map-sources-modal"`) {
+		t.Fatal("map and data source information dialog must remain available")
+	}
+}
