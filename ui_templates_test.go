@@ -139,6 +139,9 @@ func TestAirTemperatureManualThreeHourFrames(t *testing.T) {
 		"commitAirTemperatureHours(airTemperatureRequestedHours - 3)",
 		"commitAirTemperatureHours(airTemperatureRequestedHours + 3)",
 		"airTemperatureForecastMaxHours = 24",
+		"if (prev) prev.disabled=!active || airTemperatureRequestedHours<=0;",
+		"if (next) next.disabled=!active || airTemperatureRequestedHours>=airTemperatureForecastMaxHours;",
+		"updateAirTemperatureArrowStates();",
 		"fetchAirTemperatureForecastGrid(spec,requested,false)",
 		"airTemperatureRequestedHours=next;",
 		"Air Temperature · Loading +",
@@ -169,5 +172,14 @@ func TestAirTemperatureManualThreeHourFrames(t *testing.T) {
 		if strings.Contains(source, obsolete) {
 			t.Errorf("obsolete temperature playback logic retained: %s", obsolete)
 		}
+	}
+	// The time/status label belongs within the same flex row as the arrows.
+	rowStart := strings.Index(source, `<div class="map-air-temperature-transport-row">`)
+	if rowStart < 0 {
+		t.Fatal("air temperature transport row missing")
+	}
+	rowEnd := strings.Index(source[rowStart:], `</div>`)
+	if rowEnd < 0 || !strings.Contains(source[rowStart:rowStart+rowEnd], `id="map-air-temperature-time"`) {
+		t.Error("air temperature time label must sit beside the arrow buttons")
 	}
 }

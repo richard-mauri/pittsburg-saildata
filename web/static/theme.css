@@ -48,9 +48,15 @@ input,select,textarea {
 .map-swell-transport.is-busy {
   background:var(--panel);color:var(--text);border-color:var(--line);
 }
-/* Temperature has only one button row and one status row. */
+/* A single compact row leaves space for the time label beside the buttons. */
 .map-air-temperature-transport {
-  height:auto;grid-template-rows:30px 20px;
+  height:auto;grid-template-rows:auto;
+}
+.map-air-temperature-transport-row {
+  overflow:visible;flex-wrap:wrap;row-gap:6px;
+}
+.map-air-temperature-footer-status {
+  margin-left:10px;white-space:nowrap;
 }
 .map-air-temperature-transport button,.map-air-temperature-transport select,
 .map-swell-transport button,.map-swell-transport select {
