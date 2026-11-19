@@ -156,6 +156,9 @@ func TestAirTemperatureManualThreeHourFrames(t *testing.T) {
 		"Showing \"+formatAirTemperatureOffset(airTemperatureForecastDisplayHours)",
 		"Air Temperature · Observed · current heat map restored.",
 		"Math.max(80,160-25*Math.max(0,zoom-4))",
+		"if (nearest.length < 2) return null;",
+		"if (map.getZoom()<=5) return {",
+		"width:320,height:180",
 		`if (!validCells) throw new Error("NDFD forecast grid has no usable temperature cells")`,
 	} {
 		if !strings.Contains(source, expected) {

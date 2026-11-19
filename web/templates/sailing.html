@@ -2115,7 +2115,9 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       nearest.splice(insertAt,0,{miles:miles,temp:oTemp});
       if (nearest.length > neighborCount) nearest.pop();
     }
-    if (!nearest.length) return null;
+    // A lone buoy or remote station must not paint a circular island of
+    // interpolated temperature over hundreds of miles of empty ocean.
+    if (nearest.length < 2) return null;
     if (nearest[0].miles <= 4) return {temp:nearest[0].temp, nearestMiles:nearest[0].miles};
     var weighted=0, total=0;
     for (var n=0; n<nearest.length; n++) {
@@ -2335,6 +2337,14 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 
   function airTemperatureForecastGridSpec(bounds) {
     if (!bounds) return null;
+    // Use a single, geographically anchored national raster at Zoom 4–5.
+    // Viewport-sized exports gave different NOAA footprints and intermittent
+    // rectangular gaps merely from changing zoom or panning.
+    if (map.getZoom()<=5) return {
+      bounds:L.latLngBounds([airTemperatureCONUS.south,airTemperatureCONUS.west],
+        [airTemperatureCONUS.north,airTemperatureCONUS.east]),
+      width:320,height:180
+    };
     var south = Math.max(airTemperatureCONUS.south, bounds.getSouth());
     var north = Math.min(airTemperatureCONUS.north, bounds.getNorth());
     var west = Math.max(airTemperatureCONUS.west, bounds.getWest());

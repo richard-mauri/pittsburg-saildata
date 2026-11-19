@@ -35,7 +35,7 @@ import (
 
 const (
 	appVersion                      = "1.16.0"
-	buildVersion                    = "v420"
+	buildVersion                    = "v421"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -4229,7 +4229,7 @@ func fetchNDFDTemperatureGrid(west, south, east, north float64, hours, width, he
 			go func(x0, x1, y0, y1 int, tileWest, tileSouth, tileEast, tileNorth float64) {
 				defer wg.Done()
 				limit <- struct{}{}
-				section, err := fetchNDFDTemperatureGridSection(tileWest, tileSouth, tileEast, tileNorth, hours, x1-x0, y1-y0)
+				section, err := fetchNDFDTemperatureGridSectionRetried(tileWest, tileSouth, tileEast, tileNorth, hours, x1-x0, y1-y0)
 				<-limit
 				mu.Lock()
 				defer mu.Unlock()
@@ -4255,6 +4255,31 @@ func fetchNDFDTemperatureGrid(west, south, east, north float64, hours, width, he
 		return nil, fmt.Errorf("NDFD grid has no available sections")
 	}
 	return raw, nil
+}
+
+// An individual NOAA ArcGIS export can transiently fail or return a blank
+// image even when the same extent succeeds moments later. Retry each section
+// independently so a single failure does not leave a rectangular map hole.
+func fetchNDFDTemperatureGridSectionRetried(west, south, east, north float64, hours, width, height int) ([]byte, error) {
+	var last []byte
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		section, err := fetchNDFDTemperatureGridSection(west, south, east, north, hours, width, height)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		last = section
+		for i := 0; i+1 < len(section); i += 2 {
+			if binary.LittleEndian.Uint16(section[i:i+2]) != uint16(0x8000) {
+				return section, nil
+			}
+		}
+	}
+	if last != nil {
+		return last, nil // Genuine no-data area remains transparent.
+	}
+	return nil, lastErr
 }
 
 func fetchNDFDTemperatureGridSection(west, south, east, north float64, hours, width, height int) ([]byte, error) {
