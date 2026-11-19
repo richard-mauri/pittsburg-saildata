@@ -65,6 +65,13 @@ input,select,textarea {
 .map-swell-transport button.is-playing { background:var(--soft);border-color:var(--accent); }
 .map-air-temperature-transport button:not(:disabled):hover,
 .map-swell-transport button:not(:disabled):hover { border-color:var(--accent); }
+/* The map's draggable resize strip sits below Leaflet, outside its tiles.
+   Match the surrounding card instead of leaving the light-only white bar. */
+.map-resize-handle { background:var(--panel);color:var(--muted);border-color:var(--line); }
+.map-resize-handle::before {
+  background:var(--muted);box-shadow:0 -6px 0 -1px var(--border);
+}
+.map-resize-handle[aria-grabbed="true"] { background:var(--soft); }
 .page-preferences .page-unit-control,.page-preferences .page-unit-control select {
   color:var(--ink);background:var(--panel);border-color:var(--border);
 }

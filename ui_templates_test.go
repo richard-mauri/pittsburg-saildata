@@ -89,3 +89,20 @@ func TestMapPlaybackTransportsUseSharedThemeTokens(t *testing.T) {
 		}
 	}
 }
+
+func TestMapResizeHandleUsesSharedTheme(t *testing.T) {
+	data, err := sailingUIFiles.ReadFile("web/static/theme.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css := string(data)
+	for _, expected := range []string{
+		".map-resize-handle { background:var(--panel);color:var(--muted);border-color:var(--line); }",
+		"background:var(--muted);box-shadow:0 -6px 0 -1px var(--border);",
+		`.map-resize-handle[aria-grabbed="true"] { background:var(--soft); }`,
+	} {
+		if !strings.Contains(css, expected) {
+			t.Errorf("map resize strip missing shared theme rule: %s", expected)
+		}
+	}
+}
