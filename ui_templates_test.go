@@ -125,3 +125,23 @@ func TestMapOverlayHelpIsConcise(t *testing.T) {
 		t.Fatal("map and data source information dialog must remain available")
 	}
 }
+
+func TestAirTemperatureSliderPreservesNativePointerDrag(t *testing.T) {
+	data, err := sailingUIFiles.ReadFile("web/templates/sailing.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(data)
+	for _, expected := range []string{
+		"updateAirTemperatureForecastTimeLabel(Number(airTemperatureMapHours.value) || 0, true)",
+		"if (!preserveSliderPosition) airTemperatureMapHours.value",
+		`if (!validCells) throw new Error("NDFD forecast grid has no usable temperature cells")`,
+	} {
+		if !strings.Contains(source, expected) {
+			t.Errorf("missing temperature slider/grid guard: %s", expected)
+		}
+	}
+	if strings.Contains(source, `airTemperatureMapHours.focus({preventScroll:true})`) {
+		t.Error("temperature slider still forces focus during native pointer drag")
+	}
+}

@@ -2451,12 +2451,15 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     var raw=window.atob(String(payload.data||""));
     if (raw.length !== width*height*2) throw new Error("invalid grid payload");
     var temps=new Float32Array(width*height);
+    var validCells=0;
     for (var i=0;i<temps.length;i++) {
       var lo=raw.charCodeAt(i*2), hi=raw.charCodeAt(i*2+1);
       var u=lo | (hi<<8);
       var v=u>=0x8000 ? u-0x10000 : u;
       temps[i]=v===-32768 ? NaN : v/10;
+      if (Number.isFinite(temps[i])) validCells++;
     }
+    if (!validCells) throw new Error("NDFD forecast grid has no usable temperature cells");
     return {
       west:Number(payload.west),south:Number(payload.south),east:Number(payload.east),north:Number(payload.north),
       width:width,height:height,hours:Number(payload.hours),temps:temps
@@ -2584,7 +2587,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     return "+"+wholeHours+"h"+(minutes ? " "+String(minutes).padStart(2,"0")+"m" : "");
   }
 
-  function updateAirTemperatureForecastTimeLabel(previewHours) {
+  function updateAirTemperatureForecastTimeLabel(previewHours, preserveSliderPosition) {
     var el = document.getElementById("map-air-temperature-time");
     if (!el) return;
     var hours = Number.isFinite(Number(previewHours)) ? Number(previewHours) : Number(airTemperatureForecastDisplayHours||mapState.airTemperatureForecastHours||0);
@@ -2597,8 +2600,8 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     } else {
       el.textContent = "Air Temperature · "+formatAirTemperatureOffset(hours)+" · Forecast";
     }
-    syncAirTemperatureSliders(hours);
-    updateAirTemperatureFooterScale(hours);
+    if (!preserveSliderPosition) syncAirTemperatureSliders(hours);
+    updateAirTemperatureFooterScale(hours, preserveSliderPosition);
     updateAirTemperatureLegendContext(hours);
   }
 
@@ -2653,7 +2656,10 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       airTemperatureForecastGridNext=upperGrid;
       airTemperatureForecastGridBlendAlpha=pair.alpha;
       airTemperatureForecastDisplayHours=hours;
-      displayAirTemperatureForecastGrid(lowerGrid,upperGrid,pair.alpha);
+      if (!displayAirTemperatureForecastGrid(lowerGrid,upperGrid,pair.alpha)) {
+        setAirTemperatureStatus("Air Temperature forecast frame could not be displayed.",true);
+        return;
+      }
       updateAirTemperatureForecastTimeLabel(hours);
       setAirTemperatureStatus("Air Temperature · Forecast · NOAA/NWS NDFD · "+formatAirTemperatureOffset(hours)+".",false);
     }).catch(function(){
@@ -2698,12 +2704,16 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
           if (slider) slider.value=String(hours);
           updateAirTemperatureForecastTimeLabel(hours);
         }
-        displayAirTemperatureForecastGrid(grid,null,0,function(){
+        if (!displayAirTemperatureForecastGrid(grid,null,0,function(){
           airTemperatureForecastDisplayHours=hours;
           if (slider) slider.value=String(hours);
           updateAirTemperatureForecastTimeLabel(hours);
           airTemperaturePlaybackFrameSettled(true);
-        });
+        })) {
+          setAirTemperatureStatus("Air Temperature forecast frame could not be displayed.",true);
+          airTemperaturePlaybackFrameSettled(false);
+          return;
+        }
         showAirTemperatureLegend(true);
         setAirTemperatureStatus("Air Temperature · Forecast · NOAA/NWS NDFD decoded temperature grid · +"+hours+"h · client-rendered.",false);
         var next=hours<24?hours+3:null;
@@ -2749,7 +2759,11 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
         airTemperatureForecastGridBlendAlpha=alpha;
         airTemperatureForecastDisplayHours=shown;
         if (now-lastDraw>=45 || p>=1) {
-          displayAirTemperatureForecastGrid(lowerGrid,upperGrid,alpha);
+          if (!displayAirTemperatureForecastGrid(lowerGrid,upperGrid,alpha)) {
+            setAirTemperatureStatus("Air Temperature forecast frame could not be displayed.",true);
+            stopAirTemperaturePlayback();
+            return;
+          }
           var slider=document.getElementById("map-air-temperature-hours");
           if (slider) slider.value=String(Math.round(shown*4)/4);
           updateAirTemperatureForecastTimeLabel(shown);
@@ -6541,11 +6555,11 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     if (airTemperatureMapHours) airTemperatureMapHours.value = String(value);
   }
 
-  function updateAirTemperatureFooterScale(hours) {
+  function updateAirTemperatureFooterScale(hours, preserveSliderPosition) {
     var range = Math.max(3, Math.min(24, Number(airTemperaturePlaybackRangeHours) || 24));
     if (airTemperatureMapHours) {
       airTemperatureMapHours.max = String(range);
-      airTemperatureMapHours.value = String(Math.max(0, Math.min(range, Number(hours) || 0)));
+      if (!preserveSliderPosition) airTemperatureMapHours.value = String(Math.max(0, Math.min(range, Number(hours) || 0)));
     }
     if (airTemperatureMapRangeEnd) airTemperatureMapRangeEnd.textContent = "+" + range + "h";
   }
@@ -6588,16 +6602,11 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   if (airTemperatureMapHours) {
     airTemperatureMapHours.value = String(mapState.airTemperatureForecastHours || 0);
     updateAirTemperatureFooterScale(mapState.airTemperatureForecastHours || 0);
-    ["pointerdown","mousedown","touchstart"].forEach(function(name){
-      airTemperatureMapHours.addEventListener(name,function(){
-        window.setTimeout(function(){
-          try { airTemperatureMapHours.focus({preventScroll:true}); } catch (_) { try { airTemperatureMapHours.focus(); } catch (_) {} }
-        },0);
-      },{passive:true});
-    });
     airTemperatureMapHours.addEventListener("input", function() {
       stopAirTemperaturePlayback();
-      updateAirTemperatureForecastTimeLabel(Number(airTemperatureMapHours.value) || 0);
+      // Safari owns the thumb position during the native pointer gesture.
+      // Do not programmatically refocus or rewrite its value until change.
+      updateAirTemperatureForecastTimeLabel(Number(airTemperatureMapHours.value) || 0, true);
     });
     airTemperatureMapHours.addEventListener("change", function() {
       commitAirTemperatureHours(Number(airTemperatureMapHours.value) || 0);
