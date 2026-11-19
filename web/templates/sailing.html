@@ -2533,25 +2533,29 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     updateAirTemperatureArrowStates();
   }
 
-  function showAirTemperatureForecastAtManual(hours) {
+  function showAirTemperatureForecastAtManual(hours, backgroundRefresh) {
     var visibleBounds=airTemperatureVisibleCONUSBounds();
     var requested=Math.max(3,Math.min(airTemperatureForecastMaxHours,Math.round(Number(hours)/3)*3));
+    var keepDisplayedFrame=!!backgroundRefresh && !!airTemperatureForecastLayer &&
+      requested===airTemperatureForecastDisplayHours;
     var targetSerial=++airTemperatureManualTargetSerial;
     ++airTemperatureRequestSerial;
     if (!visibleBounds) {
-      showAirTemperatureLegend(false);
-      showAirTemperatureForecastFailure(requested,"Forecast available over CONUS at Zoom 4+");
+      if (!keepDisplayedFrame) {
+        showAirTemperatureLegend(false);
+        showAirTemperatureForecastFailure(requested,"Forecast available over CONUS at Zoom 4+");
+      }
       return;
     }
     var spec=airTemperatureForecastGridSpec(visibleBounds);
     if (!spec) {
-      showAirTemperatureForecastFailure(requested,"Invalid map bounds");
+      if (!keepDisplayedFrame) showAirTemperatureForecastFailure(requested,"Invalid map bounds");
       return;
     }
-    setAirTemperatureStatus("Air Temperature · Loading NOAA/NWS NDFD +"+requested+"h forecast…",false);
+    if (!keepDisplayedFrame) setAirTemperatureStatus("Air Temperature · Loading NOAA/NWS NDFD +"+requested+"h forecast…",false);
     // Keep the last rendered map visible while fetching the requested frame.
     var timeStatus=document.getElementById("map-air-temperature-time");
-    if (timeStatus) timeStatus.textContent="Air Temperature · Loading +"+requested+"h forecast…";
+    if (timeStatus && !keepDisplayedFrame) timeStatus.textContent="Air Temperature · Loading +"+requested+"h forecast…";
     fetchAirTemperatureForecastGrid(spec,requested,false).then(function(grid) {
       if (!mapState.airTemperatureOverlayVisible || targetSerial!==airTemperatureManualTargetSerial) return;
       if (!displayAirTemperatureForecastGrid(grid,function() {
@@ -2565,17 +2569,19 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
         showAirTemperatureLegend(true);
         setAirTemperatureStatus("Air Temperature · Forecast · NOAA/NWS NDFD +"+requested+"h.",false);
       })) {
-        showAirTemperatureForecastFailure(requested,"Forecast frame could not be rendered");
+        if (!keepDisplayedFrame) showAirTemperatureForecastFailure(requested,"Forecast frame could not be rendered");
       }
     }).catch(function(err) {
       if (!mapState.airTemperatureOverlayVisible || targetSerial!==airTemperatureManualTargetSerial) return;
-      showAirTemperatureForecastFailure(requested,err);
+      if (!keepDisplayedFrame) showAirTemperatureForecastFailure(requested,err);
+      // A viewport refresh must never downgrade an already-rendered frame
+      // just because NOAA returned an empty replacement grid.
     });
   }
 
   function loadForecastAirTemperature() {
     var hours=Math.round(Number(mapState.airTemperatureForecastHours||0)/3)*3;
-    if (hours>0) showAirTemperatureForecastAtManual(hours);
+    if (hours>0) showAirTemperatureForecastAtManual(hours,true);
     else {
       mapState.airTemperatureForecastHours=0;
       loadObservedAirTemperature(false);
