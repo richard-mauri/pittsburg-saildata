@@ -148,3 +148,21 @@ func TestAirTemperatureSliderPreservesNativePointerDrag(t *testing.T) {
 		t.Error("temperature slider still forces focus during native pointer drag")
 	}
 }
+
+func TestAirTemperatureFirstForecastSkipsEmptyNDFDNowGrid(t *testing.T) {
+	data, err := sailingUIFiles.ReadFile("web/templates/sailing.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(data)
+	for _, expected := range []string{
+		"if (lower===0) {",
+		"fetchAirTemperatureForecastGrid(spec,upper,false).then(function(grid){",
+		"if (next>0 && next<3) next=3;",
+		"Air Temperature · Observed · current heat map restored.",
+	} {
+		if !strings.Contains(source, expected) {
+			t.Errorf("temperature forecast/observed fallback missing: %s", expected)
+		}
+	}
+}

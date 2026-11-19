@@ -2363,7 +2363,11 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       airTemperaturePlaybackFrameSettled(false);
       return;
     }
-    if (!force && airTemperatureBoundsContain(airTemperatureLoadedBounds, visibleBounds) && airTemperatureLayer) return;
+    if (!force && airTemperatureBoundsContain(airTemperatureLoadedBounds, visibleBounds) && airTemperatureLayer) {
+      showAirTemperatureLegend(true);
+      setAirTemperatureStatus("Air Temperature · Observed · current heat map restored.",false);
+      return;
+    }
     var requestBounds = bufferedAirTemperatureBounds(visibleBounds);
     var serial = ++airTemperatureRequestSerial;
     setAirTemperatureStatus("Air Temperature · Observed · loading current observations…", false);
@@ -2641,6 +2645,14 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     }
     var spec=airTemperatureForecastGridSpec(visibleBounds);
     hours=Math.max(0,Math.min(Number(airTemperaturePlaybackRangeHours)||24,Number(hours)||0));
+    // NOAA's NDFD +0h raster may be entirely empty. NOW itself is observed;
+    // the first available forecast frame is +3h, not an interpolatable +0h grid.
+    if (hours>0 && hours<3) {
+      hours=3;
+      mapState.airTemperatureForecastHours=hours;
+      airTemperatureForecastDisplayHours=hours;
+      updateAirTemperatureForecastTimeLabel(hours);
+    }
     if (!spec) return;
     var pair=airTemperatureForecastAnchorPair(hours);
     var targetSerial=++airTemperatureManualTargetSerial;
@@ -2738,6 +2750,33 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     if (fromHours>=upper-0.001) { lower=upper; upper=Math.min(24,upper+3); }
     if (upper<=lower) {stopAirTemperaturePlayback();return;}
     var serial=++airTemperatureRequestSerial;
+    if (lower===0) {
+      // The NOW layer is station observations, not NOAA's often-empty +0h
+      // NDFD raster. Cross-fade directly to the first valid +3h forecast.
+      setAirTemperatureStatus("Air Temperature · Loading first NOAA/NWS forecast frame +"+upper+"h…",false);
+      fetchAirTemperatureForecastGrid(spec,upper,false).then(function(grid){
+        if (!airTemperaturePlaybackActive || serial!==airTemperatureRequestSerial) return;
+        if (!displayAirTemperatureForecastGrid(grid,null,0,function(){
+          if (!airTemperaturePlaybackActive || serial!==airTemperatureRequestSerial) return;
+          airTemperatureForecastGridCurrent=grid;
+          airTemperatureForecastGridNext=null;
+          airTemperatureForecastGridBlendAlpha=0;
+          airTemperatureForecastDisplayHours=upper;
+          mapState.airTemperatureForecastHours=upper;
+          updateAirTemperatureForecastTimeLabel(upper);
+          setAirTemperatureStatus("Air Temperature · Forecast · NOAA/NWS NDFD +"+upper+"h · first available forecast frame.",false);
+          scheduleAirTemperaturePlaybackAdvance();
+        })) {
+          stopAirTemperaturePlayback();
+          setAirTemperatureStatus("Air Temperature forecast frame could not be displayed.",true);
+        }
+      }).catch(function(err){
+        if (!airTemperaturePlaybackActive || serial!==airTemperatureRequestSerial) return;
+        stopAirTemperaturePlayback();
+        setAirTemperatureStatus("Air Temperature forecast playback failed: "+String(err&&err.message?err.message:err||"unknown error"),true);
+      });
+      return;
+    }
     setAirTemperatureStatus("Air Temperature · Loading NOAA/NWS forecast frames +"+lower+"h and +"+upper+"h…",false);
     Promise.all([
       fetchAirTemperatureForecastGrid(spec,lower,false),
@@ -6572,6 +6611,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   function commitAirTemperatureHours(next) {
     var maxHours=Math.max(3,Number(airTemperaturePlaybackRangeHours)||24);
     next=Math.max(0,Math.min(maxHours,Math.round(Number(next)*4)/4));
+    if (next>0 && next<3) next=3;
     stopAirTemperaturePlayback();
     syncAirTemperatureSliders(next);
     mapState.airTemperatureForecastHours=next;
