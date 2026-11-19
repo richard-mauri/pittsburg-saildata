@@ -135,6 +135,9 @@ func TestAirTemperatureSliderPreservesNativePointerDrag(t *testing.T) {
 	for _, expected := range []string{
 		"updateAirTemperatureForecastTimeLabel(Number(airTemperatureMapHours.value) || 0, true)",
 		"if (!preserveSliderPosition) airTemperatureMapHours.value",
+		"stopAirTemperaturePlayback(true);",
+		"updateAirTemperatureForecastTimeLabel(airTemperatureForecastDisplayHours, !!preserveSliderPosition)",
+		"Air Temperature forecast playback failed:",
 		`if (!validCells) throw new Error("NDFD forecast grid has no usable temperature cells")`,
 	} {
 		if !strings.Contains(source, expected) {
