@@ -35,7 +35,7 @@ import (
 
 const (
 	appVersion                      = "1.16.0"
-	buildVersion                    = "v419"
+	buildVersion                    = "v420"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -4271,11 +4271,22 @@ func fetchNDFDTemperatureGridSection(west, south, east, north float64, hours, wi
 	if x0 >= x1 || y0 >= y1 {
 		return nil, fmt.Errorf("invalid NDFD grid bounds")
 	}
+	// NOAA can return an all-transparent raster for a valid regional extent
+	// when asked to render too few pixels (observed at 60x40 and 80x50).
+	// Render with adequate source resolution, then downsample the decoded cells.
+	renderWidth := width
+	renderHeight := height
+	if renderWidth < 140 {
+		renderWidth = 140
+	}
+	if renderHeight < 100 {
+		renderHeight = 100
+	}
 	params := url.Values{}
 	params.Set("bbox", fmt.Sprintf("%.3f,%.3f,%.3f,%.3f", x0, y0, x1, y1))
 	params.Set("bboxSR", "3857")
 	params.Set("imageSR", "3857")
-	params.Set("size", fmt.Sprintf("%d,%d", width, height))
+	params.Set("size", fmt.Sprintf("%d,%d", renderWidth, renderHeight))
 	params.Set("format", "png32")
 	params.Set("transparent", "true")
 	params.Set("adjustAspectRatio", "false")
@@ -4300,7 +4311,7 @@ func fetchNDFDTemperatureGridSection(west, south, east, north float64, hours, wi
 		return nil, err
 	}
 	b := img.Bounds()
-	if b.Dx() != width || b.Dy() != height {
+	if b.Dx() != renderWidth || b.Dy() != renderHeight {
 		return nil, fmt.Errorf("unexpected NDFD grid dimensions %dx%d", b.Dx(), b.Dy())
 	}
 
@@ -4308,7 +4319,9 @@ func fetchNDFDTemperatureGridSection(west, south, east, north float64, hours, wi
 	raw := make([]byte, width*height*2)
 	for y := 0; y < height; y++ {
 		for x := 0; x < width; x++ {
-			r, g, b0, a := img.At(b.Min.X+x, b.Min.Y+y).RGBA()
+			sx := (2*x+1)*renderWidth/(2*width)
+			sy := (2*y+1)*renderHeight/(2*height)
+			r, g, b0, a := img.At(b.Min.X+sx, b.Min.Y+sy).RGBA()
 			value := noData
 			if a >= 0x4000 {
 				r8, g8, b8 := float64(r>>8), float64(g>>8), float64(b0>>8)

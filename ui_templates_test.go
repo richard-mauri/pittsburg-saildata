@@ -155,6 +155,7 @@ func TestAirTemperatureManualThreeHourFrames(t *testing.T) {
 		"badge.classList.add(\"is-error\");",
 		"Showing \"+formatAirTemperatureOffset(airTemperatureForecastDisplayHours)",
 		"Air Temperature · Observed · current heat map restored.",
+		"Math.max(80,160-25*Math.max(0,zoom-4))",
 		`if (!validCells) throw new Error("NDFD forecast grid has no usable temperature cells")`,
 	} {
 		if !strings.Contains(source, expected) {
