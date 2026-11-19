@@ -141,6 +141,9 @@ input,select,textarea {
 }
 .wind-readings-scroll-cue { background:var(--panel);color:var(--muted); }
 /* Chart series and map imagery deliberately retain their own meaningful colors. */
+/* Safari sometimes rounds adjacent 256px OSM tile edges apart by one device
+   pixel. Overlap only the street-map raster edges; never stretch NOAA layers. */
+.leaflet-tile.street-map-tile { width:257px!important;height:257px!important; }
 .wind-distance-warning { background:light-dark(#fff8df,#342b19);
   border-color:light-dark(#e7c978,#8d703d); color:light-dark(#654d08,#ffe6a3); }
 .wind-distance-warning strong { color:inherit; }

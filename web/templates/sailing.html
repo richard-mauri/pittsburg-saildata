@@ -742,6 +742,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 
   var streetLayer = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 18,
+    className: "street-map-tile",
     attribution: '&copy; OpenStreetMap contributors'
   });
 

@@ -86,10 +86,18 @@ func TestMapPlaybackTransportsUseSharedThemeTokens(t *testing.T) {
 		".map-air-temperature-legend {",
 		"background:var(--panel);color:var(--muted);border-color:var(--border);",
 		".map-air-temperature-legend-head strong { color:var(--ink); }",
+		".leaflet-tile.street-map-tile { width:257px!important;height:257px!important; }",
 	} {
 		if !strings.Contains(css, expected) {
 			t.Errorf("playback transport missing shared theme rule: %s", expected)
 		}
+	}
+}
+
+func TestStreetMapTileSeamOverlapIsScoped(t *testing.T) {
+	markup := readSailingUITemplate("web/templates/sailing.html")
+	if !strings.Contains(markup, `className: "street-map-tile"`) {
+		t.Fatal("OpenStreetMap tile seam overlap must be limited to the street tile layer")
 	}
 }
 
