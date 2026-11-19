@@ -152,7 +152,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 <section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Open the full planning dashboard for location, wind, currents, forecasts, map layers, and customization controls.</p></div><a id="planning-page-link" class="planning-page-link" href="{{.PlanningDetailsURL}}">Planning and Details →</a></section>
 {{else}}
 <section class="card full planning-page-link-card"><div><h2>Planning and Details</h2><p>Full planning dashboard and customization controls.</p></div><a id="conditions-page-link" class="planning-page-link" href="{{.ConditionsURL}}">← Back to Conditions Now</a></section>
-<section class="card full map-card"><div class="map-intro"><div><div class="map-intro-title"><h2>Location</h2><details class="location-help"><summary aria-label="About location selection" title="About location selection">ⓘ</summary><div class="location-help-panel"><div class="location-help-header"><strong>About location selection</strong><button type="button" class="location-help-close" aria-label="Close location information" title="Close">×</button></div><div class="location-help-body"><p><strong>Selected location</strong> is the point used for selected-location weather and nearby-station searches. Click the map to set or change it.</p><p>Panning, zooming, My location, and Center Map only change the map view. The latitude/longitude fields show the map center; editing them and choosing <strong>Center Map → Latitude &amp; Longitude</strong> does not change the selected location.</p><p><strong>Find nearby stations</strong> searches around the selected location. Open a candidate station on the map to review it and commit it as the wind source; the associated currents station is previewed with it.</p></div></div></details></div><div class="map-help">Click the map to select a location for weather and nearby stations.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-alertcalifornia-panel" class="alertcalifornia-panel" hidden role="dialog" aria-modal="false" aria-labelledby="map-alertcalifornia-panel-title"><div class="alertcalifornia-panel-head"><div id="map-alertcalifornia-panel-title" class="alertcalifornia-panel-title">ALERTCalifornia camera</div><button id="map-alertcalifornia-panel-close" class="alertcalifornia-panel-close" type="button" aria-label="Close ALERTCalifornia camera" title="Close">×</button></div><div id="map-alertcalifornia-panel-body" class="alertcalifornia-panel-body"></div></div><div id="map-swell-info-panel" class="swell-info-panel" hidden role="dialog" aria-modal="false" aria-labelledby="map-swell-info-panel-title"><div class="swell-info-panel-head"><div id="map-swell-info-panel-title" class="swell-info-panel-title">Swell Forecast</div><button id="map-swell-info-panel-close" class="swell-info-panel-close" type="button" aria-label="Close swell forecast information" title="Close">×</button></div><div id="map-swell-info-panel-body" class="swell-info-panel-body"></div></div><div id="map-nautical-zoom-note" class="map-nautical-zoom-note" hidden aria-live="polite">Nautical chart available at Zoom 9+.</div><div id="map-resize-handle" class="map-resize-handle" role="separator" aria-label="Resize map vertically" aria-orientation="horizontal" aria-valuemin="260" aria-valuemax="900" aria-valuenow="390" aria-grabbed="false" tabindex="0" title="Drag up or down to resize map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-footer-row"><div class="map-footer-transports"><div id="map-air-temperature-transport" class="map-air-temperature-transport" hidden aria-label="Air temperature playback controls"><div class="map-air-temperature-transport-row"><button type="button" id="map-air-temperature-now" aria-label="Return air temperature to NOW" title="Return to NOW">NOW</button><button type="button" id="map-air-temperature-prev" aria-label="Previous 15 minutes" title="Previous 15 minutes">◀</button><button type="button" id="map-air-temperature-map-play" aria-pressed="false" aria-label="Play air temperature timeline">▶ Play</button><button type="button" id="map-air-temperature-next" aria-label="Next 15 minutes" title="Next 15 minutes">▶</button><label>Speed <select id="map-air-temperature-speed" aria-label="Air temperature playback speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select></label><label>Range <select id="map-air-temperature-range" aria-label="Air temperature playback range"><option value="6">6h</option><option value="12">12h</option><option value="24" selected>24h</option></select></label></div><div class="map-air-temperature-map-slider-wrap"><span class="map-air-temperature-map-slider-end">NOW</span><input id="map-air-temperature-map-hours" type="range" min="0" max="24" step="0.25" value="0" aria-label="Air temperature time in the footer, from NOW through the selected playback range"><span id="map-air-temperature-map-range-end" class="map-air-temperature-map-slider-end">+24h</span></div><div id="map-air-temperature-time" class="map-air-temperature-footer-status" role="status" aria-live="polite">Air Temperature · NOW · Observed</div></div><div id="map-swell-transport" class="map-swell-transport" hidden aria-label="Swell forecast playback controls"><div class="map-swell-transport-row"><button type="button" id="map-swell-map-now" aria-label="Return swell forecast to Now" title="Return to Now">NOW</button><button type="button" id="map-swell-map-prev" aria-label="Previous swell forecast frame" title="Previous swell forecast frame">◀</button><button type="button" id="map-swell-map-play" aria-pressed="false" aria-label="Play swell forecast timeline">▶ Play</button><button type="button" id="map-swell-map-next" aria-label="Next swell forecast frame" title="Next swell forecast frame">▶</button><label>Speed <select id="map-swell-playback-speed" aria-label="Swell playback speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select></label><label>Step <select id="map-swell-playback-step" aria-label="Swell playback step"><option value="1">1h</option><option value="3" selected>3h</option><option value="6">6h</option></select></label></div><div class="map-swell-map-slider-wrap"><span class="map-swell-map-slider-end">Now</span><input id="map-swell-map-hours" type="range" min="0" max="120" step="1" value="0" aria-label="Swell forecast time on map, from now through 120 hours in the future"><span class="map-swell-map-slider-end">+120h (5 days)</span></div><div id="map-swell-map-time" class="map-swell-footer-status" aria-live="polite">Swell · Now</div><div class="map-swell-cache-row"><div id="map-swell-prime-status" class="map-swell-prime-status" hidden aria-live="polite"></div><button type="button" id="map-swell-cache-reload" class="map-swell-cache-reload" hidden>Reload swell cache</button></div><div id="map-swell-time" hidden aria-hidden="true">Selected: Now</div><div id="map-swell-map-selected" hidden aria-hidden="true"></div><div id="map-swell-playback-note" class="map-swell-playback-note" hidden aria-live="polite"></div></div></div><div class="map-scale-row" aria-label="Map scale"><span id="map-scale-status" class="map-scale-status" role="status" aria-live="polite"></span></div></div><div class="map-state-controls" aria-label="Map controls"><details id="map-types-menu" class="map-overlays-menu"><summary>Map Types</summary><div class="map-overlays-panel"><button type="button" class="map-menu-close" aria-label="Close Map Types" title="Close">×</button><label class="map-overlay-toggle"><input type="radio" name="map-type" value="map"> <span>Street Map</span></label><label id="map-type-nautical-label" class="map-overlay-toggle"><input id="map-type-nautical" type="radio" name="map-type" value="nautical"> <span>Nautical Chart <small>(Zoom 9+)</small></span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="satellite"> <span>Satellite</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="hybrid"> <span>Hybrid</span></label></div></details><details id="map-overlays-menu" class="map-overlays-menu"><summary>Map Overlays</summary><div class="map-overlays-panel"><div class="map-overlays-toolbar"><button type="button" id="map-overlays-clear" class="map-overlay-clear ui-button">Clear all overlays</button><button type="button" class="map-menu-close" aria-label="Close Map Overlays" title="Close">×</button></div><details class="map-overlay-group"><summary>Weather &amp; Hazards</summary><div class="map-overlay-group-body"><label id="map-marine-zone-control" class="map-overlay-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-smoke"> <span>Satellite smoke (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-fire-perimeters"> <span>Active fire perimeters (NIFC/WFIGS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-fire-detections"> <span>Satellite fire detections (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-air-temperature"> <span>Air Temperature Heat Map (CONUS)</span></label><div class="map-air-temperature-overlay-note">Playback, forecast time, Speed, and Range are all below the map. NOW uses current observations; future times use NOAA/NWS NDFD guidance. CONUS only · Zoom 4+.</div><label class="map-overlay-toggle"><input type="checkbox" id="map-show-clouds"> <span>Satellite Cloud Cover (NOAA)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-radar"> <span>Weather radar (NOAA/NWS)</span></label></div></details><details class="map-overlay-group"><summary>Wind &amp; Pressure</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-wind-barbs"> <span>Marine / Bay Wind Barbs (NOAA/NDBC)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-inland-wind-barbs"> <span>Land / Inland Wind Barbs (METAR)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-pressure"> <span>Surface Pressure / Isobars (NOAA/NWS METAR)</span></label></div></details><details class="map-overlay-group"><summary>Surf &amp; Swell</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-swell"> <span>Global Swell Forecast (PacIOOS / NOAA WW3)</span></label><div class="map-swell-overlay-note">Playback, forecast time, cache progress, and Reload swell cache are all below the map.</div></div></details><details class="map-overlay-group"><summary>Terrain &amp; Seafloor</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-structure"> <span>Topography &amp; Bathymetry (NOAA ETOPO + offshore feature names)</span></label></div></details><details class="map-overlay-group"><summary>Marine Places</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marinas"> <span>Marinas <small id="map-marine-count-marinas"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="boatyards"> <span>Boatyards &amp; Repair <small id="map-marine-count-boatyards"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="fuel_docks"> <span>Fuel Docks <small id="map-marine-count-fuel_docks"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="launch_ramps"> <span>Launch Ramps <small id="map-marine-count-launch_ramps"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="ferry_terminals"> <span>Ferry Terminals <small id="map-marine-count-ferry_terminals"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marine_supply"> <span>Marine Supply <small id="map-marine-count-marine_supply"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="yacht_clubs"> <span>Yacht Clubs <small id="map-marine-count-yacht_clubs"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="waterfront_restaurants"> <span>Waterfront Restaurants <small id="map-marine-count-waterfront_restaurants"></small></span></label></div></details><details class="map-overlay-group"><summary>Observations</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-saildrone"> <span>Saildrone Observations (NOAA PMEL)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-alertcalifornia"> <span>ALERTCalifornia Cameras (UC San Diego)</span></label><div class="map-swell-overlay-note">Hold Shift and drag on the map to select a camera region.</div><label class="alertcamera-display-mode" for="map-alertcalifornia-mode">Display <select id="map-alertcalifornia-mode" aria-label="ALERTCalifornia camera display"><option value="clustered" selected>Clustered</option><option value="all">All cameras</option></select></label></div></details></div></details><details id="map-center-menu" class="map-overlays-menu"><summary>Center Map</summary><div class="map-overlays-panel map-center-panel"><button type="button" class="map-menu-close" aria-label="Close Center Map" title="Close">×</button><button type="button" id="map-geolocate" class="map-center-action" title="Center the map on your device location without changing the selected location">My location</button><button type="button" id="map-nav-coordinates" class="map-center-action" title="Center the map on the latitude and longitude shown below">Latitude &amp; Longitude</button><button type="button" id="map-nav-selected" class="map-center-action" {{if not .MapHasRequest}}disabled{{end}}>Selected location</button><button type="button" id="map-nav-wind" class="map-center-action" {{if not .MapHasWind}}disabled{{end}}>Selected wind station</button><button type="button" id="map-nav-current" class="map-center-action" {{if not .MapHasCurrent}}disabled{{end}}>Selected currents station</button></div></details></div><div class="map-primary-actions" aria-label="Location and station actions"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Find nearby stations</span><button id="map-reset" class="map-reset ui-button" type="button" aria-disabled="{{if or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates}}false{{else}}true{{end}}" {{if not (or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates)}}disabled{{end}}>Clear location &amp; stations</button></div><div class="map-location-info-grid"><div class="map-coordinate-entry" aria-label="Map center coordinates"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLat}}" aria-label="Map center latitude"></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLon}}" aria-label="Map center longitude"></div><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div id="selected-location-weather" class="selected-location-weather" aria-live="polite"><div id="selected-location-weather-empty" class="selected-location-weather-empty" {{if .MapHasRequest}}hidden{{end}}><strong>Selected Location Weather</strong><span>Select a location on the map to view current weather and forecast information.</span></div><div id="selected-location-weather-content" {{if not .MapHasRequest}}hidden{{end}}><div class="selected-location-weather-columns"><div class="selected-location-weather-point-column"><div class="selected-location-weather-head"><strong>Selected Location Weather</strong></div><div id="selected-location-weather-place" class="selected-location-weather-place">{{if .MapHasRequest}}{{if .SelectedWeatherLocation}}Near {{.SelectedWeatherLocation}}{{else}}Selected location{{end}}{{else}}Select a location for weather{{end}}</div><div id="selected-location-point-forecast" {{if and .MarineForecastPeriods .SelectedWeatherError}}hidden{{end}}><div class="selected-location-point-head"><strong>NWS Point Forecast</strong><span id="selected-location-weather-updated" class="selected-location-weather-updated">{{if .SelectedWeatherUpdated}}Updated {{.SelectedWeatherUpdated}}{{end}}</span></div><div class="selected-location-weather-metrics"><span class="selected-location-weather-metric"><b>Forecast temp:</b> <span id="selected-location-weather-air">{{if .SelectedWeatherAirTemp}}{{.SelectedWeatherAirTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>High:</b> <span id="selected-location-weather-high">{{if .SelectedWeatherHighTemp}}{{.SelectedWeatherHighTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>Low:</b> <span id="selected-location-weather-low">{{if .SelectedWeatherLowTemp}}{{.SelectedWeatherLowTemp}}{{else}}—{{end}}</span></span></div><p id="selected-location-weather-forecast" class="selected-location-weather-forecast" {{if not .SelectedWeatherShortForecast}}hidden{{end}}>{{.SelectedWeatherShortForecast}}</p><p id="selected-location-weather-error" class="selected-location-weather-error" {{if or (not .SelectedWeatherError) .MarineForecastPeriods}}hidden{{end}}>{{.SelectedWeatherError}}</p><p class="selected-location-weather-note">NWS point forecast for the selected map point. Forecast temperature is the current-hour forecast, not a direct observation.</p></div><p id="selected-location-weather-context" class="selected-location-weather-context" {{if not (and .MarineForecastPeriods .SelectedWeatherError)}}hidden{{end}}>NWS point-forecast temperature data is unavailable here; the applicable marine-zone forecast is shown in the Marine Forecast section.</p></div><div id="selected-location-weather-detail" class="selected-location-weather-detail" {{if not (or .MarineForecastPeriods .MarineForecastAlerts .MarineForecastError)}}hidden{{end}}><div class="selected-location-weather-detail-head"><strong id="marine-forecast-heading">{{if .MarineForecastPeriods}}NWS Marine Forecast{{else}}NWS Forecast Zone / Alerts{{end}}</strong><span id="marine-forecast-zone" class="marine-forecast-zone" {{if not .MarineForecastZone}}hidden{{end}}>{{if .MarineForecastPeriods}}Marine zone{{else}}NWS forecast zone{{end}} {{.MarineForecastZone}}{{if .MarineForecastUpdated}} · Updated {{.MarineForecastUpdated}}{{end}}</span></div><div id="marine-forecast-alerts" class="marine-alerts" aria-label="Active National Weather Service alerts" {{if not .MarineForecastAlerts}}hidden{{end}}>{{range .MarineForecastAlerts}}<span class="marine-alert">⚠ NWS alert — {{.}}</span>{{end}}</div><div id="marine-forecast-periods" class="marine-periods" {{if not .MarineForecastPeriods}}hidden{{end}}>{{range .MarineForecastPeriods}}<div class="marine-period">{{if .Name}}<strong>{{.Name}}</strong>{{end}}{{if .Forecast}}<p>{{.Forecast}}</p>{{end}}</div>{{end}}</div><p id="marine-forecast-note" class="marine-forecast-note" {{if not .MarineForecastPeriods}}hidden{{end}}>Official NWS coastal marine-zone forecast for the zone containing the selected point. It applies to the broader marine zone, not specifically to the selected point.</p><p id="marine-forecast-error" class="marine-forecast-error" {{if not .MarineForecastError}}hidden{{end}}>{{if .MarineForecastError}}{{.MarineForecastError}}{{end}}</p></div></div></div></div><div class="map-controls"><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><details class="map-overlay-help"><summary>Map overlay details</summary><div class="map-overlay-help-body">Topography & Bathymetry combines NOAA/NCEI ETOPO land topography and seafloor bathymetry with NOAA Marine Cadastre official named offshore features. Fishing-relevant features such as seamounts, banks, ridges, hills, knolls, shoals, reefs, rises, plateaus, pinnacles, and escarpments are labeled locally for better contrast. It is intended for fishing-planning context, not navigation; smaller pinnacles may not appear in the global relief model. Marine / Bay Wind Barbs uses live NOAA/NDBC station observations from all active stations with usable wind inside the buffered map viewport; standard meteorological barbs show wind-from direction and speed, and stale observations are faded. Land / Inland Wind Barbs is a separate optional layer sourced from Aviation Weather Center’s complete current-METAR cache and filtered locally to the buffered viewport, including many ASOS/AWOS airport sites. Both controls are display-only and do not change the selected wind station or selected location. Wind-barb tooltips follow the shared page Wind units preference; barb geometry remains based on standard knot increments. Saildrone Observations uses NOAA PMEL public ERDDAP mission data and plots the latest reported position and met-ocean readings from configured 2026 NOAA Saildrone missions; availability is mission-dependent and these moving platforms are not a fixed station network. ALERTCalifornia Cameras uses the official UC San Diego/ALERTCalifornia ArcGIS camera layer, requests only cameras in the current map viewport, and shows the current camera image plus a link to the official live camera page. Camera imagery is displayed unmodified with ALERTCalifornia | UC San Diego attribution. Exact positions are plotted only when the source provides them; fisherman shorthand such as “20×20” is shown as a derived approximate position with an uncertainty circle, and broad reports such as “Cordell to Monterey” are shown as regional zones rather than fake point coordinates. Satellite Cloud Cover uses NOAA/NESDIS GOES imagery rendered for the current map view; daylight areas appear natural-color-like and nighttime areas use infrared imagery. Radar uses Iowa State IEM's Web-Mercator CONUS NEXRAD N0Q WMS layer; a clear/transparent radar layer can simply mean no precipitation echoes are present. Air Temperature Heat Map uses one time slider and is intentionally limited to the contiguous U.S. at Zoom 4 or closer to avoid unnecessary world-scale interpolation and repaint work. NOW combines current NOAA/NDBC marine observations and NOAA/NWS Aviation Weather Center METAR observations, excludes reports older than 90 minutes, and interpolates the remaining station temperatures from the nearest local observations using a fixed −10°F to 110°F color scale. Moving the slider to any future step switches to the NOAA/NWS National Digital Forecast Database (NDFD) temperature raster for that forecast hour. The fixed −10°F to 110°F scale is shown in the Map Legend card, moving the pointer over the map reports the interpolated observed temperature at NOW or the NDFD forecast temperature at the selected future hour, and the Play control loops the timeline from NOW through +24h while waiting for each frame to load. The observed interpolation is planning context rather than an official analyzed temperature field. Surface Pressure / Isobars uses current NOAA/NWS Aviation Weather Center METAR mean sea-level-pressure observations. The browser interpolates those point observations into contour lines at a zoom-appropriate interval; it is useful pressure-gradient context but is not an official analyzed surface chart. Global Swell Forecast uses the public PacIOOS WaveWatch III global model for basin-scale swell tracking. The browser renders a padded, geographically anchored forecast field and reuses that loaded buffer during short pans; replacement buffers are swapped in only after enough new data are available. Wide-area views use a globally aligned coarser WW3 sampling stride for responsiveness, while closer views retain finer model sampling. The display uses interpolation and periodic dateline handling to present the gridded model smoothly; these display techniques do not increase the underlying model resolution. Sparse clickable arrows show swell travel direction, and the colored swell field or an arrow can be tapped for height, peak period, swell-from direction, travel direction, and forecast-valid time. It is intended for ocean-basin swell tracking and travel planning, not break-specific surf height.</div></details><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-fire-perimeter-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-fire-detection-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-weather-overlay-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-air-temperature-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-pressure-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div id="map-structure-status" class="map-structure-status" hidden></div><div id="map-windbarb-status" class="map-windbarb-status" hidden></div><div id="map-saildrone-status" class="map-saildrone-status" hidden></div><div id="map-alertcalifornia-status" class="map-alertcalifornia-status" hidden aria-live="polite"></div><div id="map-swell-status" class="map-swell-status" hidden aria-hidden="true" style="display:none!important"></div><div id="map-swell-legend" class="map-swell-legend" hidden><strong>Swell height</strong><span>0</span><span class="map-swell-gradient" aria-hidden="true"></span><span>20+ ft</span><span>· arrows: swell travel direction</span></div><div class="map-layer-note">Drag the handle directly below the map to make the map taller or shorter. Keyboard users can focus the handle and use ↑/↓ (Shift for larger steps).</div><div class="info-popup-row map-info-popup-row"><button id="map-legend-open" class="info-popup-open ui-button" type="button" aria-haspopup="dialog" aria-controls="map-legend-modal">ⓘ Map legend</button><button id="map-sources-open" class="info-popup-open ui-button" type="button" aria-haspopup="dialog" aria-controls="map-sources-modal">ⓘ Map &amp; data sources</button></div><div id="map-legend-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-legend-title"><div class="info-popup-dialog-head"><h2 id="map-legend-title">Map Legend</h2><button id="map-legend-close" class="info-popup-close" type="button" aria-label="Close map legend" title="Close">×</button></div><div class="info-popup-body"><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span><span class="map-key"><span class="map-dot saildrone" aria-hidden="true"></span>Saildrone latest position</span><span class="map-key"><span aria-hidden="true">📷</span> ALERTCalifornia camera (number = cluster)</span></div><div class="map-legend"><span class="map-key"><span class="map-dot marine marina" aria-hidden="true"></span>Marina</span><span class="map-key"><span class="map-dot marine boatyard" aria-hidden="true"></span>Boatyard &amp; repair</span><span class="map-key"><span class="map-dot marine fuel" aria-hidden="true"></span>Fuel dock</span><span class="map-key"><span class="map-dot marine ramp" aria-hidden="true"></span>Launch ramp</span><span class="map-key"><span class="map-dot marine ferry" aria-hidden="true"></span>Ferry terminal</span><span class="map-key"><span class="map-dot marine supply" aria-hidden="true"></span>Marine supply</span><span class="map-key"><span class="map-dot marine club" aria-hidden="true"></span>Yacht club</span><span class="map-key"><span class="map-dot marine restaurant" aria-hidden="true"></span>Waterfront restaurant</span></div><div id="map-air-temperature-legend" class="map-air-temperature-legend" hidden><div class="map-air-temperature-legend-head"><strong>Air temperature</strong><span id="map-air-temperature-legend-context" class="map-air-temperature-legend-context">NOW · Observed · NDBC + METAR</span></div><div class="map-air-temperature-scale"><span>−10°F</span><span class="map-air-temperature-gradient" aria-hidden="true"></span><span>110°F</span></div></div></div></div></div><div id="map-sources-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-sources-title"><div class="info-popup-dialog-head"><h2 id="map-sources-title">Map &amp; Data Sources</h2><button id="map-sources-close" class="info-popup-close" type="button" aria-label="Close map and data sources" title="Close">×</button></div><div class="info-popup-body"><p class="map-sources-note">Base maps: <strong>Street Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service and is available at Zoom 9 or closer; <strong>Satellite</strong> uses Esri World Imagery; <strong>Hybrid</strong> combines Esri imagery with place/boundary labels. NWS forecast-zone, NOAA smoke, <strong>Active Fire Perimeters</strong>, <strong>Satellite Fire Detections</strong>, <strong>Air Temperature Heat Map (CONUS: NOW observations + NOAA/NWS NDFD future forecast)</strong>, <strong>Global Swell Forecast</strong>, <strong>Satellite Cloud Cover</strong>, radar, and <strong>ALERTCalifornia Cameras</strong> remain independent overlays. Active Fire Perimeters use the National Interagency Fire Center WFIGS current perimeter service. Satellite Fire Detections use NOAA Hazard Mapping System active-fire detections. Global Swell Forecast uses PacIOOS public ERDDAP access to the NOAA/NCEP WaveWatch III global model. ALERTCalifornia camera locations and current imagery come from the official UC San Diego/ALERTCalifornia ArcGIS feed. The nautical chart layer is for planning/reference and does not replace official navigation products.</p></div></div></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
+<section class="card full map-card"><div class="map-intro"><div><div class="map-intro-title"><h2>Location</h2><details class="location-help"><summary aria-label="About location selection" title="About location selection">ⓘ</summary><div class="location-help-panel"><div class="location-help-header"><strong>About location selection</strong><button type="button" class="location-help-close" aria-label="Close location information" title="Close">×</button></div><div class="location-help-body"><p><strong>Selected location</strong> is the point used for selected-location weather and nearby-station searches. Click the map to set or change it.</p><p>Panning, zooming, My location, and Center Map only change the map view. The latitude/longitude fields show the map center; editing them and choosing <strong>Center Map → Latitude &amp; Longitude</strong> does not change the selected location.</p><p><strong>Find nearby stations</strong> searches around the selected location. Open a candidate station on the map to review it and commit it as the wind source; the associated currents station is previewed with it.</p></div></div></details></div><div class="map-help">Click the map to select a location for weather and nearby stations.</div></div></div><div class="location-map-wrap"><div id="sailing-location-map" class="location-map" aria-label="Interactive supported coastal and inland waters conditions map"></div><div id="map-alertcalifornia-panel" class="alertcalifornia-panel" hidden role="dialog" aria-modal="false" aria-labelledby="map-alertcalifornia-panel-title"><div class="alertcalifornia-panel-head"><div id="map-alertcalifornia-panel-title" class="alertcalifornia-panel-title">ALERTCalifornia camera</div><button id="map-alertcalifornia-panel-close" class="alertcalifornia-panel-close" type="button" aria-label="Close ALERTCalifornia camera" title="Close">×</button></div><div id="map-alertcalifornia-panel-body" class="alertcalifornia-panel-body"></div></div><div id="map-swell-info-panel" class="swell-info-panel" hidden role="dialog" aria-modal="false" aria-labelledby="map-swell-info-panel-title"><div class="swell-info-panel-head"><div id="map-swell-info-panel-title" class="swell-info-panel-title">Swell Forecast</div><button id="map-swell-info-panel-close" class="swell-info-panel-close" type="button" aria-label="Close swell forecast information" title="Close">×</button></div><div id="map-swell-info-panel-body" class="swell-info-panel-body"></div></div><div id="map-nautical-zoom-note" class="map-nautical-zoom-note" hidden aria-live="polite">Nautical chart available at Zoom 9+.</div><div id="map-resize-handle" class="map-resize-handle" role="separator" aria-label="Resize map vertically" aria-orientation="horizontal" aria-valuemin="260" aria-valuemax="900" aria-valuenow="390" aria-grabbed="false" tabindex="0" title="Drag up or down to resize map"></div><div id="map-wind-info" class="map-wind-info" hidden aria-live="polite"></div></div><div class="map-footer-row"><div class="map-footer-transports"><div id="map-air-temperature-transport" class="map-air-temperature-transport" hidden aria-label="Air temperature forecast time controls"><div class="map-air-temperature-transport-row"><button type="button" id="map-air-temperature-now" aria-label="Return air temperature to NOW" title="Return to NOW">NOW</button><button type="button" id="map-air-temperature-prev" aria-label="Previous 3 hours" title="Previous 3 hours">◀</button><button type="button" id="map-air-temperature-next" aria-label="Next 3 hours" title="Next 3 hours">▶</button><div id="map-air-temperature-time" class="map-air-temperature-footer-status" role="status" aria-live="polite">Air Temperature · NOW · Observed</div></div></div><div id="map-swell-transport" class="map-swell-transport" hidden aria-label="Swell forecast playback controls"><div class="map-swell-transport-row"><button type="button" id="map-swell-map-now" aria-label="Return swell forecast to Now" title="Return to Now">NOW</button><button type="button" id="map-swell-map-prev" aria-label="Previous swell forecast frame" title="Previous swell forecast frame">◀</button><button type="button" id="map-swell-map-play" aria-pressed="false" aria-label="Play swell forecast timeline">▶ Play</button><button type="button" id="map-swell-map-next" aria-label="Next swell forecast frame" title="Next swell forecast frame">▶</button><label>Speed <select id="map-swell-playback-speed" aria-label="Swell playback speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select></label><label>Step <select id="map-swell-playback-step" aria-label="Swell playback step"><option value="1">1h</option><option value="3" selected>3h</option><option value="6">6h</option></select></label></div><div class="map-swell-map-slider-wrap"><span class="map-swell-map-slider-end">Now</span><input id="map-swell-map-hours" type="range" min="0" max="120" step="1" value="0" aria-label="Swell forecast time on map, from now through 120 hours in the future"><span class="map-swell-map-slider-end">+120h (5 days)</span></div><div id="map-swell-map-time" class="map-swell-footer-status" aria-live="polite">Swell · Now</div><div class="map-swell-cache-row"><div id="map-swell-prime-status" class="map-swell-prime-status" hidden aria-live="polite"></div><button type="button" id="map-swell-cache-reload" class="map-swell-cache-reload" hidden>Reload swell cache</button></div><div id="map-swell-time" hidden aria-hidden="true">Selected: Now</div><div id="map-swell-map-selected" hidden aria-hidden="true"></div><div id="map-swell-playback-note" class="map-swell-playback-note" hidden aria-live="polite"></div></div></div><div class="map-scale-row" aria-label="Map scale"><span id="map-scale-status" class="map-scale-status" role="status" aria-live="polite"></span></div></div><div class="map-state-controls" aria-label="Map controls"><details id="map-types-menu" class="map-overlays-menu"><summary>Map Types</summary><div class="map-overlays-panel"><button type="button" class="map-menu-close" aria-label="Close Map Types" title="Close">×</button><label class="map-overlay-toggle"><input type="radio" name="map-type" value="map"> <span>Street Map</span></label><label id="map-type-nautical-label" class="map-overlay-toggle"><input id="map-type-nautical" type="radio" name="map-type" value="nautical"> <span>Nautical Chart <small>(Zoom 9+)</small></span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="satellite"> <span>Satellite</span></label><label class="map-overlay-toggle"><input type="radio" name="map-type" value="hybrid"> <span>Hybrid</span></label></div></details><details id="map-overlays-menu" class="map-overlays-menu"><summary>Map Overlays</summary><div class="map-overlays-panel"><div class="map-overlays-toolbar"><button type="button" id="map-overlays-clear" class="map-overlay-clear ui-button">Clear all overlays</button><button type="button" class="map-menu-close" aria-label="Close Map Overlays" title="Close">×</button></div><details class="map-overlay-group"><summary>Weather &amp; Hazards</summary><div class="map-overlay-group-body"><label id="map-marine-zone-control" class="map-overlay-toggle" {{if not .MarineForecastGeometry}}hidden{{end}}><input type="checkbox" id="map-show-marine-zone"> <span id="map-marine-zone-label">NWS forecast zone {{.MarineForecastZone}}</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-smoke"> <span>Satellite smoke (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-fire-perimeters"> <span>Active fire perimeters (NIFC/WFIGS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-fire-detections"> <span>Satellite fire detections (NOAA HMS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-air-temperature"> <span>Air Temperature Heat Map (CONUS)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-clouds"> <span>Satellite Cloud Cover (NOAA)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-radar"> <span>Weather radar (NOAA/NWS)</span></label></div></details><details class="map-overlay-group"><summary>Wind &amp; Pressure</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-wind-barbs"> <span>Marine / Bay Wind Barbs (NOAA/NDBC)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-inland-wind-barbs"> <span>Land / Inland Wind Barbs (METAR)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-pressure"> <span>Surface Pressure / Isobars (NOAA/NWS METAR)</span></label></div></details><details class="map-overlay-group"><summary>Surf &amp; Swell</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-swell"> <span>Global Swell Forecast (PacIOOS / NOAA WW3)</span></label><div class="map-swell-overlay-note">Playback, forecast time, cache progress, and Reload swell cache are all below the map.</div></div></details><details class="map-overlay-group"><summary>Terrain &amp; Seafloor</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-structure"> <span>Topography &amp; Bathymetry (NOAA ETOPO + offshore feature names)</span></label></div></details><details class="map-overlay-group"><summary>Marine Places</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marinas"> <span>Marinas <small id="map-marine-count-marinas"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="boatyards"> <span>Boatyards &amp; Repair <small id="map-marine-count-boatyards"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="fuel_docks"> <span>Fuel Docks <small id="map-marine-count-fuel_docks"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="launch_ramps"> <span>Launch Ramps <small id="map-marine-count-launch_ramps"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="ferry_terminals"> <span>Ferry Terminals <small id="map-marine-count-ferry_terminals"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="marine_supply"> <span>Marine Supply <small id="map-marine-count-marine_supply"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="yacht_clubs"> <span>Yacht Clubs <small id="map-marine-count-yacht_clubs"></small></span></label><label class="map-overlay-toggle"><input type="checkbox" class="map-marine-place-toggle" data-marine-category="waterfront_restaurants"> <span>Waterfront Restaurants <small id="map-marine-count-waterfront_restaurants"></small></span></label></div></details><details class="map-overlay-group"><summary>Observations</summary><div class="map-overlay-group-body"><label class="map-overlay-toggle"><input type="checkbox" id="map-show-saildrone"> <span>Saildrone Observations (NOAA PMEL)</span></label><label class="map-overlay-toggle"><input type="checkbox" id="map-show-alertcalifornia"> <span>ALERTCalifornia Cameras (UC San Diego)</span></label><div class="map-swell-overlay-note">Hold Shift and drag on the map to select a camera region.</div><label class="alertcamera-display-mode" for="map-alertcalifornia-mode">Display <select id="map-alertcalifornia-mode" aria-label="ALERTCalifornia camera display"><option value="clustered" selected>Clustered</option><option value="all">All cameras</option></select></label></div></details></div></details><details id="map-center-menu" class="map-overlays-menu"><summary>Center Map</summary><div class="map-overlays-panel map-center-panel"><button type="button" class="map-menu-close" aria-label="Close Center Map" title="Close">×</button><button type="button" id="map-geolocate" class="map-center-action" title="Center the map on your device location without changing the selected location">My location</button><button type="button" id="map-nav-coordinates" class="map-center-action" title="Center the map on the latitude and longitude shown below">Latitude &amp; Longitude</button><button type="button" id="map-nav-selected" class="map-center-action" {{if not .MapHasRequest}}disabled{{end}}>Selected location</button><button type="button" id="map-nav-wind" class="map-center-action" {{if not .MapHasWind}}disabled{{end}}>Selected wind station</button><button type="button" id="map-nav-current" class="map-center-action" {{if not .MapHasCurrent}}disabled{{end}}>Selected currents station</button></div></details></div><div class="map-primary-actions" aria-label="Location and station actions"><span id="map-find-point" class="map-go map-search-area" role="button" tabindex="0" aria-disabled="true">Find nearby stations</span><button id="map-reset" class="map-reset ui-button" type="button" aria-disabled="{{if or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates}}false{{else}}true{{end}}" {{if not (or .MapHasRequest .MapHasWind .MapHasCurrent .WindCandidates)}}disabled{{end}}>Clear location &amp; stations</button></div><div class="map-location-info-grid"><div class="map-coordinate-entry" aria-label="Map center coordinates"><div class="map-coordinate-field"><label for="map-lat-input">Latitude</label><input id="map-lat-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLat}}" aria-label="Map center latitude"></div><div class="map-coordinate-field"><label for="map-lon-input">Longitude</label><input id="map-lon-input" type="text" inputmode="decimal" value="{{printf "%.5f" .MapCenterLon}}" aria-label="Map center longitude"></div><span id="map-coordinate-error" class="map-coordinate-error" aria-live="polite"></span></div><div id="selected-location-weather" class="selected-location-weather" aria-live="polite"><div id="selected-location-weather-empty" class="selected-location-weather-empty" {{if .MapHasRequest}}hidden{{end}}><strong>Selected Location Weather</strong><span>Select a location on the map to view current weather and forecast information.</span></div><div id="selected-location-weather-content" {{if not .MapHasRequest}}hidden{{end}}><div class="selected-location-weather-columns"><div class="selected-location-weather-point-column"><div class="selected-location-weather-head"><strong>Selected Location Weather</strong></div><div id="selected-location-weather-place" class="selected-location-weather-place">{{if .MapHasRequest}}{{if .SelectedWeatherLocation}}Near {{.SelectedWeatherLocation}}{{else}}Selected location{{end}}{{else}}Select a location for weather{{end}}</div><div id="selected-location-point-forecast" {{if and .MarineForecastPeriods .SelectedWeatherError}}hidden{{end}}><div class="selected-location-point-head"><strong>NWS Point Forecast</strong><span id="selected-location-weather-updated" class="selected-location-weather-updated">{{if .SelectedWeatherUpdated}}Updated {{.SelectedWeatherUpdated}}{{end}}</span></div><div class="selected-location-weather-metrics"><span class="selected-location-weather-metric"><b>Forecast temp:</b> <span id="selected-location-weather-air">{{if .SelectedWeatherAirTemp}}{{.SelectedWeatherAirTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>High:</b> <span id="selected-location-weather-high">{{if .SelectedWeatherHighTemp}}{{.SelectedWeatherHighTemp}}{{else}}—{{end}}</span></span><span class="selected-location-weather-metric"><b>Low:</b> <span id="selected-location-weather-low">{{if .SelectedWeatherLowTemp}}{{.SelectedWeatherLowTemp}}{{else}}—{{end}}</span></span></div><p id="selected-location-weather-forecast" class="selected-location-weather-forecast" {{if not .SelectedWeatherShortForecast}}hidden{{end}}>{{.SelectedWeatherShortForecast}}</p><p id="selected-location-weather-error" class="selected-location-weather-error" {{if or (not .SelectedWeatherError) .MarineForecastPeriods}}hidden{{end}}>{{.SelectedWeatherError}}</p><p class="selected-location-weather-note">NWS point forecast for the selected map point. Forecast temperature is the current-hour forecast, not a direct observation.</p></div><p id="selected-location-weather-context" class="selected-location-weather-context" {{if not (and .MarineForecastPeriods .SelectedWeatherError)}}hidden{{end}}>NWS point-forecast temperature data is unavailable here; the applicable marine-zone forecast is shown in the Marine Forecast section.</p></div><div id="selected-location-weather-detail" class="selected-location-weather-detail" {{if not (or .MarineForecastPeriods .MarineForecastAlerts .MarineForecastError)}}hidden{{end}}><div class="selected-location-weather-detail-head"><strong id="marine-forecast-heading">{{if .MarineForecastPeriods}}NWS Marine Forecast{{else}}NWS Forecast Zone / Alerts{{end}}</strong><span id="marine-forecast-zone" class="marine-forecast-zone" {{if not .MarineForecastZone}}hidden{{end}}>{{if .MarineForecastPeriods}}Marine zone{{else}}NWS forecast zone{{end}} {{.MarineForecastZone}}{{if .MarineForecastUpdated}} · Updated {{.MarineForecastUpdated}}{{end}}</span></div><div id="marine-forecast-alerts" class="marine-alerts" aria-label="Active National Weather Service alerts" {{if not .MarineForecastAlerts}}hidden{{end}}>{{range .MarineForecastAlerts}}<span class="marine-alert">⚠ NWS alert — {{.}}</span>{{end}}</div><div id="marine-forecast-periods" class="marine-periods" {{if not .MarineForecastPeriods}}hidden{{end}}>{{range .MarineForecastPeriods}}<div class="marine-period">{{if .Name}}<strong>{{.Name}}</strong>{{end}}{{if .Forecast}}<p>{{.Forecast}}</p>{{end}}</div>{{end}}</div><p id="marine-forecast-note" class="marine-forecast-note" {{if not .MarineForecastPeriods}}hidden{{end}}>Official NWS coastal marine-zone forecast for the zone containing the selected point. It applies to the broader marine zone, not specifically to the selected point.</p><p id="marine-forecast-error" class="marine-forecast-error" {{if not .MarineForecastError}}hidden{{end}}>{{if .MarineForecastError}}{{.MarineForecastError}}{{end}}</p></div></div></div></div><div class="map-controls"><span id="map-search-status" class="map-search-status" aria-live="polite"></span></div><div id="map-smoke-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-fire-perimeter-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-fire-detection-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-weather-overlay-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-air-temperature-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-pressure-status" class="map-layer-note" hidden aria-live="polite"></div><div id="map-smoke-legend" class="map-smoke-legend" hidden><span><i class="smoke-swatch light"></i>Light</span><span><i class="smoke-swatch medium"></i>Medium</span><span><i class="smoke-swatch heavy"></i>Heavy</span><span class="map-smoke-note">NOAA HMS satellite analysis; qualitative smoke density, not AQI.</span></div><div id="map-structure-status" class="map-structure-status" hidden></div><div id="map-windbarb-status" class="map-windbarb-status" hidden></div><div id="map-saildrone-status" class="map-saildrone-status" hidden></div><div id="map-alertcalifornia-status" class="map-alertcalifornia-status" hidden aria-live="polite"></div><div id="map-swell-status" class="map-swell-status" hidden aria-hidden="true" style="display:none!important"></div><div id="map-swell-legend" class="map-swell-legend" hidden><strong>Swell height</strong><span>0</span><span class="map-swell-gradient" aria-hidden="true"></span><span>20+ ft</span><span>· arrows: swell travel direction</span></div><div class="map-layer-note">Drag the handle directly below the map to make the map taller or shorter. Keyboard users can focus the handle and use ↑/↓ (Shift for larger steps).</div><div class="info-popup-row map-info-popup-row"><button id="map-legend-open" class="info-popup-open ui-button" type="button" aria-haspopup="dialog" aria-controls="map-legend-modal">ⓘ Map legend</button><button id="map-sources-open" class="info-popup-open ui-button" type="button" aria-haspopup="dialog" aria-controls="map-sources-modal">ⓘ Map &amp; data sources</button></div><div id="map-legend-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-legend-title"><div class="info-popup-dialog-head"><h2 id="map-legend-title">Map Legend</h2><button id="map-legend-close" class="info-popup-close" type="button" aria-label="Close map legend" title="Close">×</button></div><div class="info-popup-body"><div class="map-legend"><span class="map-key"><span class="map-symbol request" aria-hidden="true">★</span>Selected location</span><span class="map-key"><span class="map-symbol wind" aria-hidden="true">▲</span>Selected wind station</span><span class="map-key"><span class="map-symbol wind-candidate legend-triangle" aria-hidden="true"><span></span></span>Nearby wind stations</span><span class="map-key"><span class="map-symbol current" aria-hidden="true">◆</span>Selected currents station</span><span class="map-key"><span class="map-dot saildrone" aria-hidden="true"></span>Saildrone latest position</span><span class="map-key"><span aria-hidden="true">📷</span> ALERTCalifornia camera (number = cluster)</span></div><div class="map-legend"><span class="map-key"><span class="map-dot marine marina" aria-hidden="true"></span>Marina</span><span class="map-key"><span class="map-dot marine boatyard" aria-hidden="true"></span>Boatyard &amp; repair</span><span class="map-key"><span class="map-dot marine fuel" aria-hidden="true"></span>Fuel dock</span><span class="map-key"><span class="map-dot marine ramp" aria-hidden="true"></span>Launch ramp</span><span class="map-key"><span class="map-dot marine ferry" aria-hidden="true"></span>Ferry terminal</span><span class="map-key"><span class="map-dot marine supply" aria-hidden="true"></span>Marine supply</span><span class="map-key"><span class="map-dot marine club" aria-hidden="true"></span>Yacht club</span><span class="map-key"><span class="map-dot marine restaurant" aria-hidden="true"></span>Waterfront restaurant</span></div><div id="map-air-temperature-legend" class="map-air-temperature-legend" hidden><div class="map-air-temperature-legend-head"><strong>Air temperature</strong><span id="map-air-temperature-legend-context" class="map-air-temperature-legend-context">NOW · Observed · NDBC + METAR</span></div><div class="map-air-temperature-scale"><span>−10°F</span><span class="map-air-temperature-gradient" aria-hidden="true"></span><span>110°F</span></div></div></div></div></div><div id="map-sources-modal" class="info-popup-modal" hidden><div class="info-popup-dialog" role="dialog" aria-modal="true" aria-labelledby="map-sources-title"><div class="info-popup-dialog-head"><h2 id="map-sources-title">Map &amp; Data Sources</h2><button id="map-sources-close" class="info-popup-close" type="button" aria-label="Close map and data sources" title="Close">×</button></div><div class="info-popup-body"><p class="map-sources-note">Base maps: <strong>Street Map</strong> uses OpenStreetMap; <strong>Nautical Chart</strong> uses NOAA's ENC-based Chart Display Service and is available at Zoom 9 or closer; <strong>Satellite</strong> uses Esri World Imagery; <strong>Hybrid</strong> combines Esri imagery with place/boundary labels. NWS forecast-zone, NOAA smoke, <strong>Active Fire Perimeters</strong>, <strong>Satellite Fire Detections</strong>, <strong>Air Temperature Heat Map (CONUS: NOW observations + NOAA/NWS NDFD future forecast)</strong>, <strong>Global Swell Forecast</strong>, <strong>Satellite Cloud Cover</strong>, radar, and <strong>ALERTCalifornia Cameras</strong> remain independent overlays. Active Fire Perimeters use the National Interagency Fire Center WFIGS current perimeter service. Satellite Fire Detections use NOAA Hazard Mapping System active-fire detections. Global Swell Forecast uses PacIOOS public ERDDAP access to the NOAA/NCEP WaveWatch III global model. ALERTCalifornia camera locations and current imagery come from the official UC San Diego/ALERTCalifornia ArcGIS feed. The nautical chart layer is for planning/reference and does not replace official navigation products.</p></div></div></div><div id="map-station-list" class="map-station-list" aria-live="polite">{{if .MapHasWind}}<div class="meta"><strong>Selected wind source:</strong> {{.MapWindStation}}</div>{{end}}{{if .WindCandidates}}<div class="map-station-list-title">Nearby Wind Stations</div><div class="map-station-table-wrap"><table class="map-station-table"><thead><tr><th>Station</th><th>Name</th><th>Wind</th><th>Age</th><th>From selected location</th></tr></thead><tbody>{{range .WindCandidates}}<tr><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Station}}</a></td><td><a class="map-station-report-link" href="{{.URL}}" data-base-href="{{.URL}}">{{.Name}}</a></td><td>{{if .Wind}}{{.Wind}}{{else}}—{{end}}</td><td>{{if .ObservationAge}}{{.ObservationAge}}{{else}}—{{end}}</td><td>{{.Distance}}</td></tr>{{end}}</tbody></table></div>{{end}}</div></section>
 {{if .WindError}}<section class="card full error-card"><h2>Wind station selection unavailable</h2><p class="error-message">{{.WindError}}</p><p class="error-help">The page is still available so you can inspect the request and nearby station diagnostics. Try nearby coordinates or an explicit NDBC station ID.</p></section>{{end}}
 <section class="card full wind-card"><div class="wind-card-head"><h2>Wind</h2></div>
 <div class="metrics">
@@ -949,16 +949,11 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   var airTemperatureTooltipTimer = null;
   var airTemperatureTooltipSerial = 0;
   var airTemperatureLastPointerLatLng = null;
-  var airTemperaturePlaybackTimer = null;
-  var airTemperaturePlaybackActive = false;
-  var airTemperaturePlaybackRAF = null;
-  var airTemperaturePlaybackSpeed = 1;
-  var airTemperaturePlaybackRangeHours = 24;
+  var airTemperatureForecastMaxHours = 24;
   var airTemperatureForecastGridCache = {};
   var airTemperatureForecastGridCurrent = null;
-  var airTemperatureForecastGridNext = null;
-  var airTemperatureForecastGridBlendAlpha = 0;
   var airTemperatureForecastDisplayHours = 0;
+  var airTemperatureRequestedHours = 0;
   var airTemperatureManualTargetSerial = 0;
   var pressureLineLayer = L.layerGroup();
   var pressureLabelLayer = L.layerGroup();
@@ -2027,97 +2022,19 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       controls.hidden = false;
       controls.classList.toggle("is-disabled", !show);
     }
-    var slider = document.getElementById("map-air-temperature-hours");
-    if (slider) slider.disabled = !show;
-    var playButton = document.getElementById("map-air-temperature-play");
-    if (playButton) playButton.disabled = !show;
     var transport = document.getElementById("map-air-temperature-transport");
     if (transport) transport.hidden = !show;
+    updateAirTemperatureArrowStates();
   }
 
-  function updateAirTemperaturePlaybackButton() {
-    [document.getElementById("map-air-temperature-play"), document.getElementById("map-air-temperature-map-play")].forEach(function(button) {
-      if (!button) return;
-      button.textContent = airTemperaturePlaybackActive ? "❚❚ Pause" : "▶ Play";
-      button.setAttribute("aria-pressed", airTemperaturePlaybackActive ? "true" : "false");
-      button.setAttribute("aria-label", airTemperaturePlaybackActive ? "Pause air temperature timeline" : "Play air temperature timeline");
-      button.classList.toggle("is-playing", airTemperaturePlaybackActive);
-    });
-  }
-
-  function stopAirTemperaturePlayback() {
-    airTemperaturePlaybackActive = false;
-    if (airTemperaturePlaybackTimer) {
-      window.clearTimeout(airTemperaturePlaybackTimer);
-      airTemperaturePlaybackTimer = null;
-    }
-    if (airTemperaturePlaybackRAF) {
-      window.cancelAnimationFrame(airTemperaturePlaybackRAF);
-      airTemperaturePlaybackRAF = null;
-    }
-    airTemperatureForecastGridNext = null;
-    airTemperatureForecastGridBlendAlpha = 0;
-    updateAirTemperaturePlaybackButton();
-    updateAirTemperatureForecastTimeLabel(airTemperatureForecastDisplayHours);
-  }
-
-  function scheduleAirTemperaturePlaybackAdvance() {
-    if (!airTemperaturePlaybackActive || !mapState.airTemperatureOverlayVisible) return;
-    if (airTemperaturePlaybackTimer) window.clearTimeout(airTemperaturePlaybackTimer);
-    var current = Math.max(0, Number(airTemperatureForecastDisplayHours || mapState.airTemperatureForecastHours || 0));
-    var delay = current > 0.001 ? 0 : Math.max(80, 350 / Math.max(0.5, Number(airTemperaturePlaybackSpeed) || 1));
-    airTemperaturePlaybackTimer = window.setTimeout(function() {
-      airTemperaturePlaybackTimer = null;
-      if (!airTemperaturePlaybackActive || !mapState.airTemperatureOverlayVisible) return;
-      var current = Math.max(0, Number(airTemperatureForecastDisplayHours || mapState.airTemperatureForecastHours || 0));
-      var range = Math.max(3, Math.min(24, Number(airTemperaturePlaybackRangeHours) || 24));
-      if (current >= range - 0.001) {
-        mapState.airTemperatureForecastHours = 0;
-        airTemperatureForecastDisplayHours = 0;
-        var resetSlider = document.getElementById("map-air-temperature-hours");
-        if (resetSlider) resetSlider.value = "0";
-        hideAirTemperaturePointerTooltip();
-        updateAirTemperatureForecastTimeLabel(0);
-        loadObservedAirTemperature(true);
-        return;
-      }
-      var nextAnchor = current <= 0.001
-        ? Math.min(range, 3)
-        : Math.min(range, (Math.floor(current / 3 + 1e-7) + 1) * 3);
-      if (nextAnchor <= current + 0.001) nextAnchor = Math.min(range, current + 3);
-      animateAirTemperatureForecastStep(current, nextAnchor);
-    }, delay);
-  }
-
-  function airTemperaturePlaybackFrameSettled(success) {
-    if (!airTemperaturePlaybackActive) return;
-    if (!success) {
-      stopAirTemperaturePlayback();
-      return;
-    }
-    scheduleAirTemperaturePlaybackAdvance();
-  }
-
-  function startAirTemperaturePlayback() {
-    if (!mapState.airTemperatureOverlayVisible) return;
-    var slider = document.getElementById("map-air-temperature-hours");
-    var current = slider ? Number(slider.value) : Number(airTemperatureForecastDisplayHours || mapState.airTemperatureForecastHours || 0);
-    if (!Number.isFinite(current)) current = 0;
-    var range = Math.max(3, Math.min(24, Number(airTemperaturePlaybackRangeHours) || 24));
-    current = Math.max(0, Math.min(range, Math.round(current * 4) / 4));
-    if (current >= range - 0.001) current = 0;
-    mapState.airTemperatureForecastHours = current;
-    airTemperatureForecastDisplayHours = current;
-    if (slider) slider.value = String(current);
-    airTemperaturePlaybackActive = true;
-    updateAirTemperaturePlaybackButton();
-    if (airTemperaturePlaybackTimer) {
-      window.clearTimeout(airTemperaturePlaybackTimer);
-      airTemperaturePlaybackTimer = null;
-    }
-    hideAirTemperaturePointerTooltip();
-    updateAirTemperatureForecastTimeLabel(current);
-    scheduleAirTemperaturePlaybackAdvance();
+  function updateAirTemperatureArrowStates() {
+    var active=!!mapState.airTemperatureOverlayVisible;
+    var now=document.getElementById("map-air-temperature-now");
+    var prev=document.getElementById("map-air-temperature-prev");
+    var next=document.getElementById("map-air-temperature-next");
+    if (now) now.disabled=!active || airTemperatureRequestedHours<=0;
+    if (prev) prev.disabled=!active || airTemperatureRequestedHours<=0;
+    if (next) next.disabled=!active || airTemperatureRequestedHours>=airTemperatureForecastMaxHours;
   }
 
   function airTemperatureColor(tempF) {
@@ -2198,7 +2115,9 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       nearest.splice(insertAt,0,{miles:miles,temp:oTemp});
       if (nearest.length > neighborCount) nearest.pop();
     }
-    if (!nearest.length) return null;
+    // A lone buoy or remote station must not paint a circular island of
+    // interpolated temperature over hundreds of miles of empty ocean.
+    if (nearest.length < 2) return null;
     if (nearest[0].miles <= 4) return {temp:nearest[0].temp, nearestMiles:nearest[0].miles};
     var weighted=0, total=0;
     for (var n=0; n<nearest.length; n++) {
@@ -2246,8 +2165,11 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     // temperature far offshore where the station network is sparse.
     var zoom = map.getZoom();
     var coreRadiusMiles = Math.max(75, Math.min(240, 300 / Math.pow(1.45, Math.max(0, zoom-4))));
-    var outerRadiusMiles = Math.min(320, coreRadiusMiles * 1.35);
-    var fullOpacityRadiusMiles = coreRadiusMiles * 0.58;
+    // Keep sparse offshore regions transparent instead of extrapolating a
+    // single coastal station into a broad, smooth Pacific temperature blob.
+    var outerRadiusMiles = Math.min(coreRadiusMiles * 1.35,
+      Math.max(80,160-25*Math.max(0,zoom-4)));
+    var fullOpacityRadiusMiles = Math.min(coreRadiusMiles * 0.58,outerRadiusMiles*0.52);
     var neighborCount = 8;
 
     for (var y=0; y<h; y++) {
@@ -2360,10 +2282,13 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       setAirTemperatureStatus(map.getZoom() < airTemperatureMinZoom
         ? "Air Temperature · Zoom to 4+ over the contiguous U.S. to display the heat map."
         : "Air Temperature · This overlay is limited to the contiguous U.S.", false);
-      airTemperaturePlaybackFrameSettled(false);
       return;
     }
-    if (!force && airTemperatureBoundsContain(airTemperatureLoadedBounds, visibleBounds) && airTemperatureLayer) return;
+    if (!force && airTemperatureBoundsContain(airTemperatureLoadedBounds, visibleBounds) && airTemperatureLayer) {
+      showAirTemperatureLegend(true);
+      setAirTemperatureStatus("Air Temperature · Observed · current heat map restored.",false);
+      return;
+    }
     var requestBounds = bufferedAirTemperatureBounds(visibleBounds);
     var serial = ++airTemperatureRequestSerial;
     setAirTemperatureStatus("Air Temperature · Observed · loading current observations…", false);
@@ -2378,13 +2303,10 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
           removeAirTemperatureObservedLayer();
           showAirTemperatureLegend(false);
           setAirTemperatureStatus("Air Temperature · Observed · not enough current temperature observations near this view.", true);
-          airTemperaturePlaybackFrameSettled(false);
           return;
         }
         var next = L.imageOverlay(dataURL, requestBounds, {pane:"airTemperaturePane", opacity:1, interactive:false});
-        transitionAirTemperatureLayer(next, 1, "observed", requestBounds, function() {
-          airTemperaturePlaybackFrameSettled(true);
-        });
+        transitionAirTemperatureLayer(next, 1, "observed", requestBounds);
         airTemperatureForecastDisplayHours=0;
         var slider=document.getElementById("map-air-temperature-hours");
         if (slider) slider.value="0";
@@ -2405,7 +2327,6 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
         removeAirTemperatureObservedLayer();
         showAirTemperatureLegend(false);
         setAirTemperatureStatus("Air Temperature · Observed could not be loaded: "+String(err&&err.message?err.message:err||"unknown error"), true);
-        airTemperaturePlaybackFrameSettled(false);
       });
   }
 
@@ -2416,6 +2337,14 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 
   function airTemperatureForecastGridSpec(bounds) {
     if (!bounds) return null;
+    // Use a single, geographically anchored national raster at Zoom 4–5.
+    // Viewport-sized exports gave different NOAA footprints and intermittent
+    // rectangular gaps merely from changing zoom or panning.
+    if (map.getZoom()<=5) return {
+      bounds:L.latLngBounds([airTemperatureCONUS.south,airTemperatureCONUS.west],
+        [airTemperatureCONUS.north,airTemperatureCONUS.east]),
+      width:320,height:180
+    };
     var south = Math.max(airTemperatureCONUS.south, bounds.getSouth());
     var north = Math.min(airTemperatureCONUS.north, bounds.getNorth());
     var west = Math.max(airTemperatureCONUS.west, bounds.getWest());
@@ -2451,12 +2380,15 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     var raw=window.atob(String(payload.data||""));
     if (raw.length !== width*height*2) throw new Error("invalid grid payload");
     var temps=new Float32Array(width*height);
+    var validCells=0;
     for (var i=0;i<temps.length;i++) {
       var lo=raw.charCodeAt(i*2), hi=raw.charCodeAt(i*2+1);
       var u=lo | (hi<<8);
       var v=u>=0x8000 ? u-0x10000 : u;
       temps[i]=v===-32768 ? NaN : v/10;
+      if (Number.isFinite(temps[i])) validCells++;
     }
+    if (!validCells) throw new Error("NDFD forecast grid has no usable temperature cells");
     return {
       west:Number(payload.west),south:Number(payload.south),east:Number(payload.east),north:Number(payload.north),
       width:width,height:height,hours:Number(payload.hours),temps:temps
@@ -2467,7 +2399,12 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     var key=airTemperatureForecastGridKey(spec,hours);
     if (!force && airTemperatureForecastGridCache[key]) return Promise.resolve(airTemperatureForecastGridCache[key]);
     return fetch(airTemperatureForecastGridURL(spec,hours),{headers:{"Accept":"application/json"},cache:"no-store"})
-      .then(function(response){if(!response.ok) throw new Error("HTTP "+response.status);return response.json();})
+      .then(function(response){
+        if (!response.ok) return response.text().then(function(message){
+          throw new Error("HTTP "+response.status+": "+String(message||"forecast service unavailable").trim().slice(0,160));
+        });
+        return response.json();
+      })
       .then(function(payload){
         var grid=decodeAirTemperatureForecastGrid(payload);
         airTemperatureForecastGridCache[key]=grid;
@@ -2477,23 +2414,15 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       });
   }
 
-  function paintAirTemperatureForecastCanvas(canvas, grid, nextGrid, alpha) {
+  function paintAirTemperatureForecastCanvas(canvas, grid) {
     if (!canvas || !grid) return false;
     if (canvas.width!==grid.width) canvas.width=grid.width;
     if (canvas.height!==grid.height) canvas.height=grid.height;
     var ctx=canvas.getContext("2d");
     if (!ctx) return false;
     var image=ctx.createImageData(grid.width,grid.height);
-    var blend=nextGrid && nextGrid.width===grid.width && nextGrid.height===grid.height ? nextGrid : null;
-    alpha=Math.max(0,Math.min(1,Number(alpha)||0));
     for (var i=0;i<grid.temps.length;i++) {
-      var t0=grid.temps[i], t=t0;
-      if (blend) {
-        var t1=blend.temps[i];
-        if (Number.isFinite(t0) && Number.isFinite(t1)) t=t0+(t1-t0)*alpha;
-        else if (!Number.isFinite(t0) && Number.isFinite(t1)) t=t1;
-        else if (Number.isFinite(t0) && !Number.isFinite(t1)) t=t0;
-      }
+      var t=grid.temps[i];
       if (!Number.isFinite(t)) continue;
       var rgb=airTemperatureColor(t);
       var off=i*4;
@@ -2553,7 +2482,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     return L.latLngBounds([grid.south,grid.west],[grid.north,grid.east]);
   }
 
-  function displayAirTemperatureForecastGrid(grid, nextGrid, alpha, settledCallback) {
+  function displayAirTemperatureForecastGrid(grid, settledCallback) {
     if (!grid) return false;
     var bounds=gridBounds(grid);
     var currentBounds = airTemperatureForecastLayer && airTemperatureForecastLayer.getBounds
@@ -2565,13 +2494,19 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       Math.abs(currentBounds.getNorth()-bounds.getNorth())<0.0001;
     if (airTemperatureForecastLayer && map.hasLayer(airTemperatureForecastLayer) &&
         airTemperatureForecastLayer.getCanvas && sameBounds) {
-      if (!paintAirTemperatureForecastCanvas(airTemperatureForecastLayer.getCanvas(),grid,nextGrid,alpha)) return false;
+      if (!paintAirTemperatureForecastCanvas(airTemperatureForecastLayer.getCanvas(),grid)) return false;
       if (typeof settledCallback==="function") settledCallback();
       return true;
     }
     var next=new AirTemperatureCanvasOverlay(bounds,{pane:"airTemperaturePane",opacity:0.78});
-    if (!paintAirTemperatureForecastCanvas(next.getCanvas(),grid,nextGrid,alpha)) return false;
-    transitionAirTemperatureLayer(next,0.78,"forecast",bounds,settledCallback);
+    if (!paintAirTemperatureForecastCanvas(next.getCanvas(),grid)) return false;
+    // Manual selection: display one complete NOAA frame atomically, with no
+    // animation callback that could later overwrite another slider selection.
+    next.addTo(map);
+    removeAirTemperatureObservedLayer();
+    removeAirTemperatureForecastLayer();
+    airTemperatureForecastLayer=next;
+    if (typeof settledCallback==="function") settledCallback();
     return true;
   }
 
@@ -2589,192 +2524,82 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     if (!el) return;
     var hours = Number.isFinite(Number(previewHours)) ? Number(previewHours) : Number(airTemperatureForecastDisplayHours||mapState.airTemperatureForecastHours||0);
     el.hidden = !mapState.airTemperatureOverlayVisible;
-    el.classList.toggle("is-playing", !!airTemperaturePlaybackActive);
+    el.classList.remove("is-error");
+    el.removeAttribute("title");
     if (hours<=0.001) {
       el.textContent = "Air Temperature · NOW · Observed";
-    } else if (airTemperaturePlaybackActive && Math.abs(hours/3-Math.round(hours/3))>0.01) {
-      el.textContent = "Air Temperature · "+formatAirTemperatureOffset(hours)+" · Interpolated forecast";
     } else {
       el.textContent = "Air Temperature · "+formatAirTemperatureOffset(hours)+" · Forecast";
     }
-    syncAirTemperatureSliders(hours);
-    updateAirTemperatureFooterScale(hours);
     updateAirTemperatureLegendContext(hours);
   }
 
-  function animateAirTemperatureTimelineIndicator(fromHours,toHours,durationMS) {
-    if (!airTemperaturePlaybackActive) return;
-    var slider=document.getElementById("map-air-temperature-hours");
-    var started=performance.now();
-    function tick(now) {
-      if (!airTemperaturePlaybackActive) return;
-      var p=Math.max(0,Math.min(1,(now-started)/Math.max(1,durationMS||320)));
-      var eased=p*p*(3-2*p);
-      var shown=fromHours+(toHours-fromHours)*eased;
-      airTemperatureForecastDisplayHours=shown;
-      if (slider) slider.value=String(Math.round(shown*20)/20);
-      updateAirTemperatureForecastTimeLabel(shown);
-      if (p<1) window.requestAnimationFrame(tick);
+  function showAirTemperatureForecastFailure(requested, reason) {
+    var message=String(reason&&reason.message?reason.message:reason||"unknown error");
+    var badge=document.getElementById("map-air-temperature-time");
+    if (badge) {
+      badge.textContent="Air Temperature · +"+requested+"h unavailable · "+message+" · Showing "+formatAirTemperatureOffset(airTemperatureForecastDisplayHours);
+      badge.classList.add("is-error");
+      badge.title=badge.textContent;
     }
-    window.requestAnimationFrame(tick);
+    setAirTemperatureStatus("Air Temperature · +"+requested+"h forecast unavailable: "+message,true);
+    updateAirTemperatureArrowStates();
   }
 
-  function airTemperatureForecastAnchorPair(hours) {
-    hours=Math.max(0,Math.min(24,Number(hours)||0));
-    var lower=Math.max(0,Math.floor(hours/3)*3);
-    var upper=Math.min(24,lower+3);
-    if (hours>=24-0.001) { lower=24; upper=24; }
-    return {lower:lower,upper:upper,alpha:upper===lower?0:(hours-lower)/(upper-lower)};
-  }
-
-  function showAirTemperatureForecastAtManual(hours) {
+  function showAirTemperatureForecastAtManual(hours, backgroundRefresh) {
     var visibleBounds=airTemperatureVisibleCONUSBounds();
+    var requested=Math.max(3,Math.min(airTemperatureForecastMaxHours,Math.round(Number(hours)/3)*3));
+    var keepDisplayedFrame=!!backgroundRefresh && !!airTemperatureForecastLayer &&
+      requested===airTemperatureForecastDisplayHours;
+    var targetSerial=++airTemperatureManualTargetSerial;
+    ++airTemperatureRequestSerial;
     if (!visibleBounds) {
-      showAirTemperatureLegend(false);
-      setAirTemperatureStatus(map.getZoom()<airTemperatureMinZoom
-        ? "Air Temperature · Forecast · Zoom to 4+ over the contiguous U.S. to display temperature."
-        : "Air Temperature · Forecast is limited to the contiguous U.S.",false);
+      if (!keepDisplayedFrame) {
+        showAirTemperatureLegend(false);
+        showAirTemperatureForecastFailure(requested,"Forecast available over CONUS at Zoom 4+");
+      }
       return;
     }
     var spec=airTemperatureForecastGridSpec(visibleBounds);
-    hours=Math.max(0,Math.min(Number(airTemperaturePlaybackRangeHours)||24,Number(hours)||0));
-    if (!spec) return;
-    var pair=airTemperatureForecastAnchorPair(hours);
-    var targetSerial=++airTemperatureManualTargetSerial;
-    showAirTemperatureLegend(true);
-    setAirTemperatureStatus("Air Temperature · Forecast · loading NOAA/NWS NDFD grid…",false);
-    Promise.all([
-      fetchAirTemperatureForecastGrid(spec,pair.lower,false),
-      pair.upper===pair.lower ? Promise.resolve(null) : fetchAirTemperatureForecastGrid(spec,pair.upper,false)
-    ]).then(function(grids){
-      if (!mapState.airTemperatureOverlayVisible || targetSerial!==airTemperatureManualTargetSerial || Math.abs(Number(mapState.airTemperatureForecastHours||0)-hours)>0.001) return;
-      var lowerGrid=grids[0], upperGrid=grids[1];
-      airTemperatureForecastGridCurrent=lowerGrid;
-      airTemperatureForecastGridNext=upperGrid;
-      airTemperatureForecastGridBlendAlpha=pair.alpha;
-      airTemperatureForecastDisplayHours=hours;
-      displayAirTemperatureForecastGrid(lowerGrid,upperGrid,pair.alpha);
-      updateAirTemperatureForecastTimeLabel(hours);
-      setAirTemperatureStatus("Air Temperature · Forecast · NOAA/NWS NDFD · "+formatAirTemperatureOffset(hours)+".",false);
-    }).catch(function(){
+    if (!spec) {
+      if (!keepDisplayedFrame) showAirTemperatureForecastFailure(requested,"Invalid map bounds");
+      return;
+    }
+    if (!keepDisplayedFrame) setAirTemperatureStatus("Air Temperature · Loading NOAA/NWS NDFD +"+requested+"h forecast…",false);
+    // Keep the last rendered map visible while fetching the requested frame.
+    var timeStatus=document.getElementById("map-air-temperature-time");
+    if (timeStatus && !keepDisplayedFrame) timeStatus.textContent="Air Temperature · Loading +"+requested+"h forecast…";
+    fetchAirTemperatureForecastGrid(spec,requested,false).then(function(grid) {
       if (!mapState.airTemperatureOverlayVisible || targetSerial!==airTemperatureManualTargetSerial) return;
-      setAirTemperatureStatus("Air Temperature forecast grid could not be loaded from NOAA/NWS NDFD.",true);
+      if (!displayAirTemperatureForecastGrid(grid,function() {
+        if (!mapState.airTemperatureOverlayVisible || targetSerial!==airTemperatureManualTargetSerial) return;
+        airTemperatureForecastGridCurrent=grid;
+        airTemperatureForecastDisplayHours=requested;
+        airTemperatureRequestedHours=requested;
+        updateAirTemperatureArrowStates();
+        mapState.airTemperatureForecastHours=requested;
+        updateAirTemperatureForecastTimeLabel(requested);
+        showAirTemperatureLegend(true);
+        setAirTemperatureStatus("Air Temperature · Forecast · NOAA/NWS NDFD +"+requested+"h.",false);
+      })) {
+        if (!keepDisplayedFrame) showAirTemperatureForecastFailure(requested,"Forecast frame could not be rendered");
+      }
+    }).catch(function(err) {
+      if (!mapState.airTemperatureOverlayVisible || targetSerial!==airTemperatureManualTargetSerial) return;
+      if (!keepDisplayedFrame) showAirTemperatureForecastFailure(requested,err);
+      // A viewport refresh must never downgrade an already-rendered frame
+      // just because NOAA returned an empty replacement grid.
     });
   }
 
   function loadForecastAirTemperature() {
-    var requestedHours=Number(mapState.airTemperatureForecastHours||0);
-    if (requestedHours>0 && Math.abs(requestedHours/3-Math.round(requestedHours/3))>0.001) {
-      showAirTemperatureForecastAtManual(requestedHours);
-      return;
+    var hours=Math.round(Number(mapState.airTemperatureForecastHours||0)/3)*3;
+    if (hours>0) showAirTemperatureForecastAtManual(hours,true);
+    else {
+      mapState.airTemperatureForecastHours=0;
+      loadObservedAirTemperature(false);
     }
-    var visibleBounds=airTemperatureVisibleCONUSBounds();
-    if (!visibleBounds) {
-      showAirTemperatureLegend(false);
-      setAirTemperatureStatus(map.getZoom()<airTemperatureMinZoom
-        ? "Air Temperature · Forecast · Zoom to 4+ over the contiguous U.S. to display temperature."
-        : "Air Temperature · Forecast is limited to the contiguous U.S.",false);
-      airTemperaturePlaybackFrameSettled(false);
-      return;
-    }
-    var spec=airTemperatureForecastGridSpec(visibleBounds);
-    var hours=Number(mapState.airTemperatureForecastHours||0);
-    if (!spec || hours<=0) {airTemperaturePlaybackFrameSettled(false);return;}
-    var serial=++airTemperatureRequestSerial;
-    showAirTemperatureLegend(true);
-    setAirTemperatureStatus("Air Temperature · Forecast · loading NOAA/NWS NDFD +"+hours+"h grid…",false);
-    fetchAirTemperatureForecastGrid(spec,hours,false)
-      .then(function(grid){
-        if (!mapState.airTemperatureOverlayVisible || Number(mapState.airTemperatureForecastHours||0)!==hours || serial!==airTemperatureRequestSerial) return;
-        airTemperatureForecastGridCurrent=grid;
-        airTemperatureForecastGridNext=null;
-        airTemperatureForecastGridBlendAlpha=0;
-        var previousDisplay=airTemperatureForecastDisplayHours;
-        var slider=document.getElementById("map-air-temperature-hours");
-        if (airTemperaturePlaybackActive && previousDisplay<=0.001 && hours===3) {
-          animateAirTemperatureTimelineIndicator(0,3,360);
-        } else {
-          airTemperatureForecastDisplayHours=hours;
-          if (slider) slider.value=String(hours);
-          updateAirTemperatureForecastTimeLabel(hours);
-        }
-        displayAirTemperatureForecastGrid(grid,null,0,function(){
-          airTemperatureForecastDisplayHours=hours;
-          if (slider) slider.value=String(hours);
-          updateAirTemperatureForecastTimeLabel(hours);
-          airTemperaturePlaybackFrameSettled(true);
-        });
-        showAirTemperatureLegend(true);
-        setAirTemperatureStatus("Air Temperature · Forecast · NOAA/NWS NDFD decoded temperature grid · +"+hours+"h · client-rendered.",false);
-        var next=hours<24?hours+3:null;
-        if (next) fetchAirTemperatureForecastGrid(spec,next,false).catch(function(){});
-      })
-      .catch(function(){
-        if (!mapState.airTemperatureOverlayVisible || serial!==airTemperatureRequestSerial) return;
-        setAirTemperatureStatus("Air Temperature · Forecast grid could not be loaded from NOAA/NWS NDFD.",true);
-        airTemperaturePlaybackFrameSettled(false);
-      });
   }
-
-  function animateAirTemperatureForecastStep(fromHours,toHours) {
-    if (!airTemperaturePlaybackActive || !mapState.airTemperatureOverlayVisible) return;
-    var visibleBounds=airTemperatureVisibleCONUSBounds();
-    var spec=airTemperatureForecastGridSpec(visibleBounds);
-    if (!spec) {stopAirTemperaturePlayback();return;}
-    fromHours=Math.max(0,Number(fromHours)||0);
-    toHours=Math.max(fromHours,Number(toHours)||0);
-    var lower=Math.max(0,Math.floor(fromHours/3)*3);
-    var upper=Math.min(24,lower+3);
-    if (fromHours>=upper-0.001) { lower=upper; upper=Math.min(24,upper+3); }
-    if (upper<=lower) {stopAirTemperaturePlayback();return;}
-    var serial=++airTemperatureRequestSerial;
-    Promise.all([
-      fetchAirTemperatureForecastGrid(spec,lower,false),
-      fetchAirTemperatureForecastGrid(spec,upper,false)
-    ]).then(function(grids){
-      if (!airTemperaturePlaybackActive || serial!==airTemperatureRequestSerial) return;
-      var lowerGrid=grids[0], upperGrid=grids[1];
-      airTemperatureForecastGridCurrent=lowerGrid;
-      airTemperatureForecastGridNext=upperGrid;
-      var nextPreload=Math.min(24,upper+3);
-      if (nextPreload>upper) fetchAirTemperatureForecastGrid(spec,nextPreload,false).catch(function(){});
-      var span=Math.max(0.001,toHours-fromHours);
-      var duration=(1350*(span/3))/Math.max(0.5,Number(airTemperaturePlaybackSpeed)||1);
-      var start=performance.now(), lastDraw=0;
-      function frame(now){
-        if (!airTemperaturePlaybackActive || serial!==airTemperatureRequestSerial) return;
-        var p=Math.max(0,Math.min(1,(now-start)/Math.max(1,duration)));
-        var shown=fromHours+(toHours-fromHours)*p;
-        var alpha=Math.max(0,Math.min(1,(shown-lower)/(upper-lower)));
-        airTemperatureForecastGridBlendAlpha=alpha;
-        airTemperatureForecastDisplayHours=shown;
-        if (now-lastDraw>=45 || p>=1) {
-          displayAirTemperatureForecastGrid(lowerGrid,upperGrid,alpha);
-          var slider=document.getElementById("map-air-temperature-hours");
-          if (slider) slider.value=String(Math.round(shown*4)/4);
-          updateAirTemperatureForecastTimeLabel(shown);
-          lastDraw=now;
-        }
-        if (p<1) {
-          airTemperaturePlaybackRAF=window.requestAnimationFrame(frame);
-          return;
-        }
-        airTemperaturePlaybackRAF=null;
-        airTemperatureForecastGridCurrent=upperGrid;
-        airTemperatureForecastGridNext=null;
-        airTemperatureForecastGridBlendAlpha=0;
-        airTemperatureForecastDisplayHours=toHours;
-        mapState.airTemperatureForecastHours=toHours;
-        var slider=document.getElementById("map-air-temperature-hours");
-        if (slider) slider.value=String(Math.round(toHours*4)/4);
-        updateAirTemperatureForecastTimeLabel(toHours);
-        setAirTemperatureStatus("Air Temperature · Forecast · NOAA/NWS NDFD decoded temperature grid · "+formatAirTemperatureOffset(toHours)+" · client-rendered.",false);
-        scheduleAirTemperaturePlaybackAdvance();
-      }
-      airTemperaturePlaybackRAF=window.requestAnimationFrame(frame);
-    }).catch(function(){stopAirTemperaturePlayback();});
-  }
-
   function sampleAirTemperatureForecastGrid(grid, latlng) {
     if (!grid || !latlng) return NaN;
     var sw=map.options.crs.project(L.latLng(grid.south,grid.west));
@@ -2840,18 +2665,12 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       return;
     }
 
-    var t0=sampleAirTemperatureForecastGrid(airTemperatureForecastGridCurrent,latlng);
-    var temp=t0;
-    if (airTemperatureForecastGridNext) {
-      var t1=sampleAirTemperatureForecastGrid(airTemperatureForecastGridNext,latlng);
-      if (Number.isFinite(t0) && Number.isFinite(t1)) temp=t0+(t1-t0)*airTemperatureForecastGridBlendAlpha;
-    }
+    var temp=sampleAirTemperatureForecastGrid(airTemperatureForecastGridCurrent,latlng);
     if (!Number.isFinite(temp)) {
       showAirTemperaturePointerTooltip(latlng,"Forecast temperature unavailable");
       return;
     }
-    var shownHours=airTemperatureForecastGridNext ? airTemperatureForecastDisplayHours : hours;
-    showAirTemperaturePointerTooltip(latlng,Math.round(temp)+"°F · Forecast +"+Number(shownHours).toFixed(airTemperatureForecastGridNext?1:0)+"h · NDFD");
+    showAirTemperaturePointerTooltip(latlng,Math.round(temp)+"°F · Forecast +"+hours+"h · NDFD");
 
   }
 
@@ -2877,15 +2696,13 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   function setAirTemperatureOverlayVisible(visible) {
     mapState.airTemperatureOverlayVisible=!!visible;
     if (!mapState.airTemperatureOverlayVisible) {
-      stopAirTemperaturePlayback();
+      ++airTemperatureManualTargetSerial;
       airTemperatureRequestSerial++;
       if (airTemperatureRefreshTimer) { window.clearTimeout(airTemperatureRefreshTimer); airTemperatureRefreshTimer=null; }
       removeAirTemperatureObservedLayer();
       removeAirTemperatureForecastLayer();
       airTemperatureObservedSamples=[];
       airTemperatureForecastGridCurrent=null;
-      airTemperatureForecastGridNext=null;
-      airTemperatureForecastGridBlendAlpha=0;
       airTemperatureForecastGridCache={};
       hideAirTemperaturePointerTooltip();
       showAirTemperatureControls(false);
@@ -6530,79 +6347,20 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     });
   }
 
-  var airTemperatureMapHours = document.getElementById("map-air-temperature-map-hours");
-  var airTemperatureMapRangeEnd = document.getElementById("map-air-temperature-map-range-end");
-
-  function syncAirTemperatureSliders(hours) {
-    var value = Math.max(0, Math.min(
-      Math.max(3, Number(airTemperaturePlaybackRangeHours) || 24),
-      Math.round((Number(hours) || 0) * 4) / 4
-    ));
-    if (airTemperatureMapHours) airTemperatureMapHours.value = String(value);
-  }
-
-  function updateAirTemperatureFooterScale(hours) {
-    var range = Math.max(3, Math.min(24, Number(airTemperaturePlaybackRangeHours) || 24));
-    if (airTemperatureMapHours) {
-      airTemperatureMapHours.max = String(range);
-      airTemperatureMapHours.value = String(Math.max(0, Math.min(range, Number(hours) || 0)));
-    }
-    if (airTemperatureMapRangeEnd) airTemperatureMapRangeEnd.textContent = "+" + range + "h";
-  }
-
   function commitAirTemperatureHours(next) {
-    var maxHours=Math.max(3,Number(airTemperaturePlaybackRangeHours)||24);
-    next=Math.max(0,Math.min(maxHours,Math.round(Number(next)*4)/4));
-    stopAirTemperaturePlayback();
-    syncAirTemperatureSliders(next);
-    mapState.airTemperatureForecastHours=next;
-    airTemperatureForecastDisplayHours=next;
+    next=Math.max(0,Math.min(airTemperatureForecastMaxHours,Math.round(Number(next)/3)*3));
+    airTemperatureRequestedHours=next;
+    updateAirTemperatureArrowStates();
     hideAirTemperaturePointerTooltip();
-    updateAirTemperatureForecastTimeLabel(next);
     if (!mapState.airTemperatureOverlayVisible) return;
-    if (next<=0.001) loadObservedAirTemperature(false);
+    if (next<=0.001) {
+      ++airTemperatureManualTargetSerial;
+      mapState.airTemperatureForecastHours=0;
+      airTemperatureForecastDisplayHours=0;
+      updateAirTemperatureForecastTimeLabel(0);
+      loadObservedAirTemperature(false);
+    }
     else showAirTemperatureForecastAtManual(next);
-  }
-
-  function stepAirTemperatureHoursFromKey(event) {
-    var key=event.key;
-    if (!key && event.keyCode===37) key="ArrowLeft";
-    if (!key && event.keyCode===39) key="ArrowRight";
-    if (!key && event.keyCode===36) key="Home";
-    if (!key && event.keyCode===35) key="End";
-    if (key!=="ArrowLeft" && key!=="ArrowRight" && key!=="Home" && key!=="End") return false;
-    var current=Number(airTemperatureMapHours ? airTemperatureMapHours.value : airTemperatureForecastDisplayHours)||0;
-    var maxHours=Math.max(3,Number(airTemperaturePlaybackRangeHours)||24);
-    var next=current;
-    if (key==="ArrowLeft") next=Math.max(0,current-0.25);
-    else if (key==="ArrowRight") next=Math.min(maxHours,current+0.25);
-    else if (key==="Home") next=0;
-    else if (key==="End") next=maxHours;
-    event.preventDefault();
-    event.stopPropagation();
-    if (event.stopImmediatePropagation) event.stopImmediatePropagation();
-    if (Math.abs(next-current)>0.001) commitAirTemperatureHours(next);
-    return true;
-  }
-
-  if (airTemperatureMapHours) {
-    airTemperatureMapHours.value = String(mapState.airTemperatureForecastHours || 0);
-    updateAirTemperatureFooterScale(mapState.airTemperatureForecastHours || 0);
-    ["pointerdown","mousedown","touchstart"].forEach(function(name){
-      airTemperatureMapHours.addEventListener(name,function(){
-        window.setTimeout(function(){
-          try { airTemperatureMapHours.focus({preventScroll:true}); } catch (_) { try { airTemperatureMapHours.focus(); } catch (_) {} }
-        },0);
-      },{passive:true});
-    });
-    airTemperatureMapHours.addEventListener("input", function() {
-      stopAirTemperaturePlayback();
-      updateAirTemperatureForecastTimeLabel(Number(airTemperatureMapHours.value) || 0);
-    });
-    airTemperatureMapHours.addEventListener("change", function() {
-      commitAirTemperatureHours(Number(airTemperatureMapHours.value) || 0);
-    });
-    airTemperatureMapHours.addEventListener("keydown", stepAirTemperatureHoursFromKey, true);
   }
 
   var airTemperatureNow = document.getElementById("map-air-temperature-now");
@@ -6612,45 +6370,17 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     });
   }
 
-  var airTemperatureMapPlay = document.getElementById("map-air-temperature-map-play");
-  if (airTemperatureMapPlay) {
-    airTemperatureMapPlay.addEventListener("click", function() {
-      if (airTemperaturePlaybackActive) stopAirTemperaturePlayback();
-      else startAirTemperaturePlayback();
-    });
-  }
-
   var airTemperaturePrev = document.getElementById("map-air-temperature-prev");
   var airTemperatureNext = document.getElementById("map-air-temperature-next");
   if (airTemperaturePrev) airTemperaturePrev.addEventListener("click", function() {
-    var current = Number(mapState.airTemperatureForecastHours || 0);
-    commitAirTemperatureHours(Math.max(0, current - 0.25));
+    commitAirTemperatureHours(airTemperatureRequestedHours - 3);
   });
   if (airTemperatureNext) airTemperatureNext.addEventListener("click", function() {
-    var current = Number(mapState.airTemperatureForecastHours || 0);
-    commitAirTemperatureHours(Math.min(airTemperaturePlaybackRangeHours, current + 0.25));
+    commitAirTemperatureHours(airTemperatureRequestedHours + 3);
   });
-
-  var airTemperatureSpeed = document.getElementById("map-air-temperature-speed");
-  if (airTemperatureSpeed) airTemperatureSpeed.addEventListener("change", function() {
-    var speed = Number(airTemperatureSpeed.value);
-    airTemperaturePlaybackSpeed = speed===0.5 || speed===2 ? speed : 1;
-  });
-
-  var airTemperatureRange = document.getElementById("map-air-temperature-range");
-  if (airTemperatureRange) airTemperatureRange.addEventListener("change", function() {
-    var range = Number(airTemperatureRange.value);
-    airTemperaturePlaybackRangeHours = range===6 || range===12 ? range : 24;
-    updateAirTemperatureFooterScale(mapState.airTemperatureForecastHours || 0);
-    if (Number(mapState.airTemperatureForecastHours||0) > airTemperaturePlaybackRangeHours) {
-      commitAirTemperatureHours(airTemperaturePlaybackRangeHours);
-    } else {
-      syncAirTemperatureSliders(mapState.airTemperatureForecastHours || 0);
-    }
-  });
-
-  // Synchronize the temperature time control from restored map state immediately.
-  // NOW selects observations; every future slider step selects forecast guidance.
+  airTemperatureRequestedHours=Math.max(0,Math.min(airTemperatureForecastMaxHours,
+    Math.round(Number(mapState.airTemperatureForecastHours||0)/3)*3));
+  // NOW selects observations; each arrow selects one three-hour forecast frame.
   showAirTemperatureControls(!!mapState.airTemperatureOverlayVisible);
 
   map.on("mousemove", function(event) {
