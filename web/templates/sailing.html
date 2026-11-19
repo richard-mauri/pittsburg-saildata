@@ -953,6 +953,8 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   var airTemperaturePlaybackActive = false;
   var airTemperaturePlaybackRAF = null;
   var airTemperaturePlaybackSpeed = 1;
+  // At 1x, give each three-hour forecast interval six seconds to animate.
+  var airTemperaturePlaybackIntervalMS = 6000;
   var airTemperaturePlaybackRangeHours = 24;
   var airTemperatureForecastGridCache = {};
   var airTemperatureForecastGridCurrent = null;
@@ -2789,7 +2791,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       var nextPreload=Math.min(24,upper+3);
       if (nextPreload>upper) fetchAirTemperatureForecastGrid(spec,nextPreload,false).catch(function(){});
       var span=Math.max(0.001,toHours-fromHours);
-      var duration=(1350*(span/3))/Math.max(0.5,Number(airTemperaturePlaybackSpeed)||1);
+      var duration=(airTemperaturePlaybackIntervalMS*(span/3))/Math.max(0.5,Number(airTemperaturePlaybackSpeed)||1);
       var start=performance.now(), lastDraw=0;
       function frame(now){
         if (!airTemperaturePlaybackActive || serial!==airTemperatureRequestSerial) return;

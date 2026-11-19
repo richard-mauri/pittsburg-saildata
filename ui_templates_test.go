@@ -166,3 +166,19 @@ func TestAirTemperatureFirstForecastSkipsEmptyNDFDNowGrid(t *testing.T) {
 		}
 	}
 }
+
+func TestAirTemperaturePlaybackUsesReadablePacing(t *testing.T) {
+	data, err := sailingUIFiles.ReadFile("web/templates/sailing.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(data)
+	for _, expected := range []string{
+		"var airTemperaturePlaybackIntervalMS = 6000;",
+		"var duration=(airTemperaturePlaybackIntervalMS*(span/3))/Math.max(0.5,Number(airTemperaturePlaybackSpeed)||1);",
+	} {
+		if !strings.Contains(source, expected) {
+			t.Errorf("air-temperature playback pacing contract missing: %s", expected)
+		}
+	}
+}
