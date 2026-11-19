@@ -126,59 +126,37 @@ func TestMapOverlayHelpIsConcise(t *testing.T) {
 	}
 }
 
-func TestAirTemperatureSliderPreservesNativePointerDrag(t *testing.T) {
+func TestAirTemperatureManualThreeHourFrames(t *testing.T) {
 	data, err := sailingUIFiles.ReadFile("web/templates/sailing.html")
 	if err != nil {
 		t.Fatal(err)
 	}
 	source := string(data)
 	for _, expected := range []string{
-		"updateAirTemperatureForecastTimeLabel(Number(airTemperatureMapHours.value) || 0, true)",
-		"if (!preserveSliderPosition) airTemperatureMapHours.value",
-		"stopAirTemperaturePlayback(true);",
-		"updateAirTemperatureForecastTimeLabel(airTemperatureForecastDisplayHours, !!preserveSliderPosition)",
-		"Air Temperature forecast playback failed:",
+		`id="map-air-temperature-map-hours" type="range" min="0" max="24" step="3"`,
+		`aria-label="Previous 3 hours"`,
+		`aria-label="Next 3 hours"`,
+		"commitAirTemperatureHours(Math.max(0, current - 3))",
+		"commitAirTemperatureHours(Math.min(airTemperaturePlaybackRangeHours, current + 3))",
+		"fetchAirTemperatureForecastGrid(spec,requested,false)",
+		"Air Temperature · Observed · current heat map restored.",
 		`if (!validCells) throw new Error("NDFD forecast grid has no usable temperature cells")`,
 	} {
 		if !strings.Contains(source, expected) {
-			t.Errorf("missing temperature slider/grid guard: %s", expected)
+			t.Errorf("manual 3-hour temperature control missing: %s", expected)
 		}
 	}
-	if strings.Contains(source, `airTemperatureMapHours.focus({preventScroll:true})`) {
-		t.Error("temperature slider still forces focus during native pointer drag")
-	}
-}
-
-func TestAirTemperatureFirstForecastSkipsEmptyNDFDNowGrid(t *testing.T) {
-	data, err := sailingUIFiles.ReadFile("web/templates/sailing.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	source := string(data)
-	for _, expected := range []string{
-		"if (lower===0) {",
-		"fetchAirTemperatureForecastGrid(spec,upper,false).then(function(grid){",
-		"if (next>0 && next<3) next=3;",
-		"Air Temperature · Observed · current heat map restored.",
+	for _, obsolete := range []string{
+		`id="map-air-temperature-map-play"`,
+		`id="map-air-temperature-speed"`,
+		"airTemperaturePlaybackActive",
+		"scheduleAirTemperaturePlaybackAdvance",
+		"animateAirTemperatureForecastStep",
+		"stopAirTemperaturePlayback",
+		"airTemperatureForecastGridBlendAlpha",
 	} {
-		if !strings.Contains(source, expected) {
-			t.Errorf("temperature forecast/observed fallback missing: %s", expected)
-		}
-	}
-}
-
-func TestAirTemperaturePlaybackUsesReadablePacing(t *testing.T) {
-	data, err := sailingUIFiles.ReadFile("web/templates/sailing.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	source := string(data)
-	for _, expected := range []string{
-		"var airTemperaturePlaybackIntervalMS = 6000;",
-		"var duration=(airTemperaturePlaybackIntervalMS*(span/3))/Math.max(0.5,Number(airTemperaturePlaybackSpeed)||1);",
-	} {
-		if !strings.Contains(source, expected) {
-			t.Errorf("air-temperature playback pacing contract missing: %s", expected)
+		if strings.Contains(source, obsolete) {
+			t.Errorf("obsolete temperature playback logic retained: %s", obsolete)
 		}
 	}
 }
