@@ -41,6 +41,30 @@ textarea:focus-visible, a:focus-visible { outline:2px solid var(--accent);outlin
 input,select,textarea {
   color:var(--ink);background:var(--panel);border-color:var(--border);
 }
+/* Compact map transports retain their own geometry, but use the same paired
+   surfaces and text tokens as Homepage's shared UI. The structural page CSS
+   otherwise leaves a white panel under light-on-dark --navy text. */
+.map-air-temperature-transport,.map-swell-transport,
+.map-swell-transport.is-busy {
+  background:var(--panel);color:var(--text);border-color:var(--line);
+}
+.map-air-temperature-transport button,.map-air-temperature-transport select,
+.map-swell-transport button,.map-swell-transport select {
+  background:var(--soft);color:var(--text);border-color:var(--line);
+}
+.map-air-temperature-transport label,.map-swell-transport label,
+.map-air-temperature-footer-status,.map-swell-footer-status {
+  color:var(--text);
+}
+.map-air-temperature-map-slider-end,.map-swell-map-slider-end {
+  color:var(--muted);
+}
+.map-air-temperature-transport input[type=range],
+.map-swell-transport input[type=range] { accent-color:var(--accent); }
+.map-air-temperature-transport button.is-playing,
+.map-swell-transport button.is-playing { background:var(--soft);border-color:var(--accent); }
+.map-air-temperature-transport button:not(:disabled):hover,
+.map-swell-transport button:not(:disabled):hover { border-color:var(--accent); }
 .page-preferences .page-unit-control,.page-preferences .page-unit-control select {
   color:var(--ink);background:var(--panel);border-color:var(--border);
 }

@@ -69,3 +69,23 @@ func TestSailingStandardButtonsUseHomepageCSS(t *testing.T) {
 		}
 	}
 }
+
+func TestMapPlaybackTransportsUseSharedThemeTokens(t *testing.T) {
+	data, err := sailingUIFiles.ReadFile("web/static/theme.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css := string(data)
+	for _, expected := range []string{
+		".map-air-temperature-transport,.map-swell-transport,",
+		"background:var(--panel);color:var(--text);border-color:var(--line);",
+		".map-air-temperature-transport button,.map-air-temperature-transport select,",
+		"background:var(--soft);color:var(--text);border-color:var(--line);",
+		".map-air-temperature-footer-status,.map-swell-footer-status",
+		".map-swell-transport input[type=range] { accent-color:var(--accent); }",
+	} {
+		if !strings.Contains(css, expected) {
+			t.Errorf("playback transport missing shared theme rule: %s", expected)
+		}
+	}
+}
