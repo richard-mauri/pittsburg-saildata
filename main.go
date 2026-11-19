@@ -35,7 +35,7 @@ import (
 
 const (
 	appVersion                      = "1.16.0"
-	buildVersion                    = "v422"
+	buildVersion                    = "v423"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -2177,21 +2177,6 @@ func runServer(
 		http.ServeFile(w, r, "assets/marine_places.json")
 	})
 
-	mux.HandleFunc("/assets/conus_boundary.json", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		data, err := sailingUIFiles.ReadFile("web/static/conus_boundary.json")
-		if err != nil {
-			http.Error(w, "CONUS mask unavailable", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("Cache-Control", "public, max-age=86400")
-		_, _ = w.Write(data)
-	})
-
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -4174,7 +4159,7 @@ func runServer(
  if reporter!=nil {
   handler=http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
    switch r.URL.Path {
-   case "/health","/api/activity/ping","/api/activity/identity","/activity.js","/assets/hero.jpg","/assets/marine_places.json","/assets/conus_boundary.json":
+   case "/health","/api/activity/ping","/api/activity/identity","/activity.js","/assets/hero.jpg","/assets/marine_places.json":
     mux.ServeHTTP(w,r);return
    }
    done:=reporter.working()

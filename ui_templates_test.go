@@ -157,9 +157,7 @@ func TestAirTemperatureManualThreeHourFrames(t *testing.T) {
 		"Air Temperature · Observed · current heat map restored.",
 		"Math.max(80,160-25*Math.max(0,zoom-4))",
 		"if (nearest.length < 2) return null;",
-		`fetch("/assets/conus_boundary.json"`,
-		`ctx.globalCompositeOperation="destination-in"`,
-		`ctx.fill("evenodd")`,
+		"renderAirTemperatureHeatMap(observations, requestBounds)",
 		"if (map.getZoom()<=5) return {",
 		"width:320,height:180",
 		`if (!validCells) throw new Error("NDFD forecast grid has no usable temperature cells")`,
@@ -169,6 +167,9 @@ func TestAirTemperatureManualThreeHourFrames(t *testing.T) {
 		}
 	}
 	for _, obsolete := range []string{
+		`fetch("/assets/conus_boundary.json"`,
+		`ctx.globalCompositeOperation="destination-in"`,
+		`ctx.fill("evenodd")`,
 		`id="map-air-temperature-map-hours"`,
 		`id="map-air-temperature-range"`,
 		"stepAirTemperatureHoursFromKey",

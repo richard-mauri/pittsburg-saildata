@@ -945,7 +945,6 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   var airTemperatureRefreshTimer = null;
   var airTemperatureLoadedBounds = null;
   var airTemperatureObservedSamples = [];
-  var conusBoundaryPromise = null;
   var airTemperatureMapTooltip = null;
   var airTemperatureTooltipTimer = null;
   var airTemperatureTooltipSerial = 0;
@@ -2130,18 +2129,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     return {temp:weighted/total, nearestMiles:nearest[0].miles};
   }
 
-  function loadConusBoundary() {
-    if (!conusBoundaryPromise) {
-      conusBoundaryPromise=fetch("/assets/conus_boundary.json",{headers:{"Accept":"application/json"}})
-        .then(function(response) {
-          if (!response.ok) throw new Error("CONUS boundary HTTP "+response.status);
-          return response.json();
-        });
-    }
-    return conusBoundaryPromise;
-  }
-
-  function renderAirTemperatureHeatMap(observations, bounds, conusPolygons) {
+  function renderAirTemperatureHeatMap(observations, bounds) {
     if (!Array.isArray(observations) || observations.length < 2) return null;
 
     // L.imageOverlay is laid out in Leaflet's EPSG:3857 map plane. Build the
@@ -2211,29 +2199,6 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       }
     }
     ctx.putImageData(image,0,0);
-    // At national zooms, use the Census contiguous-U.S. outline to keep NOW
-    // coverage consistent with NDFD forecasts. Rasterize the vector outline
-    // directly in Web Mercator; even-odd filling preserves inland holes.
-    if (conusPolygons) {
-      ctx.save();
-      ctx.globalCompositeOperation="destination-in";
-      ctx.fillStyle="#fff";
-      ctx.beginPath();
-      conusPolygons.forEach(function(polygon) {
-        polygon.forEach(function(ring) {
-          ring.forEach(function(coord,i) {
-            var p=map.options.crs.project(L.latLng(coord[1],coord[0]));
-            var px=(p.x-projectedSW.x)/projectedWidth*(w-1);
-            var py=(projectedNE.y-p.y)/projectedHeight*(h-1);
-            if (i===0) ctx.moveTo(px,py);
-            else ctx.lineTo(px,py);
-          });
-          ctx.closePath();
-        });
-      });
-      ctx.fill("evenodd");
-      ctx.restore();
-    }
     return canvas.toDataURL("image/png");
   }
 
@@ -2327,16 +2292,13 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     var requestBounds = bufferedAirTemperatureBounds(visibleBounds);
     var serial = ++airTemperatureRequestSerial;
     setAirTemperatureStatus("Air Temperature · Observed · loading current observations…", false);
-    Promise.all([
-      fetch(airTemperatureURL(requestBounds), {headers:{"Accept":"application/json"}})
-        .then(function(response){ if(!response.ok) throw new Error("HTTP "+response.status); return response.json(); }),
-      map.getZoom()<=5 ? loadConusBoundary() : Promise.resolve(null)
-    ]).then(function(result){
-        var payload=result[0], conusPolygons=result[1];
+    fetch(airTemperatureURL(requestBounds), {headers:{"Accept":"application/json"}})
+      .then(function(response){ if(!response.ok) throw new Error("HTTP "+response.status); return response.json(); })
+      .then(function(payload){
         if (!mapState.airTemperatureOverlayVisible || Number(mapState.airTemperatureForecastHours||0) !== 0 || serial !== airTemperatureRequestSerial) return;
         var observations = Array.isArray(payload.observations) ? payload.observations : [];
         airTemperatureObservedSamples = observations.slice();
-        var dataURL = renderAirTemperatureHeatMap(observations, requestBounds, conusPolygons);
+        var dataURL = renderAirTemperatureHeatMap(observations, requestBounds);
         if (!dataURL) {
           removeAirTemperatureObservedLayer();
           showAirTemperatureLegend(false);
