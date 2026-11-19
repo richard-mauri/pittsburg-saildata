@@ -133,16 +133,17 @@ func TestAirTemperatureManualThreeHourFrames(t *testing.T) {
 	}
 	source := string(data)
 	for _, expected := range []string{
-		`id="map-air-temperature-map-hours" type="range" min="0" max="24" step="3"`,
+		`id="map-air-temperature-now"`,
 		`aria-label="Previous 3 hours"`,
 		`aria-label="Next 3 hours"`,
-		"commitAirTemperatureHours(Math.max(0, current - 3))",
-		"commitAirTemperatureHours(Math.min(airTemperaturePlaybackRangeHours, current + 3))",
+		"commitAirTemperatureHours(airTemperatureRequestedHours - 3)",
+		"commitAirTemperatureHours(airTemperatureRequestedHours + 3)",
+		"airTemperatureForecastMaxHours = 24",
 		"fetchAirTemperatureForecastGrid(spec,requested,false)",
-		"syncAirTemperatureSliders(next);",
+		"airTemperatureRequestedHours=next;",
 		"Air Temperature · Loading +",
 		"updateAirTemperatureForecastTimeLabel(airTemperatureForecastDisplayHours);",
-		"Number(airTemperatureMapHours ? airTemperatureMapHours.value : airTemperatureForecastDisplayHours)",
+		"airTemperatureRequestedHours=airTemperatureForecastDisplayHours;",
 		"Air Temperature · Observed · current heat map restored.",
 		`if (!validCells) throw new Error("NDFD forecast grid has no usable temperature cells")`,
 	} {
@@ -151,6 +152,12 @@ func TestAirTemperatureManualThreeHourFrames(t *testing.T) {
 		}
 	}
 	for _, obsolete := range []string{
+		`id="map-air-temperature-map-hours"`,
+		`id="map-air-temperature-range"`,
+		"stepAirTemperatureHoursFromKey",
+		"syncAirTemperatureSliders",
+		"updateAirTemperatureFooterScale",
+		"airTemperaturePlaybackRangeHours",
 		`id="map-air-temperature-map-play"`,
 		`id="map-air-temperature-speed"`,
 		"airTemperaturePlaybackActive",

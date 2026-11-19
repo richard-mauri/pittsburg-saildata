@@ -48,6 +48,10 @@ input,select,textarea {
 .map-swell-transport.is-busy {
   background:var(--panel);color:var(--text);border-color:var(--line);
 }
+/* Temperature has only one button row and one status row. */
+.map-air-temperature-transport {
+  height:auto;grid-template-rows:30px 20px;
+}
 .map-air-temperature-transport button,.map-air-temperature-transport select,
 .map-swell-transport button,.map-swell-transport select {
   background:var(--soft);color:var(--text);border-color:var(--line);
