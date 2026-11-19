@@ -11,7 +11,7 @@ import (
 // Browser page templates are embedded at build time so local and deployed
 // binaries retain their original self-contained behavior.
 //
-//go:embed web/templates/*.html web/static/theme.css web/static/account.js web/static/unit_refresh.js
+//go:embed web/templates/*.html web/static/theme.css web/static/account.js web/static/unit_refresh.js web/static/conus_boundary.json
 var sailingUIFiles embed.FS
 
 func readSailingUITemplate(path string) string {
