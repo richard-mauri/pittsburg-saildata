@@ -2514,14 +2514,16 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     if (!visibleBounds) {
       showAirTemperatureLegend(false);
       setAirTemperatureStatus("Air Temperature · Forecast available over CONUS at Zoom 4+.",true);
-      syncAirTemperatureSliders(airTemperatureForecastDisplayHours);
+      updateAirTemperatureForecastTimeLabel(airTemperatureForecastDisplayHours);
       return;
     }
     var spec=airTemperatureForecastGridSpec(visibleBounds);
     if (!spec) return;
     setAirTemperatureStatus("Air Temperature · Loading NOAA/NWS NDFD +"+requested+"h forecast…",false);
-    // Keep the old image and time visible until the requested grid is rendered.
-    syncAirTemperatureSliders(airTemperatureForecastDisplayHours);
+    // Leave the user's target thumb in place, while the status identifies the
+    // requested frame. The current map remains visible until its replacement.
+    var timeStatus=document.getElementById("map-air-temperature-time");
+    if (timeStatus) timeStatus.textContent="Air Temperature · Loading +"+requested+"h forecast…";
     fetchAirTemperatureForecastGrid(spec,requested,false).then(function(grid) {
       if (!mapState.airTemperatureOverlayVisible || targetSerial!==airTemperatureManualTargetSerial) return;
       if (!displayAirTemperatureForecastGrid(grid,function() {
@@ -2534,16 +2536,22 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
         setAirTemperatureStatus("Air Temperature · Forecast · NOAA/NWS NDFD +"+requested+"h.",false);
       })) {
         setAirTemperatureStatus("Air Temperature forecast frame could not be displayed.",true);
+        updateAirTemperatureForecastTimeLabel(airTemperatureForecastDisplayHours);
       }
     }).catch(function(err) {
       if (!mapState.airTemperatureOverlayVisible || targetSerial!==airTemperatureManualTargetSerial) return;
       setAirTemperatureStatus("Air Temperature forecast unavailable: "+String(err&&err.message?err.message:err||"unknown error"),true);
+      updateAirTemperatureForecastTimeLabel(airTemperatureForecastDisplayHours);
     });
   }
 
   function loadForecastAirTemperature() {
     var hours=Math.round(Number(mapState.airTemperatureForecastHours||0)/3)*3;
     if (hours>0) showAirTemperatureForecastAtManual(hours);
+    else {
+      mapState.airTemperatureForecastHours=0;
+      loadObservedAirTemperature(false);
+    }
   }
   function sampleAirTemperatureForecastGrid(grid, latlng) {
     if (!grid || !latlng) return NaN;
@@ -6315,8 +6323,8 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   function commitAirTemperatureHours(next) {
     var maxHours=Math.max(3,Number(airTemperaturePlaybackRangeHours)||24);
     next=Math.max(0,Math.min(maxHours,Math.round(Number(next)/3)*3));
-    // Leave the slider at the actually displayed frame until loading completes.
-    syncAirTemperatureSliders(airTemperatureForecastDisplayHours);
+    // Respond to the click/drag immediately; the map updates when data arrives.
+    syncAirTemperatureSliders(next);
     hideAirTemperaturePointerTooltip();
     if (!mapState.airTemperatureOverlayVisible) return;
     if (next<=0.001) {
@@ -6370,11 +6378,11 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   var airTemperaturePrev = document.getElementById("map-air-temperature-prev");
   var airTemperatureNext = document.getElementById("map-air-temperature-next");
   if (airTemperaturePrev) airTemperaturePrev.addEventListener("click", function() {
-    var current = Number(mapState.airTemperatureForecastHours || 0);
+    var current = Number(airTemperatureMapHours ? airTemperatureMapHours.value : airTemperatureForecastDisplayHours)||0;
     commitAirTemperatureHours(Math.max(0, current - 3));
   });
   if (airTemperatureNext) airTemperatureNext.addEventListener("click", function() {
-    var current = Number(mapState.airTemperatureForecastHours || 0);
+    var current = Number(airTemperatureMapHours ? airTemperatureMapHours.value : airTemperatureForecastDisplayHours)||0;
     commitAirTemperatureHours(Math.min(airTemperaturePlaybackRangeHours, current + 3));
   });
 

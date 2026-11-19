@@ -139,6 +139,10 @@ func TestAirTemperatureManualThreeHourFrames(t *testing.T) {
 		"commitAirTemperatureHours(Math.max(0, current - 3))",
 		"commitAirTemperatureHours(Math.min(airTemperaturePlaybackRangeHours, current + 3))",
 		"fetchAirTemperatureForecastGrid(spec,requested,false)",
+		"syncAirTemperatureSliders(next);",
+		"Air Temperature · Loading +",
+		"updateAirTemperatureForecastTimeLabel(airTemperatureForecastDisplayHours);",
+		"Number(airTemperatureMapHours ? airTemperatureMapHours.value : airTemperatureForecastDisplayHours)",
 		"Air Temperature · Observed · current heat map restored.",
 		`if (!validCells) throw new Error("NDFD forecast grid has no usable temperature cells")`,
 	} {
