@@ -141,9 +141,6 @@ input,select,textarea {
 }
 .wind-readings-scroll-cue { background:var(--panel);color:var(--muted); }
 /* Chart series and map imagery deliberately retain their own meaningful colors. */
-/* Safari sometimes rounds adjacent 256px OSM tile edges apart by one device
-   pixel. Overlap only the street-map raster edges; never stretch NOAA layers. */
-.leaflet-tile.street-map-tile { width:257px!important;height:257px!important; }
 .wind-distance-warning { background:light-dark(#fff8df,#342b19);
   border-color:light-dark(#e7c978,#8d703d); color:light-dark(#654d08,#ffe6a3); }
 .wind-distance-warning strong { color:inherit; }
@@ -154,6 +151,7 @@ input,select,textarea {
    panel treatment as the map controls, including disabled/current states. */
 .planning-page-link,
 .map-primary-actions .map-go,
+.map-primary-actions .map-reset,
 .current-range-toolbar .current-date-nav,
 .current-range-toolbar .current-date-nav.is-current {
   display:inline-flex;align-items:center;justify-content:center;
@@ -163,12 +161,15 @@ input,select,textarea {
 }
 .planning-page-link:hover,
 .map-primary-actions .map-go:not(:disabled):hover,
+.map-primary-actions .map-reset:not(:disabled):hover,
 .current-range-toolbar .current-date-nav:hover {
   background:var(--soft);color:var(--ink);border-color:var(--accent);
   filter:none;
 }
 .map-primary-actions .map-go:disabled,
 .map-primary-actions .map-go[aria-disabled="true"],
+.map-primary-actions .map-reset:disabled,
+.map-primary-actions .map-reset[aria-disabled="true"],
 .current-range-toolbar .current-date-nav.is-current {
   opacity:.55;cursor:default;
 }

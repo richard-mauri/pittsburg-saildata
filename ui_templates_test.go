@@ -82,22 +82,17 @@ func TestMapPlaybackTransportsUseSharedThemeTokens(t *testing.T) {
 		".map-air-temperature-transport button,.map-air-temperature-transport select,",
 		"background:var(--soft);color:var(--text);border-color:var(--line);",
 		".map-air-temperature-footer-status,.map-swell-footer-status",
+		".map-primary-actions .map-reset,",
+		".map-primary-actions .map-reset:not(:disabled):hover,",
+		".map-primary-actions .map-reset:disabled,",
 		".map-swell-transport input[type=range] { accent-color:var(--accent); }",
 		".map-air-temperature-legend {",
 		"background:var(--panel);color:var(--muted);border-color:var(--border);",
 		".map-air-temperature-legend-head strong { color:var(--ink); }",
-		".leaflet-tile.street-map-tile { width:257px!important;height:257px!important; }",
 	} {
 		if !strings.Contains(css, expected) {
 			t.Errorf("playback transport missing shared theme rule: %s", expected)
 		}
-	}
-}
-
-func TestStreetMapTileSeamOverlapIsScoped(t *testing.T) {
-	markup := readSailingUITemplate("web/templates/sailing.html")
-	if !strings.Contains(markup, `className: "street-map-tile"`) {
-		t.Fatal("OpenStreetMap tile seam overlap must be limited to the street tile layer")
 	}
 }
 
