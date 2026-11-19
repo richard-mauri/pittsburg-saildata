@@ -48,6 +48,12 @@ input,select,textarea {
 .map-swell-transport.is-busy {
   background:var(--panel);color:var(--text);border-color:var(--line);
 }
+/* The temperature scale lives inside the dark Map Legend dialog. Match the
+   shared panel palette without changing the data-bearing gradient colors. */
+.map-air-temperature-legend {
+  background:var(--panel);color:var(--muted);border-color:var(--border);
+}
+.map-air-temperature-legend-head strong { color:var(--ink); }
 /* A single compact row leaves space for the time label beside the buttons. */
 .map-air-temperature-transport {
   height:auto;grid-template-rows:auto;

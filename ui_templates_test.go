@@ -83,6 +83,9 @@ func TestMapPlaybackTransportsUseSharedThemeTokens(t *testing.T) {
 		"background:var(--soft);color:var(--text);border-color:var(--line);",
 		".map-air-temperature-footer-status,.map-swell-footer-status",
 		".map-swell-transport input[type=range] { accent-color:var(--accent); }",
+		".map-air-temperature-legend {",
+		"background:var(--panel);color:var(--muted);border-color:var(--border);",
+		".map-air-temperature-legend-head strong { color:var(--ink); }",
 	} {
 		if !strings.Contains(css, expected) {
 			t.Errorf("playback transport missing shared theme rule: %s", expected)
