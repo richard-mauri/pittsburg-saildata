@@ -35,7 +35,7 @@ import (
 
 const (
 	appVersion                      = "1.16.0"
-	buildVersion                    = "v418"
+	buildVersion                    = "v419"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -4181,7 +4181,83 @@ func runServer(
 	}
 }
 
+// NOAA's NDFD export can return an entirely transparent raster at low zoom
+// when the bbox spans much of CONUS, even though smaller exports contain data.
+// Stitch geographic sections in Web Mercator pixel space to preserve the
+// original output dimensions and map alignment.
 func fetchNDFDTemperatureGrid(west, south, east, north float64, hours, width, height int) ([]byte, error) {
+	columns := int(math.Ceil((east - west) / 18))
+	rows := int(math.Ceil((north - south) / 12))
+	if columns < 1 {
+		columns = 1
+	}
+	if rows < 1 {
+		rows = 1
+	}
+	if columns == 1 && rows == 1 {
+		return fetchNDFDTemperatureGridSection(west, south, east, north, hours, width, height)
+	}
+	if columns > width || rows > height {
+		return nil, fmt.Errorf("NDFD grid too small for geographic sections")
+	}
+
+	raw := make([]byte, width*height*2)
+	for i := 0; i < len(raw); i += 2 {
+		binary.LittleEndian.PutUint16(raw[i:i+2], uint16(0x8000))
+	}
+	_, southY := webMercatorXY(south, west)
+	_, northY := webMercatorXY(north, east)
+	const mercatorRadius = 6378137.0
+	mercatorLatitude := func(y float64) float64 {
+		return (2*math.Atan(math.Exp(y/mercatorRadius)) - math.Pi/2) * 180 / math.Pi
+	}
+	var wg sync.WaitGroup
+	limit := make(chan struct{}, 4)
+	var mu sync.Mutex
+	var firstErr error
+	validSections := 0
+	for row := 0; row < rows; row++ {
+		y0, y1 := row*height/rows, (row+1)*height/rows
+		// Raster rows progress north to south.
+		tileNorth := mercatorLatitude(northY - (northY-southY)*float64(y0)/float64(height))
+		tileSouth := mercatorLatitude(northY - (northY-southY)*float64(y1)/float64(height))
+		for col := 0; col < columns; col++ {
+			x0, x1 := col*width/columns, (col+1)*width/columns
+			tileWest := west + (east-west)*float64(x0)/float64(width)
+			tileEast := west + (east-west)*float64(x1)/float64(width)
+			wg.Add(1)
+			go func(x0, x1, y0, y1 int, tileWest, tileSouth, tileEast, tileNorth float64) {
+				defer wg.Done()
+				limit <- struct{}{}
+				section, err := fetchNDFDTemperatureGridSection(tileWest, tileSouth, tileEast, tileNorth, hours, x1-x0, y1-y0)
+				<-limit
+				mu.Lock()
+				defer mu.Unlock()
+				if err != nil {
+					if firstErr == nil {
+						firstErr = err
+					}
+					return
+				}
+				validSections++
+				for y := y0; y < y1; y++ {
+					copy(raw[(y*width+x0)*2:(y*width+x1)*2],
+						section[((y-y0)*(x1-x0))*2:((y-y0+1)*(x1-x0))*2])
+				}
+			}(x0, x1, y0, y1, tileWest, tileSouth, tileEast, tileNorth)
+		}
+	}
+	wg.Wait()
+	if validSections == 0 {
+		if firstErr != nil {
+			return nil, firstErr
+		}
+		return nil, fmt.Errorf("NDFD grid has no available sections")
+	}
+	return raw, nil
+}
+
+func fetchNDFDTemperatureGridSection(west, south, east, north float64, hours, width, height int) ([]byte, error) {
 	layerID, ok := ndfdTemperatureLayerIDServer(hours)
 	if !ok {
 		return nil, fmt.Errorf("unsupported NDFD forecast hour %d", hours)
