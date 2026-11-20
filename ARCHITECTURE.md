@@ -10,6 +10,20 @@ The public site at https://weather.themauris.org currently uses a locally runnin
 
 ## Homepage canonical button component
 
+The Homepage-owned nested Go module now also renders one shared suite banner on
+Welcome, Conditions Now/Planning, Stations and Details. `ui_templates.go`
+embeds its CSS and browser status formatter alongside the existing self-contained
+page assets; `/assets/tanner.jpg` serves a local embedded portrait. Every main
+panel uses `.suite-content`, which shares the exact viewport width and
+responsive gutters with `.suite-banner`. Local page CSS controls vertical
+spacing and functional content, not duplicated masthead or panel widths.
+Existing `.suite-home-link` presentation and redundant links are removed.
+
+The account client displays only `Signed in as <verified user>` through the
+shared formatter. Guest/browser-only state and preference conflict, save or
+verification notes appear separately in the content area; role permissions,
+bearer lifecycle and account record ownership remain local to SailingGo.
+
 The root application pins `github.com/richard-mauri/homepage/shared/ui`, whose embedded `buttons.css` is included **after** SailingGo's own `web/static/theme.css` in each of the four rendered page templates. The existing server-side template assembly embeds the bytes into the response, with no runtime call to Homepage or changes to CSP. `--text` aliases SailingGo's `--ink`; its existing `--soft`, `--line`, and `--accent` provide the other canonical tokens.
 
 Standard text actions in Conditions Now—Clear location & stations, Clear all overlays, information-popup launchers and Tidal & Lunar Context—use `button.ui-button` and must not reintroduce local appearance/hover/disabled/focus rules. Structural width/alignment styles are allowed. Compact map navigation menus, playback transports, icon-only close actions, station-camera controls and chart interactions are deliberately specialized for their distinct size and context; this is a first-phase adoption, not a blanket restyling. Later phases should review those components deliberately against Homepage's canonical design system.
@@ -43,7 +57,7 @@ The shared suite navigation style is now intentionally a quiet 12px text link di
 
 ## Homepage-authenticated automatic preferences (Issue #17)
 
-The embedded `web/static/account.js` runs on Conditions Now and Planning and Details. SailingGo consumes Homepage's URL-fragment `#suite_token`, removes it immediately and retains the transferable bearer only in tab-scoped `sessionStorage`. Explicit `#suite_mode=local` clears it. Identity and expiry come from the trusted `/api/session/profile` bearer validation; no independent SailingGo login exists. A small cyan **Signed in as [user] (Homepage)** label appears immediately below Back to Homepage, with no manual Save/Load controls.
+The embedded `web/static/account.js` runs on Conditions Now and Planning and Details. SailingGo consumes Homepage's URL-fragment `#suite_token`, removes it immediately and retains the transferable bearer only in tab-scoped `sessionStorage`. Explicit `#suite_mode=local` clears it. Identity and expiry come from the trusted `/api/session/profile` bearer validation; no independent SailingGo login exists. The shared banner renders **Signed in as [verified user]** without an app or role suffix. Guest and preference-sync notices appear separately below the banner, with no manual Save/Load controls.
 
 On authenticated startup, SailingGo GETs the revisioned `/api/storage/sailing` account record. Saved settings are applied automatically to the current view, including canonical URL parameters and map settings where the map exists. When an account has no record, its initial preferences are established without requiring a manual sync. Changes are staged in the tab before URL navigation and optimistically PUT with the last server revision; the next page also recovers staged changes if navigation canceled an earlier request. The previously loaded account record, not a stale launch URL or another user's local settings, is authoritative. Conflict (HTTP 409), invalid schema, expiry, loss of network or a new identity must not silently overwrite another account. A conflicting browser change is retained locally and identified in the account-status text. Browser-only visits retain a distinct local browser copy and remain functional.
 

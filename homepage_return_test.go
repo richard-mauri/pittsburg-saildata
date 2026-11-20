@@ -14,13 +14,15 @@ func TestAllSailingViewsLinkBackToHomepage(t *testing.T) {
  }{
   t.Run(path,func(t *testing.T){
    markup:=readSailingUITemplate(path)
-   if !strings.Contains(markup,`class="suite-home-link" href="https://home.themauris.org/"`){
-    t.Fatalf("%s missing Homepage return",path)
+   if !strings.Contains(markup,`class="suite-banner__home suite-type-control" href="https://home.themauris.org/"`){
+    t.Fatalf("%s missing shared Homepage return",path)
    }
-   if !strings.Contains(markup,".suite-home-link:hover{background:rgba(96,151,172,.16);color:var(--accent,#69c6d3);text-decoration:underline;opacity:1}") {t.Fatalf("%s standardized hover border style missing",path)}
-   if strings.Contains(markup,`class="suite-home-link" target="_blank"`){
+   if !strings.Contains(markup,".suite-banner__home:hover{text-decoration:underline}") {t.Fatalf("%s shared link hover style missing",path)}
+   if strings.Contains(markup,`class="suite-home-link"`) || strings.Contains(markup,`class="suite-banner__home suite-type-control" target="_blank"`){
     t.Fatalf("%s Homepage return opens a new tab",path)
    }
+   if strings.Count(markup,`id="suite-auth-status"`)!=1 {t.Fatalf("%s must mount exactly one shared banner",path)}
+   if !strings.Contains(markup,`suite-content`) || !strings.Contains(markup,`.suite-banner,.suite-content{box-sizing:border-box;width:`) {t.Fatalf("%s missing shared content alignment",path)}
   })
  }
 }
