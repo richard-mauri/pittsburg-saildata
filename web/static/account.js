@@ -30,19 +30,20 @@
     try { (local ? localStorage : sessionStorage).setItem(key, JSON.stringify(value)); return true; } catch (_) { return false; }
   }
   function makeLabel() {
-    const link = document.querySelector(".suite-home-link");
-    if (!link) return null;
+    const main = document.querySelector("main.suite-content");
+    if (!main) return null;
     const node = document.createElement("div");
-    node.id = "sailing-account-identity";
+    node.id = "sailing-account-note";
+    node.className = "sailing-account-note";
     node.setAttribute("role", "status");
     node.setAttribute("aria-live", "polite");
-    node.style.cssText = "margin:3px 0 10px;color:#69cbd5;font:600 13px/1.5 system-ui,-apple-system,BlinkMacSystemFont,sans-serif";
-    node.textContent = "Not signed in";
-    link.insertAdjacentElement("afterend", node);
+    node.hidden = true;
+    main.prepend(node);
     return node;
   }
   const label = makeLabel();
-  function status(value) { if (label) label.textContent = value; }
+  function status(value) { if (label) {label.textContent = value;label.hidden=!value;} }
+  function signedInStatus(name, note) {SuiteBannerStatus.signedIn(name);status(note || "");}
   const signInDialog = document.createElement("dialog");
   signInDialog.className = "sailing-suite-signin";
   signInDialog.setAttribute("aria-labelledby","sailing-suite-signin-title");
@@ -59,7 +60,7 @@
   document.body.append(signInDialog);
   function requireSignIn(){if(onPublicHost && !signInDialog.open)signInDialog.showModal();}
   function clearSignIn(){if(signInDialog.open)signInDialog.close();}
-  window.addEventListener("sailing-session-invalid",function(){signedIn=false;bearer="";clearSession(handoffKey);status("Session expired or revoked — Sign in again");requireSignIn();});
+  window.addEventListener("sailing-session-invalid",function(){signedIn=false;bearer="";clearSession(handoffKey);SuiteBannerStatus.setText("Browser-only mode");status("Session expired or revoked — Sign in again");requireSignIn();});
   function settingsFromPage(fallback) {
     const source = new URL(location.href).searchParams;
     const urlParams = {};
@@ -174,7 +175,8 @@
   async function browserOnly(guestName) {
     signedIn = false;
     const localIdentity = guestName || guestIdentity;
-    status(localIdentity ? "Signed in as "+localIdentity+" · Guest (browser-only preferences)" : "Not signed in");
+    if (localIdentity) signedInStatus(localIdentity,"Guest (browser-only preferences)");
+    else {SuiteBannerStatus.setText("Browser-only mode");status("Not signed in");}
     const old = getJSON(localKey,true);
     let data = valid(old) ? old : settingsFromPage(null);
     if (priorNavigation && priorNavigation.user === "local" && priorNavigation.url !== pageURL) {
@@ -240,7 +242,7 @@
       });
       if (response.status === 409) {
         blocked = true;
-        status("Signed in as "+user+" (Homepage) · preference conflict; browser changes retained");
+        signedInStatus(user,"Preference conflict; browser changes retained");
         return;
       }
       if (!response.ok) throw Error("Preference save failed (HTTP "+response.status+")");
@@ -253,7 +255,7 @@
     } catch (_) {
       // Keep the draft for a later validated attempt; never discard changes.
       dirty = true;
-      status("Signed in as "+user+" (Homepage) · preferences not yet saved");
+      signedInStatus(user,"Preferences not yet saved");
     } finally {
       saving = false;
       if (dirty && signedIn && !blocked) {
@@ -281,12 +283,12 @@
           await browserOnly(user);
         } catch (_) {
           document.documentElement.classList.remove("sailing-units-pending");
-          status("Signed in as "+user+" · Guest (browser-only preferences)");
+          signedInStatus(user,"Guest (browser-only preferences)");
         }
         return;
       }
       guestIdentity = "";
-      status("Signed in as "+user+" (Homepage)");
+      signedInStatus(user,"");
       const existing = await record();
       if (existing && (!valid(existing.data) || !Number.isSafeInteger(existing.revision) || existing.revision < 0))
         throw Error("Unsupported account record");
@@ -323,7 +325,8 @@
       // A network fault is not an identity: preserve current browser settings,
       // but do not mutate the account or claim a valid login.
       signedIn = false;
-      status(guestIdentity ? "Signed in as "+guestIdentity+" · Guest (browser-only preferences)" :
+      SuiteBannerStatus.setText("Browser-only mode");
+      status(guestIdentity ? "Guest (browser-only preferences)" :
         /HTTP (401|403)|Invalid session/.test(String(err.message)) ? "Session expired or revoked — Sign in again" :
         "Not signed in · Homepage verification unavailable");
       if(/HTTP (401|403)|Invalid session/.test(String(err.message))) requireSignIn();

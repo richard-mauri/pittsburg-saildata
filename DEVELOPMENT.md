@@ -4,6 +4,15 @@ Read [AGENTS.md](AGENTS.md) and [Homepage's authoritative suite development poli
 
 ## GitHub Actions and limitations
 
+For Issue #33, compare all four HTML pages with Homepage, NewsGo, ScraperGo and
+MauriStocks at identical Safari widths. The embedded Homepage banner and
+`.suite-content` must share the left/right boundaries, top spacing and
+responsive breakpoints. Confirm one locally served Tanner portrait, one
+Homepage return link, no app-specific banner offsets, and an unsuffixed verified
+identity. Check that preference conflict/guest warnings remain visible outside
+the banner. Preserve all NOAA, map and preferences behavior. Run the documented
+`./devbuild.sh` once; do not add standalone `go test`/`go build` owner commands.
+
 SailingGo has its own `.github/workflows/go-ci.yml`: non-blocking formatting report, root Go tests and a root build on PRs targeting `main`. Verify its actual outcome on the exact PR head. The root `go.mod` now declares Go 1.22 because Homepage's pinned shared UI module requires it; CI uses Go 1.23. The nested `ui/` module remains independent and requires separate testing when edited. The shared Homepage policy does not replace app-specific CI.
 
 A CI pass covers only performed jobs; it cannot verify local server startup, Safari, NOAA's current responses or Cloudflare Tunnel. Documentation-only changes require Markdown/content/link/path review and applicable CI, **not** a Mac build/restart.

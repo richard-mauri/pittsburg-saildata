@@ -1,18 +1,30 @@
 package main
 
 import (
+	"bytes"
 	"embed"
 	"html/template"
 	"strings"
 
 	suiteui "github.com/richard-mauri/homepage/shared/ui"
+	"github.com/richard-mauri/homepage/shared/ui/banner"
 )
 
 // Browser page templates are embedded at build time so local and deployed
 // binaries retain their original self-contained behavior.
 //
-//go:embed web/templates/*.html web/static/theme.css web/static/account.js web/static/unit_refresh.js
+//go:embed web/templates/*.html web/static/theme.css web/static/account.js web/static/unit_refresh.js assets/tanner.jpg
 var sailingUIFiles embed.FS
+
+func sailingBanner() string {
+	var out bytes.Buffer
+	if err := banner.Render(&out, banner.Config{
+		AppName: "Mauri's Weather & Water Conditions", Version: appVersion, Build: buildVersion,
+		HomeURL: "https://home.themauris.org/", TannerURL: "/assets/tanner.jpg",
+		AccountState: banner.BrowserOnly,
+	}); err != nil { panic(err) }
+	return out.String()
+}
 
 func readSailingUITemplate(path string) string {
 	data, err := sailingUIFiles.ReadFile(path)
@@ -25,7 +37,8 @@ func readSailingUITemplate(path string) string {
 	}
 	// Each page retains its own structural styles; the shared theme is the
 	// final stylesheet and is embedded directly into the rendered HTML.
-	page := strings.Replace(string(data), "</style>", "</style><style>"+string(theme)+"\n"+string(suiteui.ButtonCSS)+"</style>", 1)
+	page := strings.Replace(string(data), "</style>", "</style><style>"+string(theme)+"\n"+string(suiteui.ButtonCSS)+"\n"+string(banner.CSS(suiteui.DesignCSS))+"</style>", 1)
+	page = strings.Replace(page, "<body>", `<body><div class="suite-ambient suite-ambient-one" aria-hidden="true"></div><div class="suite-ambient suite-ambient-two" aria-hidden="true"></div>`+sailingBanner(), 1)
 	// Account behavior is opt-in and applies only to the two report views.
 	if path == "web/templates/sailing.html" {
 		account, err := sailingUIFiles.ReadFile("web/static/account.js")
@@ -40,7 +53,7 @@ func readSailingUITemplate(path string) string {
 		// The client always releases this brief mask, including on network errors.
 		const bootstrap = `<style>html.sailing-units-pending .page-preferences,html.sailing-units-pending #bottom-line-card .metrics,html.sailing-units-pending #bottom-line-card .planning-period-cause,html.sailing-units-pending .wind-card .metrics,html.sailing-units-pending .wind-card .wind-summary,html.sailing-units-pending .wind-card .wind-readings,html.sailing-units-pending .wind-card .wind-distance-warning{visibility:hidden}</style><script>document.documentElement.classList.add("sailing-units-pending");setTimeout(function(){document.documentElement.classList.remove("sailing-units-pending")},4000)</script>`
 		page = strings.Replace(page, "</head>", bootstrap+"</head>", 1)
-		page = strings.Replace(page, "</body>", "<script>"+string(units)+"</script><script>"+string(account)+"</script></body>", 1)
+		page = strings.Replace(page, "</body>", "<script>"+string(banner.ScriptJS())+"</script><script>"+string(units)+"</script><script>"+string(account)+"</script></body>", 1)
 	}
 	// Only embed browser telemetry when server-only reporting is explicitly configured.
 	if sailingActivityConfigured() {

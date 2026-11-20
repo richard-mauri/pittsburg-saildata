@@ -108,7 +108,7 @@ func TestSailingVerifiedPresenceAndGuestSession(t *testing.T) {
  for _,part:=range []string{"info.role === \"guest\"","Guest (browser-only preferences)","event.preventDefault()","Go to Homepage"} {
   if !strings.Contains(string(account),part){t.Errorf("missing guest/session UI contract %q",part)}
  }
- for _,part:=range []string{"guestIdentity = user","await browserOnly(user)","Local preference restoration", "Signed in as \"+user+\" · Guest (browser-only preferences)"} {
+ for _,part:=range []string{"guestIdentity = user","await browserOnly(user)","Local preference restoration", "signedInStatus(user,\"Guest (browser-only preferences)\")"} {
   if !strings.Contains(string(account),part){t.Errorf("verified guest must survive local preference failure: %q",part)}
  }
 }

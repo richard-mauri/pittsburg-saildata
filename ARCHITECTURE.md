@@ -10,6 +10,20 @@ The public site at https://weather.themauris.org currently uses a locally runnin
 
 ## Homepage canonical button component
 
+The Homepage-owned nested Go module now also renders one shared suite banner on
+Welcome, Conditions Now/Planning, Stations and Details. `ui_templates.go`
+embeds its CSS and browser status formatter alongside the existing self-contained
+page assets; `/assets/tanner.jpg` serves a local embedded portrait. Every main
+panel uses `.suite-content`, which shares the exact viewport width and
+responsive gutters with `.suite-banner`. Local page CSS controls vertical
+spacing and functional content, not duplicated masthead or panel widths.
+Existing `.suite-home-link` presentation and redundant links are removed.
+
+The account client displays only `Signed in as <verified user>` through the
+shared formatter. Guest/browser-only state and preference conflict, save or
+verification notes appear separately in the content area; role permissions,
+bearer lifecycle and account record ownership remain local to SailingGo.
+
 The root application pins `github.com/richard-mauri/homepage/shared/ui`, whose embedded `buttons.css` is included **after** SailingGo's own `web/static/theme.css` in each of the four rendered page templates. The existing server-side template assembly embeds the bytes into the response, with no runtime call to Homepage or changes to CSP. `--text` aliases SailingGo's `--ink`; its existing `--soft`, `--line`, and `--accent` provide the other canonical tokens.
 
 Standard text actions in Conditions Now—Clear location & stations, Clear all overlays, information-popup launchers and Tidal & Lunar Context—use `button.ui-button` and must not reintroduce local appearance/hover/disabled/focus rules. Structural width/alignment styles are allowed. Compact map navigation menus, playback transports, icon-only close actions, station-camera controls and chart interactions are deliberately specialized for their distinct size and context; this is a first-phase adoption, not a blanket restyling. Later phases should review those components deliberately against Homepage's canonical design system.
