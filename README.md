@@ -170,3 +170,17 @@ Nautical availability is based on **the visible XYZ tile cells in the current ma
 ### Nautical chart status — inline below the map (latest draft)
 
 Normal Nautical panning and zooming **never displays an over-map popup, progress bar, Cancel, or Close button**. The chart layer renders continuously under Leaflet control. A small non-modal status line **after the map footer and before Map Types/Overlays** indicates `Nautical · Chart tiles visible`, `Nautical · Checking chart coverage…` when the current view has no known chart tiles and requests are pending, or the previously established area-specific missing-coverage message. Successful image tiles display immediately without visual obstruction, even if other peripheral requests remain pending. Status remains outside the map and clears/revises as the user pans back into coverage. The existing request timeout (12 seconds normal; 2.5 seconds explicitly opted-in localhost mock) only changes the text; it never produces a modal or obscures the map. The original 200 ms progress delay and eight-second auto-dismiss popup timer were removed.
+
+## Standalone Nautical Tile Manager (draft PR #38)
+
+The new CLI at `cmd/nauticaltilemanager` is a **separate, explicit acquisition command**. It is *dry-run by default*: geographic bounds, native zoom span and `-max-tiles` are required to produce a plan; no network or filesystem operation occurs unless `-download` is added. It rejects plans whose tile count exceeds the configured cap *before any output is created*. Supported native zoom is **9..16**; Leaflet may display 17/18 by overzooming the same z16 PNGs. Each requested XYZ path uses `z/x/y.png`, the same layout as the SailingGo browser tile endpoint.
+
+Example Bay-to-Monterey *planning only* (a broad region at high zoom will typically exceed the cap and be **rejected**, intentionally):
+
+```sh
+go run ./cmd/nauticaltilemanager -west -123.0 -south 36.50 -east -121.45 -north 38.45 -min-zoom 9 -max-zoom 12 -max-tiles 1000
+```
+
+After reviewing a successful plan, the owner may explicitly authorize one new isolated output directory and run the same command with `-download -dir "$HOME/Downloads/nautical-managed-$(date +%Y%m%d-%H%M%S)"`. This fetches NOAA PNGs **only** when explicitly requested; `-source mock` instead uses marked fake imagery but is limited to the Bay–Monterey test rectangle. The manager checks full decoded 256×256 PNG validity, stores files atomically with private permissions, refuses existing unmarked directories and overwrites, and can resume a matching managed dataset by skipping validated PNGs on disk. `-max-bytes 1073741824` optionally enforces a 1 GiB cached PNG byte budget; zero means no byte budget is set. The planner prints per-zoom counts; downloads are serial and stop on errors, caps, cancellation or invalid image data. No compression/re-encoding of NOAA images is enabled yet.
+
+**Integration boundary:** This CLI does not start the SailingGo service or modify its live cache by default. The existing runtime cache-miss NOAA fetch path is still present on this draft branch; transitioning runtime to **read-only** tile serving is a separate, uncompleted change. Do not infer that creating this tool disables the server's runtime writes. Mock on-demand behavior from previous PR iterations also remains until separately revised. Never point production at an experimental mock directory.
