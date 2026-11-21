@@ -10,21 +10,28 @@ const guestEnd=source.indexOf('  // A handoff is transferred only through the fr
 const stageStart=source.indexOf('  // Staging is separate from persistence:');
 const stageEnd=source.indexOf('  async function hydrate() {',stageStart);
 assert.ok(guestStart>=0&&guestEnd>guestStart&&stageStart>=0&&stageEnd>stageStart);
-const operations=source.slice(guestStart,guestEnd)+'\n'+source.slice(stageStart,stageEnd);
+const comparisonStart=source.indexOf('  // Compare preference values,');
+const comparisonEnd=source.indexOf('  function actualParameterChanges(',comparisonStart);
+assert.ok(comparisonStart>=0 && comparisonEnd>comparisonStart);
+const operations=source.slice(comparisonStart,comparisonEnd)+'\n'+
+  source.slice(guestStart,guestEnd)+'\n'+source.slice(stageStart,stageEnd);
 assert.ok(!source.includes('setTimeout(function(){pendingSave=null;void flush()'));
 assert.ok(!source.includes('setTimeout(function () { pendingSave=null;void flush()'));
 assert.ok(!source.includes('await flush();'), 'account hydration must not save automatically');
 const makeFixture=({guest=false,failSave=false,conflict=false}={})=>{
  const store=new Map(),requests=[],notices=[];
  const saveButton={disabled:true,addEventListener(name,fn){this.click=fn}};
+ const discardButton={disabled:true,addEventListener(name,fn){this.click=fn}};
+ const saved={schema:1,params:{wind_unit:'kts'},overlays:{},mapType:'map',marineCategories:{}};
+ const restored=[];
  const ctx={
-  saveButton,
+  saveButton,discardButton,savedSnapshot:JSON.parse(JSON.stringify(saved)),
   window:{addEventListener(name,fn){if(name==='beforeunload')ctx.beforeunload=fn}},
   document:{documentElement:{classList:{remove(){}}}},
   guestIdentity:guest?'guest-001':'',
   signedIn:!guest,user:guest?'':'reader',initializing:false,applying:false,
   blocked:false,saving:false,dirty:false,suppressUnload:false,
-  revision:3,baseline:{schema:1,params:{wind_unit:'kts'},overlays:{},mapType:'',marineCategories:{}},
+  revision:3,baseline:JSON.parse(JSON.stringify(saved)),
   draftKey:'sailing.preferences.pending-account.v2',
   guestDraftKey:'sailing.preferences.pending-guest.v1',
   localKey:'sailing.preferences.browser.v2',
@@ -35,9 +42,13 @@ const makeFixture=({guest=false,failSave=false,conflict=false}={})=>{
   putJSON(key,data,local){if(local&&failSave)return false;store.set((local?'local:':'session:')+key,JSON.stringify(data));return true},
   clearSession(key){store.delete('session:'+key)},
   valid(value){return !!value&&value.schema===1},
-  same(a,b){return JSON.stringify(a)===JSON.stringify(b)},
-  updateSaveUI(message){notices.push(message);saveButton.disabled=!ctx.dirty||ctx.blocked},
+  updateSaveUI(message){
+    notices.push(message);
+    saveButton.disabled=ctx.saving||ctx.blocked||!ctx.dirty;
+    discardButton.disabled=ctx.saving||(!ctx.dirty&&!ctx.blocked);
+  },
   signedInStatus(){},
+  applySettings(data,identity){restored.push({data,identity});return Promise.resolve()},
   async request(path,options){requests.push({path,options});return conflict
    ? {status:409,ok:false}
    : {status:200,ok:true,json:async()=>({revision:4})}},
@@ -46,11 +57,11 @@ const makeFixture=({guest=false,failSave=false,conflict=false}={})=>{
  };
  vm.createContext(ctx);
  vm.runInContext(operations,ctx);
- return {ctx,store,requests,notices,saveButton};
+ return {ctx,store,requests,notices,saveButton,discardButton,restored,saved};
 };
 async function run(){
  const personal=makeFixture();
- const next={schema:1,params:{wind_unit:'mph'},overlays:{},mapType:'',marineCategories:{}};
+ const next={schema:1,params:{wind_unit:'mph'},overlays:{},mapType:'map',marineCategories:{}};
  personal.ctx.stage(next);
  assert.equal(personal.ctx.dirty,true);
  assert.equal(personal.requests.length,0,'staging must not persist');
@@ -89,6 +100,57 @@ async function run(){
  assert.equal(failed.ctx.dirty,true,'browser quota failure must retain pending Guest');
  assert.ok(failed.store.has('session:'+failed.ctx.guestDraftKey));
  assert.ok(failed.notices.some(x=>typeof x==='string'&&/Save failed/.test(x)));
- console.log('SailingGo explicit Save Changes: staging, personal, Guest, 409, failure and navigation checks passed.');
+ // A net-zero change must clear the draft, disable both controls, and
+ // suppress Safari's leave warning without writing preferences anywhere.
+ const reversed=makeFixture();
+ const nautical={...reversed.saved,mapType:'nautical'};
+ reversed.ctx.stage(nautical);
+ assert.equal(reversed.ctx.dirty,true,'Street -> Nautical should be pending');
+ assert.equal(reversed.saveButton.disabled,false,'save enabled for a real edit');
+ reversed.ctx.stage({...reversed.saved,mapType:'map'});
+ assert.equal(reversed.ctx.dirty,false,'Street -> Nautical -> Street is not a change');
+ assert.equal(reversed.saveButton.disabled,true,'save disabled after undo');
+ assert.equal(reversed.discardButton.disabled,true,'discard disabled after undo');
+ assert.equal(reversed.store.has('session:'+reversed.ctx.draftKey),false);
+ const noWarning={preventDefault(){this.prevented=true}};
+ reversed.ctx.beforeunload(noWarning);
+ assert.equal(noWarning.prevented,undefined,'no leave warning for net-zero changes');
+ assert.equal(reversed.requests.length,0,'no PUT on canceling a preference change');
+
+ const guestReversed=makeFixture({guest:true});
+ guestReversed.ctx.stageGuest(nautical);
+ guestReversed.ctx.stageGuest({...guestReversed.saved,mapType:'map'});
+ assert.equal(guestReversed.ctx.dirty,false,'Guest should detect net-zero map type');
+ assert.equal(guestReversed.store.has('session:'+guestReversed.ctx.guestDraftKey),false);
+ assert.equal(guestReversed.store.has('local:'+guestReversed.ctx.localKey),false,'undo must not commit Guest settings');
+
+ // Discard restores saved settings in the active view and clears tab drafts.
+ const discard=makeFixture();
+ discard.ctx.stage(nautical);
+ discard.discardButton.click();
+ assert.equal(discard.ctx.dirty,false);
+ assert.equal(discard.saveButton.disabled,true);
+ assert.equal(discard.discardButton.disabled,true);
+ assert.equal(discard.store.has('session:'+discard.ctx.draftKey),false);
+ assert.equal(discard.restored.length,1,'discard must restore the saved view');
+ assert.equal(discard.restored[0].data.mapType,'map');
+ assert.equal(discard.requests.length,0,'discard must not call Homepage');
+
+ const discardGuest=makeFixture({guest:true});
+ discardGuest.ctx.stageGuest(nautical);
+ discardGuest.discardButton.click();
+ assert.equal(discardGuest.ctx.dirty,false);
+ assert.equal(discardGuest.store.has('session:'+discardGuest.ctx.guestDraftKey),false);
+ assert.equal(discardGuest.store.has('local:'+discardGuest.ctx.localKey),false,'discard must not save Guest changes');
+ assert.equal(discardGuest.restored[0].data.mapType,'map');
+
+ // A 409 leaves the user a safe way out, instead of forcing an overwrite.
+ conflict.discardButton.click();
+ assert.equal(conflict.ctx.blocked,false);
+ assert.equal(conflict.ctx.dirty,false);
+ assert.equal(conflict.store.has('session:'+conflict.ctx.draftKey),false);
+ assert.equal(conflict.requests.length,1,'discard after 409 never retries PUT');
+
+ console.log('SailingGo explicit Save/Discard: personal, Guest, net-zero edits, 409, failure and unload checks passed.');
 }
 run().catch(err=>{console.error(err);process.exitCode=1});
