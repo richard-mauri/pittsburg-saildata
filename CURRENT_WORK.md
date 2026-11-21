@@ -1,5 +1,22 @@
 # Current work — SailingGo
 
+**Verified current baseline:** GitHub `main` at `faa394e604498c8f22f0a52f06cfd1c8f9564069`, after earlier shared-banner work. New suite access scope [Issue #35](https://github.com/richard-mauri/pittsburg-saildata/issues/35), branch `auth/35-verified-suite-access`, draft PR targeting `main`. The old #33/#34 and #30/#31 discussions below are historical snapshots, not active security blockers. The separate OSM seam Issue #32 remains outside this scope.
+
+**NEXT first security phase:** Stage `sailing_suite_auth.go` using the pinned Homepage `shared/auth` helper; add `sailing_suite_auth_test.go` covering server-verified user/admin/Guest, malformed/missing/expired/revoked credentials, unavailable Homepage and future `/api/*` routes. Add the pinned immutable module and checksums to `go.mod`/`go.sum`. Do not wire the gate to `main.go` yet: existing SailingGo pages, non-`/api` weather and report routes, and browser background fetches must migrate coherently. This phase is not production authorization, and the draft must not be deployed as if it were complete.
+
+**Next implementation scope within this issue/PR:** Inventory every root data/overlay route and browser fetch, implement verified browser handoff including Guest and direct/Private Safari, extend the gate to all appropriate weather/report interfaces, and remove anonymous/browser-only access as an authorization alternative. Preserve existing per-user saved preferences and observed wind versus predicted current semantics. CI must cover actual wired route denial and successful verified use; owner Safari and live NOAA acceptance remains pending.
+
+**Data safety:** GitHub-only source/test/docs work. No owner's Mac files, local uncommitted changes, subscriptions, per-user account records, cookies, browser state, activity credentials, tunnels, listener, running binaries, build counters, version, deployment, DNS or releases touched. Owner-local tree cannot be inspected.
+
+**Documentation:** Current full Homepage policy v1.1.0 read from `main`. SailingGo AGENTS, README, ARCHITECTURE, DEVELOPMENT and CURRENT_WORK reviewed; README/ARCHITECTURE/DEVELOPMENT/CURRENT_WORK updated, AGENTS and policy unchanged.
+
+**Verification:** CI exact-head result pending. Run `./devbuild.sh` on the Mac for root test/build, then `./sailing-go -version`. No restart authorized. The new guard unit tests do not establish the current runtime is protected. No merge, issue closure, branch deletion, deployment, tag or release authorized.
+
+---
+
+## Historical UI and NOAA work (previous CURRENT_WORK snapshot)
+# Current work — SailingGo
+
 **Active new UI work:** [Issue #33](https://github.com/richard-mauri/pittsburg-saildata/issues/33), branch `ui/33-shared-banner`, [draft PR #34](https://github.com/richard-mauri/pittsburg-saildata/pull/34). Based on GitHub `main` `d8d53d8` after merged playback-contrast PR #31. This branch adopts the Homepage shared banner and `.suite-content` width on all four SailingGo HTML pages, reuses a locally embedded Tanner image, removes obsolete individual Homepage links, and separates account identity from preference-sync notices. The Go module dependency is pinned to `v0.0.0-20261120183652-a93b6b4e5539`; build development lineage advances v426 to v427, not semantic version. GitHub Go CI passed the corrected code head in [run #189](https://github.com/richard-mauri/pittsburg-saildata/actions/runs/44798833531); the final PR head must also pass CI. Owner Mac/Safari acceptance remains pending. Preserve NOAA observations, tidal predictions, maps, overlays, and per-user preference storage. No restart, merge, deployment or release is authorized. The separate open OSM-seam Issue #32 is untouched.
 
 **Active:** [Issue #30](https://github.com/richard-mauri/pittsburg-saildata/issues/30), Safari dark-theme contrast in map playback controls. Branch `fix/30-playback-theme-contrast` starts at verified GitHub `main` `9383822317161fd99707aa14d24320b97de2a86d`. Prior [PR #29](https://github.com/richard-mauri/pittsburg-saildata/pull/29) merged at that commit and Issue #28 closed; PR #29 final head `dfd60501d7b2e671def8c60e7464a8432295a702` passed Go CI run 44346878034. No other open Issues or PRs were found at this phase's start.
