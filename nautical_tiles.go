@@ -29,6 +29,12 @@ func nauticalTileDiagnostics(w http.ResponseWriter, source, result string) {
  w.Header().Set("X-Sailing-Chart-Source", source)
  w.Header().Set("X-Sailing-Chart-Result", result)
 }
+func nauticalUpstreamStatus(w http.ResponseWriter, err error) {
+ var upstream *nauticalUpstreamError
+ if errors.As(err,&upstream) && upstream.status>0 {
+  w.Header().Set("X-Sailing-Chart-Upstream-Status",strconv.Itoa(upstream.status))
+ }
+}
 
 type nauticalUpstreamError struct {
  kind string
@@ -77,7 +83,7 @@ func nauticalTileHandler(directory string) http.Handler {
 func nauticalTileHandlerWithUpstream(directory, upstream string, client *http.Client) http.Handler {
  root:=strings.TrimSpace(directory)
  if client==nil {client=&http.Client{Timeout:5*time.Second}}
- type tileFlight struct {done chan struct{}; data []byte; err error}
+ type tileFlight struct {done chan struct{}; data []byte; err error; result string}
  var mu sync.Mutex
  flights:=map[string]*tileFlight{}
  slots:=make(chan struct{},4)
@@ -125,7 +131,8 @@ func nauticalTileHandlerWithUpstream(directory, upstream string, client *http.Cl
    case <-existing.done:
    }
    if existing.err!=nil {
-    nauticalTileDiagnostics(w,"unavailable",nauticalFailureResult(existing.err))
+    nauticalTileDiagnostics(w,"unavailable",existing.result)
+    nauticalUpstreamStatus(w,existing.err)
     http.Error(w,"NOAA nautical charts temporarily unavailable",http.StatusServiceUnavailable);return
    }
    nauticalTileDiagnostics(w,"noaa","noaa-fetched-shared")
@@ -145,8 +152,10 @@ func nauticalTileHandlerWithUpstream(directory, upstream string, client *http.Cl
    <-slots
   case <-ctx.Done():
    flight.err=ctx.Err()
+   flight.result="queue-timeout"
   }
   fetchResult:=nauticalFailureResult(flight.err)
+  if flight.result!="" {fetchResult=flight.result}
   if flight.err==nil {
    flight.err=saveNauticalTile(filename,flight.data)
    if flight.err!=nil {fetchResult="cache-write-error";log.Printf("NAUTICAL tile=%s result=cache-write-error",key)}
@@ -159,11 +168,13 @@ func nauticalTileHandlerWithUpstream(directory, upstream string, client *http.Cl
   }
   mu.Lock()
   if flight.err!=nil {retryAfter=time.Now().Add(30*time.Second)}
+  flight.result=fetchResult
   delete(flights,key)
   close(flight.done)
   mu.Unlock()
   if flight.err!=nil {
    nauticalTileDiagnostics(w,"unavailable",fetchResult)
+   nauticalUpstreamStatus(w,flight.err)
    w.Header().Set("Retry-After","30")
    http.Error(w,"NOAA nautical charts temporarily unavailable",http.StatusServiceUnavailable);return
   }
