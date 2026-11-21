@@ -136,7 +136,8 @@ function testMapTileFallback(){
  const source=fs.readFileSync('web/templates/sailing.html','utf8');
  const a=source.indexOf('  function applyPreferredBaseMap() {');
  const b=source.indexOf('  function setBaseMapLayer(name) {',a);
- assert.ok(a>=0&&b>a,'actual basemap implementation must be available');
+ const c=source.indexOf('\n  applyPreferredBaseMap();\n',b);
+ assert.ok(a>=0&&b>a&&c>b,'actual basemap implementation must be available');
  const makeLayer=name=>({
   name,addTo(map){map.layers.add(this);map.order.push(this.name);return this},
   bringToFront(){map.order.push(this.name)},setStyle(){}
@@ -147,21 +148,29 @@ function testMapTileFallback(){
  const satelliteLayer=makeLayer('satellite');
  const hybridLayer=makeLayer('hybrid');
  const radio=[{value:'map'},{value:'nautical'},{value:'satellite'}];
+ let timeoutStarts=0;
  const context={
   map,streetLayer,nauticalLayer,satelliteLayer,hybridLayer,
   preferredMapLayerName:'nautical',activeMapLayerName:'map',
-  nauticalUnavailable:false,nauticalCheckTimer:null,minimumNauticalZoom:9,
+  nauticalUnavailable:false,nauticalCheckTimer:null,nauticalAdvisory:false,nauticalTileLoads:0,minimumNauticalZoom:9,
   mapState:{cloudOverlayVisible:false,radarOverlayVisible:false},
   cloudLayer:null,radarLayer:null,marineZoneHaloLayer:null,
   marineZoneLayer:null,smokeLayer:null,smokeOutlineLayer:null,
   updateNauticalZoomUI(){},updateSmokeLegendForBaseMap(){},
+  startNauticalResponseCheck(){timeoutStarts++;context.nauticalCheckTimer=1;},
+  clearTimeout(){context.nauticalCheckTimer=null;},
+  persistPreferredMapLayer(){},
   document:{querySelectorAll(){return radio}},
   effectiveMapLayerName(){return context.preferredMapLayerName},
   baseLayerForName(name){return {map:streetLayer,nautical:nauticalLayer,satellite:satelliteLayer,hybrid:hybridLayer}[name]},
  };
  vm.createContext(context);
  vm.runInContext(source.slice(a,b),context);
+ vm.runInContext(source.slice(b,c),context);
  context.applyPreferredBaseMap();
+ assert.equal(timeoutStarts,1,'initial saved Nautical must arm timeout without Leaflet loading');
+ context.applyPreferredBaseMap();
+ assert.equal(timeoutStarts,1,'reapplying Nautical must not restart the same timeout');
  assert.ok(map.hasLayer(streetLayer),'nautical must retain street underlay');
  assert.ok(map.hasLayer(nauticalLayer),'nautical layer should render over street');
  assert.equal(context.activeMapLayerName,'nautical');
@@ -174,10 +183,15 @@ function testMapTileFallback(){
  assert.equal(context.preferredMapLayerName,'nautical',
   'fallback must not silently change saved preference');
  assert.equal(context.activeMapLayerName,'map');
+ assert.equal(context.nauticalCheckTimer,null,'fallback cancels outstanding timeout');
  context.preferredMapLayerName='satellite';
  context.applyPreferredBaseMap();
  assert.ok(map.hasLayer(satelliteLayer),'satellite selection remains intact');
  assert.ok(!map.hasLayer(streetLayer),'other basemaps should not keep Street');
+ context.setBaseMapLayer('nautical');
+ assert.equal(timeoutStarts,2,'manual Nautical selection must arm timeout without loading event');
+ assert.ok(map.hasLayer(nauticalLayer),'manual Nautical retry should attempt chart display');
+ assert.equal(context.preferredMapLayerName,'nautical','retry retains Nautical preference');
  assert.ok(source.includes('nauticalStatusMessage = "NOAA nautical charts are temporarily unavailable. Showing Street Map instead; please try again later.";'),
   'a complete NOAA nautical tile failure must tell users to retry later');
  assert.ok(source.includes('if (showNotice) nauticalZoomNote.textContent = belowMinimum'),
