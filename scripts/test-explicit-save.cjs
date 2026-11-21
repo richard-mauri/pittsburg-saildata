@@ -219,9 +219,12 @@ function testNauticalResponseDiagnostics(){
  const nauticalLayer={on(name,fn){callbacks[name]=fn;}};
  const note={hidden:true}, statusText={textContent:''}, progress={hidden:true};
  const cancelButton={hidden:true,addEventListener(name,fn){this[name]=fn;}};
+ const closeButton={hidden:true,addEventListener(name,fn){this[name]=fn;}};
  const typeInput={disabled:false,setAttribute(){},title:''};
  const label={classList:{toggle(){}}};
  let timer=null, updates=0, fallbackEvents=0, stagedMapType='nautical';
+ const timers=new Map();
+ let timerId=0;
  const streetInput={
   checked:false,
   dispatchEvent(ev){
@@ -237,7 +240,8 @@ function testNauticalResponseDiagnostics(){
  const context={
   nauticalLayer, preferredMapLayerName:'nautical',
   nauticalZoomNote:note,nauticalStatusText:statusText,
-  nauticalCancelButton:cancelButton,nauticalProgress:progress,nauticalTypeInput:typeInput,
+  nauticalCancelButton:cancelButton,nauticalCloseButton:closeButton,
+  nauticalProgress:progress,nauticalTypeInput:typeInput,
   nauticalTypeLabel:label,minimumNauticalZoom:9,
   map:{hasLayer(x){return x===nauticalLayer},getZoom(){return 10}},
   document:{querySelector(sel){
@@ -245,8 +249,8 @@ function testNauticalResponseDiagnostics(){
    throw new Error('unexpected selector: '+sel);
   }},
   Event:class Event{constructor(type,opts){this.type=type;this.bubbles=opts.bubbles}},
-  setTimeout(fn){timer=fn;return 1;},
-  clearTimeout(){timer=null;},
+  setTimeout(fn,ms){timer=fn;const id=++timerId;timers.set(id,{fn,ms});return id;},
+  clearTimeout(id){timers.delete(id);timer=null;},
   updateNauticalZoomUI(){updates++;return context.realUpdateNauticalZoomUI();},
   setBaseMapLayer(name){context.preferredMapLayerName=name;},
  };
@@ -270,8 +274,26 @@ function testNauticalResponseDiagnostics(){
  assert.equal(note.hidden,false,'warning must remain visible after switching radio to Street');
  assert.equal(cancelButton.hidden,true,'Cancel hidden after timeout');
  assert.equal(progress.hidden,true,'progress bar hidden after timeout');
+ assert.equal(closeButton.hidden,false,'same status panel offers Close after failure');
  assert.ok(statusText.textContent.includes('not responding'));
+ assert.ok([...timers.values()].some(t=>t.ms===8000),
+  'failure status should be automatically dismissed');
+ closeButton.click();
+ assert.equal(note.hidden,true,'Close dismisses failure in the same panel');
+ assert.equal(context.nauticalFailureNotice,false,'Close clears failure state');
+ assert.equal(closeButton.hidden,true,'Close hides itself');
+ assert.ok(![...timers.values()].some(t=>t.ms===8000),
+  'manual Close cancels automatic dismissal timer');
 
+ // The same error panel automatically dismisses without requiring Close.
+ context.preferredMapLayerName='nautical';
+ callbacks.loading();
+ timer();
+ const autoDismiss=[...timers.values()].find(t=>t.ms===8000);
+ assert.ok(autoDismiss,'timeout should schedule automatic dismissal');
+ autoDismiss.fn();
+ assert.equal(note.hidden,true,'final failure popup must not stay forever');
+ assert.equal(context.nauticalFailureNotice,false);
  // Manual Cancel must also reset Street, without displaying the outage warning.
  context.preferredMapLayerName='nautical';
  context.nauticalFailureNotice=false;
@@ -279,7 +301,7 @@ function testNauticalResponseDiagnostics(){
  callbacks.loading();
  assert.equal(note.hidden,false);
  cancelButton.click();
- assert.equal(fallbackEvents,2,'Cancel must reset radio through staged change');
+ assert.equal(fallbackEvents,3,'Cancel must reset radio through staged change');
  assert.equal(context.nauticalFailureNotice,false);
  assert.equal(note.hidden,true,'Cancel removes loading message');
  assert.equal(progress.hidden,true,'Cancel removes busy progress bar');
