@@ -165,3 +165,17 @@ func TestSailingProductionListenerInstallsHTTPAuthorization(t *testing.T) {
   t.Fatal("production listener starts before guard installation")
  }
 }
+
+func TestSailingEntryMatchesSharedLightDarkPalette(t *testing.T) {
+ for _,required:=range []string{
+  `<meta name="color-scheme" content="light dark">`,
+  `--bg:light-dark(#f5f5f0,#0e141a)`,
+  `--panel:light-dark(#ffffff,#19232b)`,
+  `--ink:light-dark(#182631,#eef2f4)`,
+  `html{min-height:100%;background:var(--bg)}`,
+  `background:var(--bg);color:var(--ink)`,
+ }{
+  if !strings.Contains(sailingEntryHTML,required) {t.Errorf("auth handoff missing shared theme %q",required)}
+ }
+ if strings.Contains(sailingEntryHTML,`<body style="font:16px`){t.Fatal("unstyled white auth entry restored")}
+}
