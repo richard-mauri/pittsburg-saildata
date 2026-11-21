@@ -811,9 +811,9 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   var activeMapLayerName = "map";
   var nauticalTileLoads = 0;
   var nauticalTileErrors = 0;
-  // Preserve successful tiles across subsequent partial or failed requests at
-  // the same zoom. Leaflet owns visual transitions, never our status panel.
-  var nauticalSuccessfulZooms = {};
+  // Record actual successful XYZ tile coordinates, not historical successes
+  // at an entire zoom. A distant pan at the same zoom is a new viewport.
+  var nauticalSuccessfulTiles = {};
   var nauticalUnavailable = false;
   var nauticalStatusMessage = "";
   var nauticalAdvisory = false;
@@ -821,6 +821,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   var nauticalProgressTimer = null;
   var nauticalLoadGeneration = 0;
   var nauticalRequestZoom = null;
+  var nauticalRequestView = null;
   var nauticalLoading = false;
   var nauticalFailureNotice = false;
   var nauticalAutomaticFallback = false;
@@ -836,13 +837,6 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   }
 
   function showNauticalFailureNotice(message) {
-    if (nauticalMockInspection) {
-      stopNauticalWaiting();
-      nauticalFailureNotice = false;
-      nauticalStatusMessage = "";
-      updateNauticalZoomUI();
-      return;
-    }
     if (nauticalFailureTimer !== null) clearTimeout(nauticalFailureTimer);
     stopNauticalWaiting();
     nauticalStatusMessage = message;
@@ -865,6 +859,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     nauticalCheckTimer = null;
     nauticalProgressTimer = null;
     nauticalRequestZoom = null;
+    nauticalRequestView = null;
     nauticalLoading = false;
   }
 
@@ -902,25 +897,52 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   // A successful chart tile image response can still be completely transparent. The
   // browser cannot reliably prove chart content without cross-origin pixel
   // access, so show a conditional advisory instead of asserting an outage.
+  // The tile layer may overzoom native NOAA z16 imagery at display z17/18.
+  // Compare successes against the XYZ tiles intersecting the CURRENT view.
+  function nauticalVisibleTileRange() {
+    var z = Math.min(map.getZoom(), nauticalLayer.options.maxNativeZoom);
+    var bounds = map.getBounds();
+    var nw = map.project(bounds.getNorthWest(), z);
+    var se = map.project(bounds.getSouthEast(), z);
+    var tileSize = nauticalLayer.getTileSize().x;
+    var maxIndex = Math.pow(2, z) - 1;
+    return {
+      z: z,
+      x0: Math.max(0, Math.min(maxIndex, Math.floor(nw.x / tileSize))),
+      x1: Math.max(0, Math.min(maxIndex, Math.floor((se.x - 0.001) / tileSize))),
+      y0: Math.max(0, Math.min(maxIndex, Math.floor(nw.y / tileSize))),
+      y1: Math.max(0, Math.min(maxIndex, Math.floor((se.y - 0.001) / tileSize)))
+    };
+  }
+  function nauticalViewportKey() {
+    var r = nauticalVisibleTileRange();
+    return [r.z, r.x0, r.y0, r.x1, r.y1].join("/");
+  }
+  function nauticalViewportHasTiles() {
+    var r = nauticalVisibleTileRange();
+    for (var x = r.x0; x <= r.x1; x++) {
+      for (var y = r.y0; y <= r.y1; y++) {
+        if (nauticalSuccessfulTiles[[r.z, x, y].join("/")]) return true;
+      }
+    }
+    return false;
+  }
+  function nauticalNoCoverageMessage() {
+    return "No nautical chart tiles are available in this area at the current zoom. Try panning back toward chart coverage or changing zoom levels.";
+  }
   function checkNauticalResponse() {
     nauticalCheckTimer = null;
     if (preferredMapLayerName !== "nautical" || !map.hasLayer(nauticalLayer) ||
-        nauticalRequestZoom !== map.getZoom()) {
+        nauticalRequestZoom !== map.getZoom() ||
+        nauticalRequestView !== nauticalViewportKey()) {
       stopNauticalWaiting();
       updateNauticalZoomUI();
       return;
     }
-    if (nauticalMockInspection) {
-      // Local fixture misses may still be pending upstream; expose whichever
-      // mock tiles are ready, but never switch the user's map selection.
-      stopNauticalWaiting();
-      updateNauticalZoomUI();
-      return;
-    }
+    var hasCoverage = nauticalViewportHasTiles();
     stopNauticalWaiting();
-    if (nauticalTileLoads === 0 && !nauticalSuccessfulZooms[map.getZoom()]) {
-      showNauticalFailureNotice("Nautical chart tiles are unavailable at this zoom. Try changing zoom levels or moving the map.");
-
+    if (!hasCoverage) {
+      showNauticalFailureNotice(nauticalNoCoverageMessage());
       return;
     }
     nauticalAdvisory = false;
@@ -928,7 +950,8 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   }
   function startNauticalResponseCheck() {
     if (nauticalCheckTimer !== null) {
-      if (nauticalRequestZoom === map.getZoom()) return;
+      if (nauticalRequestZoom === map.getZoom() &&
+          nauticalRequestView === nauticalViewportKey()) return;
       stopNauticalWaiting();
     }
     // A fast cached tile batch should complete before any progress UI is
@@ -936,11 +959,13 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     nauticalLoading = false;
     nauticalAdvisory = false;
     nauticalRequestZoom = map.getZoom();
+    nauticalRequestView = nauticalViewportKey();
     var generation = ++nauticalLoadGeneration;
     nauticalProgressTimer = setTimeout(function() {
       if (generation !== nauticalLoadGeneration || nauticalCheckTimer === null ||
           preferredMapLayerName !== "nautical" || !map.hasLayer(nauticalLayer) ||
-          nauticalRequestZoom !== map.getZoom()) return;
+          nauticalRequestZoom !== map.getZoom() ||
+          nauticalRequestView !== nauticalViewportKey()) return;
       nauticalProgressTimer = null;
       nauticalLoading = true;
       updateNauticalZoomUI();
@@ -958,35 +983,45 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     nauticalTileLoads = 0;
     nauticalTileErrors = 0;
     nauticalAdvisory = false;
-    if (nauticalCheckTimer === null || nauticalRequestZoom !== map.getZoom()) {
+    if (nauticalCheckTimer === null || nauticalRequestZoom !== map.getZoom() ||
+        nauticalRequestView !== nauticalViewportKey()) {
       startNauticalResponseCheck();
     }
     updateNauticalZoomUI();
   });
   nauticalLayer.on("tileload", function(event) {
-    var z = event && event.coords ? event.coords.z : map.getZoom();
-    nauticalSuccessfulZooms[z] = true;
-    if (z === map.getZoom()) nauticalTileLoads++;
+    if (!event || !event.coords) return;
+    var coords = event.coords;
+    nauticalSuccessfulTiles[[coords.z, coords.x, coords.y].join("/")] = true;
+    if (coords.z === Math.min(map.getZoom(), nauticalLayer.options.maxNativeZoom)) {
+      nauticalTileLoads++;
+    }
   });
-  nauticalLayer.on("tileerror", function() { nauticalTileErrors++; });
+  nauticalLayer.on("tileerror", function(event) {
+    nauticalTileErrors++;
+    // A tile that fails after previously succeeding must not be retained
+    // as evidence of current coverage.
+    if (event && event.coords) {
+      var coords = event.coords;
+      delete nauticalSuccessfulTiles[[coords.z, coords.x, coords.y].join("/")];
+    }
+  });
   nauticalLayer.on("load", function() {
     if (preferredMapLayerName !== "nautical" || !map.hasLayer(nauticalLayer) ||
-        (nauticalRequestZoom !== null && nauticalRequestZoom !== map.getZoom())) return;
-    if (nauticalTileLoads === 0 && nauticalTileErrors > 0 &&
-        !nauticalSuccessfulZooms[map.getZoom()] && !nauticalMockInspection) {
-      showNauticalFailureNotice("Nautical chart tiles are unavailable at this zoom. Try changing zoom levels or moving the map.");
+        (nauticalRequestZoom !== null &&
+          (nauticalRequestZoom !== map.getZoom() ||
+           nauticalRequestView !== nauticalViewportKey()))) return;
+    // Success anywhere at this zoom is insufficient: count only visible XYZ
+    // cells, including previously loaded cells remaining on screen.
+    if (!nauticalViewportHasTiles()) {
+      showNauticalFailureNotice(nauticalNoCoverageMessage());
       return;
     }
-    // The current request batch may fail at the edges despite valid tiles
-    // already being on screen. Never label that as a complete outage.
-    if (nauticalMockInspection || nauticalTileLoads > 0 ||
-        nauticalSuccessfulZooms[map.getZoom()] || nauticalTileErrors === 0) {
-      nauticalUnavailable = false;
-      stopNauticalWaiting();
-      nauticalStatusMessage = "";
-      nauticalAdvisory = false;
-      updateNauticalZoomUI();
-    }
+    nauticalUnavailable = false;
+    stopNauticalWaiting();
+    nauticalStatusMessage = "";
+    nauticalAdvisory = false;
+    updateNauticalZoomUI();
   });
 
   function baseLayerForName(name) {
@@ -1059,8 +1094,8 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       var keep = layer === targetLayer || (showNautical && layer === streetLayer);
       if (!keep && map.hasLayer(layer)) map.removeLayer(layer);
     });
-    // Start the ONE status panel synchronously, before adding chart tiles.
-    // It must be visible before Leaflet can paint cached PNGs.
+    // Schedule the 200ms progress threshold before starting tile requests.
+    // Fast cached tiles must never cause a late progress popup.
     if (showNautical && nauticalCheckTimer === null &&
         nauticalTileLoads === 0) startNauticalResponseCheck();
     // Order is significant: put the fallback in place before requesting NOAA.
@@ -1114,7 +1149,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       nauticalUnavailable = false;
       nauticalTileLoads = 0;
       nauticalTileErrors = 0;
-      nauticalSuccessfulZooms = {};
+      nauticalSuccessfulTiles = {};
       nauticalStatusMessage = "";
       nauticalAdvisory = false;
     }
@@ -6653,6 +6688,21 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   });
 
   map.on("moveend", function() {
+    // Leaflet may have no new requests on a same-zoom pan. Reevaluate the
+    // viewport anyway: earlier tiles elsewhere at this zoom are irrelevant.
+    if (preferredMapLayerName === "nautical" && map.hasLayer(nauticalLayer)) {
+      if (nauticalFailureNotice) dismissNauticalFailureNotice();
+      if (nauticalCheckTimer === null) {
+        if (!nauticalViewportHasTiles()) {
+          showNauticalFailureNotice(nauticalNoCoverageMessage());
+        } else {
+          nauticalStatusMessage = "";
+          updateNauticalZoomUI();
+        }
+      } else if (nauticalRequestView !== nauticalViewportKey()) {
+        startNauticalResponseCheck();
+      }
+    }
     syncCoordinateInputsToMapCenter();
     updateMapScaleStatus();
     if (mapState.structureOverlayVisible) scheduleStructureRefresh();
