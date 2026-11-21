@@ -153,3 +153,17 @@ The normal public site keeps its NOAA failure-to-Street behavior. For the owner-
 In loopback inspection mode, mock tile misses neither force Street selection nor start the 12-second NOAA response timeout/progress panel; valid XYZ tiles remain visible while missing tiles expose the Street underlay. The rest of the application and explicit Save/Discard pathways are unchanged. Zoom below 9 still uses the normal map minimum; test zoom 10–12. Successful nautical tiles no longer create the persistent generic NOAA advisory on normal or test hosts. A plain normal public Nautical view still shows Loading/Cancel and dismissible Failure/Close with automatic Street fallback on actual upstream failure.
 
 The owner already demonstrated labeled mock XYZ tiles in Safari at zoom 10 while using the public Cloudflare site. That proves visible serving at this zoom, **not** intended isolated testing or complete zoom/corridor coverage. Before any further evaluation, restore public SailingGo to its normal cache (unset a test variable for any future startup, and arrange any necessary production restart separately under owner control; unsetting a shell variable alone does not change a running process). Test mocks only on loopback. Never claim NOAA online.
+
+### Updated owner Safari mock acceptance — one status panel, zooms 9–14
+
+The 45-tile z10–z12 directory created earlier remains untouched but does **not** cover the expanded test. After a clean checkout and `./devbuild.sh` once, generate a **fresh** directory:
+
+```sh
+cd ~/projects/sailing-go
+MOCK_DIR="$HOME/Downloads/sailing-nautical-mock-$(date +%Y%m%d-%H%M%S)"
+go run ./cmd/mocknauticaltiles -dir "$MOCK_DIR"
+```
+
+Use that new output **only** for a separately owner-approved loopback test server, with `SAILING_NAUTICAL_TILE_DIR` set on that test process, and open its actual local `/planning?nautical_mock_test=1` page in Safari. Do not point the owner production `s` launcher or Cloudflare Tunnel at test tiles; confirm public service no longer uses mock cache first. The loopback browser flag **must not** be expected to work at `weather.themauris.org`. No process/tunnel restarts are authorized by this document.
+
+At z9–z14 near Pittsburg and Delta, select Nautical: one existing panel must display Loading and Cancel before mock tiles appear. Once tiles settle the panel must disappear and the labeled imagery must be visible in the correct places. Pan into an uncovered area: the Street underlay should be visible without a forced Street radio change; zooming should retain Nautical, apart from the preexisting below-z9 minimum. On normal non-mock pages, failed NOAA requests should reuse the **same** panel for error + Close and automatic dismissal (no second popup); the Street fallback should remain staged until Save Changes. Verify map click versus pan/zoom, overlays and both Guest/personal Save/Discard. CI mocks cannot establish Safari appearance. Historical 2024 NOAA MBTiles remain diagnostic-only and out of scope.
