@@ -18,6 +18,7 @@
   const handedOff = fragment.has("suite_token") || fragment.has("suite_mode");
   const explicitlyLocal = fragment.get("suite_mode") === "local";
   let bearer = "", user = "", guestIdentity = "", revision = null, baseline = null;
+  let savedSnapshot = null; // Last successfully saved preferences, not the latest edit.
   let signedIn = false, initializing = true, applying = false;
   let saving = false, dirty = false, blocked = false, suppressUnload = false;
   let priorNavigation = null, restoredNavigation = false;
@@ -54,14 +55,21 @@
   saveButton.type = "button";
   saveButton.textContent = "Save Changes";
   saveButton.disabled = true;
+  const discardButton = document.createElement("button");
+  discardButton.id = "sailing-discard-changes";
+  discardButton.className = "ui-button";
+  discardButton.type = "button";
+  discardButton.textContent = "Discard Changes";
+  discardButton.disabled = true;
   const saveNote = document.createElement("span");
   saveNote.id = "sailing-save-status";
   saveNote.setAttribute("role","status");
   saveNote.setAttribute("aria-live","polite");
   saveNote.style.cssText = "font-size:.83rem;color:var(--muted);max-width:25rem";
-  if (saveRow) saveRow.append(saveButton,saveNote);
+  if (saveRow) saveRow.append(saveButton,discardButton,saveNote);
   function updateSaveUI(message) {
     saveButton.disabled = saving || blocked || !dirty;
+    discardButton.disabled = saving || (!dirty && !blocked);
     saveNote.textContent = message === undefined
       ? (blocked ? "Preference conflict · Changes retained." :
          dirty ? "Unsaved changes · Click Save Changes." : "")
@@ -120,7 +128,30 @@
       return /^[a-z_]+$/.test(pair[0]) && pair[0].length <= 48 && typeof pair[1] === "boolean";
     });
   }
-  function same(a,b) { return JSON.stringify(a) === JSON.stringify(b); }
+  // Compare preference values, not the number of change events or object key order.
+  // This also handles an edit that exactly reverses an earlier map/overlay change.
+  function stable(value) {
+    if (Array.isArray(value)) return value.map(stable);
+    if (value && typeof value === "object") {
+      const result = {};
+      Object.keys(value).sort().forEach(function(key){result[key]=stable(value[key]);});
+      return result;
+    }
+    return value;
+  }
+  function same(a,b) { return JSON.stringify(stable(a)) === JSON.stringify(stable(b)); }
+  function refreshDirty(next,guest) {
+    const key = guest ? guestDraftKey : draftKey;
+    const saved = savedSnapshot;
+    if (saved && same(next,saved)) {
+      clearSession(key);
+      dirty=false;
+      blocked=false;
+      updateSaveUI();
+      return false;
+    }
+    return true;
+  }
   function actualParameterChanges(previous) {
     const before = new URL(previous,location.origin).searchParams;
     const after = new URL(location.href).searchParams;
@@ -199,6 +230,7 @@
   // Guest changes remain tab-scoped until the visitor explicitly saves.
   function stageGuest(data) {
     if (initializing || applying || !valid(data)) return;
+    if (!refreshDirty(data,true)) return;
     if (!putJSON(guestDraftKey,{user:guestIdentity || "local",data:data},false)) {
       updateSaveUI("Could not stage preferences in this tab.");
       return;
@@ -213,15 +245,20 @@
     else {SuiteBannerStatus.setText("Browser-only mode");status("Not signed in");}
     const old = getJSON(localKey,true);
     const saved = valid(old) ? old : settingsFromPage(null);
+    savedSnapshot = JSON.parse(JSON.stringify(saved));
     const pending = getJSON(guestDraftKey,false);
-    let data = pending && pending.user === (localIdentity || "local") && valid(pending.data)
-      ? pending.data : saved;
-    dirty = !!(pending && pending.user === (localIdentity || "local") && valid(pending.data));
+    const ownPending = pending && pending.user === (localIdentity || "local") && valid(pending.data);
+    let data = ownPending ? pending.data : saved;
+    dirty = !!ownPending && !same(data,saved);
+    if (ownPending && !dirty) clearSession(guestDraftKey);
     if (priorNavigation && priorNavigation.user === "local" && priorNavigation.url !== pageURL) {
       const changed = mergeChangedNavigation(data,priorNavigation);
       if (!same(changed,data)) {
         data=changed;
-        if (putJSON(guestDraftKey,{user:localIdentity || "local",data:data},false)) dirty=true;
+        if (same(data,savedSnapshot)) {
+          clearSession(guestDraftKey);
+          dirty=false;
+        } else if (putJSON(guestDraftKey,{user:localIdentity || "local",data:data},false)) dirty=true;
       }
     }
     await applySettings(data,"local");
@@ -264,6 +301,7 @@
   // Staging is separate from persistence: no timer or passive account PUT.
   function stage(data) {
     if (!signedIn || initializing || applying || !valid(data)) return;
+    if (!refreshDirty(data,false)) return;
     if (!putJSON(draftKey,{user:user,revision:revision,data:data},false)) {
       updateSaveUI("Could not stage preferences in this tab.");
       return;
@@ -283,9 +321,10 @@
       saving=true;updateSaveUI("Saving…");
       if (saveLocal(guest.data)) {
         clearSession(guestDraftKey);
+        savedSnapshot=JSON.parse(JSON.stringify(guest.data));
         dirty=false;updateSaveUI("Settings saved in this browser.");
       } else updateSaveUI("Save failed · Click Save Changes to retry.");
-      saving=false;saveButton.disabled=!dirty;
+      saving=false;updateSaveUI(dirty ? undefined : "Settings saved in this browser.");
       return;
     }
     if (revision === null) return;
@@ -317,6 +356,7 @@
         throw Error("Invalid account save revision");
       revision=result.revision;
       baseline=desired;
+      savedSnapshot=JSON.parse(JSON.stringify(desired));
       const newest=getJSON(draftKey,false);
       if (newest && newest.user===user && newest.revision===draft.revision && same(newest.data,desired)){
         clearSession(draftKey);
@@ -324,20 +364,36 @@
         updateSaveUI("Settings saved.");
       } else {
         // Do not discard edits made during a pending network request.
-        if (newest && newest.user===user && valid(newest.data))
+        if (newest && newest.user===user && valid(newest.data) && !same(newest.data,savedSnapshot)) {
           putJSON(draftKey,{user:user,revision:revision,data:newest.data},false);
-        dirty=true;
-        updateSaveUI("Saved; newer changes remain unsaved.");
+          dirty=true;
+          updateSaveUI("Saved; newer changes remain unsaved.");
+        } else {
+          clearSession(draftKey);
+          dirty=false;
+          updateSaveUI("Settings saved.");
+        }
       }
     } catch (_) {
       dirty=true;
       updateSaveUI("Save failed · Click Save Changes to retry.");
     } finally {
       saving=false;
-      saveButton.disabled=blocked||!dirty;
+      updateSaveUI();
     }
   }
   saveButton.addEventListener("click",function(){void flush();});
+  discardButton.addEventListener("click",function(){
+    if (saving || (!dirty && !blocked) || !valid(savedSnapshot)) return;
+    // Discard never writes Homepage or the Guest's persisted browser copy.
+    // The previously saved account/browser snapshot remains authoritative.
+    clearSession(draftKey);
+    clearSession(guestDraftKey);
+    dirty=false;
+    blocked=false;
+    updateSaveUI("Changes discarded.");
+    void applySettings(JSON.parse(JSON.stringify(savedSnapshot)),signedIn ? user : "local");
+  });
   window.addEventListener("beforeunload",function(event){
     if (!suppressUnload && dirty){event.preventDefault();event.returnValue="";}
   });
@@ -373,6 +429,7 @@
       baseline = existing ? existing.data : null;
       signedIn = true;
       let desired = baseline ? JSON.parse(JSON.stringify(baseline)) : settingsFromPage(null);
+      savedSnapshot = JSON.parse(JSON.stringify(desired));
       const held = getJSON(draftKey,false);
       // Only resume an unsaved draft for the same verified account, based on
       // the exact revision it was created from. Never cross user boundaries.
@@ -390,9 +447,10 @@
         const merged=mergeChangedNavigation(desired,priorNavigation);
         if (!same(merged,desired)) {desired=merged;navigated=true;}
       }
-      dirty = navigated || !!(held && held.user === user && held.revision === revision && valid(held.data));
-      if (!dirty && baseline && !same(desired,baseline)) dirty=true;
+      dirty = (navigated || !!(held && held.user === user && held.revision === revision && valid(held.data))) &&
+        !same(desired,savedSnapshot);
       if (dirty) putJSON(draftKey,{user:user,revision:revision,data:desired},false);
+      else clearSession(draftKey);
       initializing = false;
       keepNavigation(user);
       await applySettings(desired,user);
