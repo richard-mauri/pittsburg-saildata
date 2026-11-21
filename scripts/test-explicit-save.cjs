@@ -355,8 +355,8 @@ function testNauticalResponseDiagnostics(){
  assert.ok(statusText.textContent.includes('Chart tiles visible'));
  assert.equal(note.state,'ready');
  assert.equal(tileContainer.style.visibility,'');
- assert.ok(source.includes('maxNativeZoom: ((window.location.hostname === "localhost"'),
-  'loopback fixture mode retains native z17/18 PNG inspection');
+ assert.ok(source.includes('maxNativeZoom: 16,'),
+  'mock and NOAA must share native z16 ceiling; display z17/18 overzooms');
 }
 
 async function run(){
