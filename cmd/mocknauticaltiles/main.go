@@ -111,17 +111,19 @@ func run(directory string,zooms []int) error {
  // Avoid accidental writes to any existing chart cache. Fresh directory only.
  if _,err=os.Lstat(abs);err==nil {return fmt.Errorf("fixture output already exists: %s",abs)}
  if !os.IsNotExist(err){return err}
+ // Bounded geographic rectangle includes both sites plus room to pan and
+ // zoom. Exactly the same Web Mercator XYZ grid used by Leaflet, not TMS.
+ // A hard ceiling prevents accidental generation of a huge tile pyramid.
+ const west,east=-121.98,-121.48
+ const north,south=38.16,37.96
  tiles:=map[tile]struct{}{}
  for _,z:=range zooms {
-  if z<10||z>12{return fmt.Errorf("zoom %d outside approved test range 10..12",z)}
-  n:=1<<uint(z)
-  for _,site:=range sites {
-   center:=xyz(site.lon,site.lat,z)
-   for dx:=-1;dx<=1;dx++ {for dy:=-1;dy<=1;dy++ {
-    x,y:=center.x+dx,center.y+dy
-    if x>=0&&x<n&&y>=0&&y<n {tiles[tile{z,x,y}]=struct{}{}}
-   }}
-  }
+  if z<9||z>14{return fmt.Errorf("zoom %d outside approved test range 9..14",z)}
+  nw,se:=xyz(west,north,z),xyz(east,south,z)
+  for x:=nw.x;x<=se.x;x++ {for y:=nw.y;y<=se.y;y++ {
+   tiles[tile{z,x,y}]=struct{}{}
+   if len(tiles)>1000{return fmt.Errorf("mock tile ceiling exceeded")}
+  }}
  }
  if err=os.MkdirAll(abs,0700);err!=nil{return err}
  for t:=range tiles{
@@ -137,5 +139,5 @@ func main(){
  directory:=flag.String("dir","","new, nonexistent test-only tile directory outside Git/live cache")
  flag.Parse()
  if flag.NArg()!=0 {fmt.Fprintln(os.Stderr,"unexpected arguments");os.Exit(2)}
- if err:=run(*directory,[]int{10,11,12});err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)}
+ if err:=run(*directory,[]int{9,10,11,12,13,14});err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)}
 }
