@@ -18,13 +18,44 @@ const settingsEnd=source.indexOf('  function valid(data) {',settingsStart);
 const eventStart=source.indexOf('  document.addEventListener("change",function (event) {');
 const eventEnd=source.indexOf('  // A page-navigation change is recovered',eventStart);
 assert.ok(settingsStart>=0&&settingsEnd>settingsStart&&eventStart>=0&&eventEnd>eventStart);
-const operations=source.slice(comparisonStart,comparisonEnd)+'\n'+
+const headerStart=source.indexOf('  const urlParams = [');
+const headerEnd=source.indexOf('  const onPublicHost =',headerStart);
+assert.ok(headerStart>=0 && headerEnd>headerStart);
+const controlHeader=source.slice(headerStart,headerEnd);
+const operations=controlHeader+'\n'+source.slice(comparisonStart,comparisonEnd)+'\n'+
   source.slice(guestStart,guestEnd)+'\n'+source.slice(stageStart,stageEnd);
+const restoreStart=source.indexOf('  // Restore UI-only selections through');
+const restoreEnd=source.indexOf('  async function applySettings(',restoreStart);
+assert.ok(restoreStart>=0 && restoreEnd>restoreStart);
+const restoreOperations=source.slice(restoreStart,restoreEnd);
 const realEventOperations=source.slice(settingsStart,settingsEnd)+'\n'+
   source.slice(eventStart,eventEnd);
 assert.ok(!source.includes('setTimeout(function(){pendingSave=null;void flush()'));
 assert.ok(!source.includes('setTimeout(function () { pendingSave=null;void flush()'));
 assert.ok(!source.includes('await flush();'), 'account hydration must not save automatically');
+
+// Inventory every actual dropdown/checkbox rendered in the complete report
+// template, not just the controls manually represented by this test fixture.
+const report=fs.readFileSync('web/templates/sailing.html','utf8');
+const selects=[...report.matchAll(/<select\b[^>]*id="([^"]+)"[^>]*>/g)].map(x=>x[1]);
+const checks=[...report.matchAll(/<input\b[^>]*type="checkbox"[^>]*>/g)];
+const boxIDs=checks.map(x=>x[0].match(/\bid="([^"]+)"/)?.[1]||x[0].match(/data-marine-category="([^"]+)"/)?.[1]);
+const expectedSelects=[
+ 'wind-unit-select','distance-unit-select','map-swell-playback-speed',
+ 'map-swell-playback-step','map-alertcalifornia-mode','wind-reading-hours',
+ 'current-days-picker'];
+const expectedChecks=[
+ 'map-show-marine-zone','map-show-smoke','map-show-fire-perimeters','map-show-fire-detections',
+ 'map-show-air-temperature','map-show-clouds','map-show-radar','map-show-wind-barbs',
+ 'map-show-inland-wind-barbs','map-show-pressure','map-show-swell','map-show-structure',
+ 'marinas','boatyards','fuel_docks','launch_ramps','ferry_terminals',
+ 'marine_supply','yacht_clubs','waterfront_restaurants','map-show-saildrone',
+ 'map-show-alertcalifornia','show-tide-range-overlay'];
+assert.deepEqual(selects.sort(),expectedSelects.sort(),'all report dropdowns must have explicit preference coverage');
+assert.deepEqual(boxIDs.sort(),expectedChecks.sort(),'all report checkboxes must have explicit preference coverage');
+assert.ok(report.includes('document.dispatchEvent(new Event("sailing-current-chart-updated"))'),
+ 'AJAX chart replacement must restore saved/pending checkbox state');
+
 const makeFixture=({guest=false,failSave=false,conflict=false}={})=>{
  const store=new Map(),requests=[],notices=[];
  const saveButton={disabled:true,addEventListener(name,fn){this.click=fn}};
@@ -34,7 +65,7 @@ const makeFixture=({guest=false,failSave=false,conflict=false}={})=>{
  const ctx={
   saveButton,discardButton,savedSnapshot:JSON.parse(JSON.stringify(saved)),
   window:{addEventListener(name,fn){if(name==='beforeunload')ctx.beforeunload=fn}},
-  document:{documentElement:{classList:{remove(){}}}},
+  document:{documentElement:{classList:{remove(){}}},addEventListener(name,handler){this['on_'+name]=handler}},
   guestIdentity:guest?'guest-001':'',
   overlays:['map-show-radar','map-show-smoke'],
   signedIn:!guest,user:guest?'':'reader',initializing:false,applying:false,
@@ -61,10 +92,10 @@ const makeFixture=({guest=false,failSave=false,conflict=false}={})=>{
    ? {status:409,ok:false}
    : {status:200,ok:true,json:async()=>({revision:4})}},
   accountStatus(){},
-  Promise,JSON,Error,String,Number,
+  Promise,JSON,Error,String,Number,Event:class{constructor(type,options){this.type=type;this.bubbles=!!options?.bubbles}},
  };
  vm.createContext(ctx);
- vm.runInContext(operations,ctx);
+ vm.runInContext(operations+'\n'+restoreOperations,ctx);
  return {ctx,store,requests,notices,saveButton,discardButton,restored,saved};
 };
 async function run(){
@@ -170,8 +201,7 @@ async function run(){
   ui.ctx.savedSnapshot.mapType=legacyMapType;
   ui.ctx.baseline.mapType=legacyMapType;
   let radio={value:'map',matches(selector){return selector==="input[name='map-type']";}};
-  ui.ctx.params=['wind_unit','map_layer','map_center_lat'];
-  ui.ctx.overlays=['map-show-radar','map-show-smoke'];
+  // Runtime uses the full selector/checkbox registry from the production script.
   // Saved records may predate an overlay/category and omit their false keys.
   // The real page still supplies those unchecked DOM controls on every edit.
   ui.saved.overlays['map-show-radar']=true;
@@ -189,7 +219,7 @@ async function run(){
    querySelector(selector){return selector==='input[name="map-type"]:checked'?radio:null},
    querySelectorAll(selector){return selector==='.map-marine-place-toggle'?[category]:[]},
    getElementById(id){return controls[id]||null},
-   addEventListener(name,handler){if(name==='change')this.changeHandler=handler},
+   addEventListener(name,handler){this['on_'+name]=handler;if(name==='change')this.changeHandler=handler},
   };
   vm.runInContext(realEventOperations,ui.ctx);
   assert.equal(typeof ui.ctx.document.changeHandler,'function');
@@ -241,6 +271,61 @@ async function run(){
   range.value='3';
   ui.ctx.document.changeHandler({target:range});
   assert.equal(ui.ctx.dirty,false,'restoring saved 3-day range clears dirty');
+  // Exercise the remaining three report dropdowns using the real handler.
+  for(const [id,nonDefault,baselineKey] of [
+    ['map-swell-playback-speed','2','swell_playback_speed'],
+    ['map-swell-playback-step','6','swell_playback_step'],
+    ['map-alertcalifornia-mode','all','alertcalifornia_mode'],
+  ]){
+    const control={id,value:nonDefault,matches(){return false}};
+    ui.ctx.document.changeHandler({target:control});
+    assert.equal(ui.ctx.dirty,true,id+' enables Save');
+    const draft=ui.ctx.getJSON(guestMode?ui.ctx.guestDraftKey:ui.ctx.draftKey,false);
+    assert.equal(draft.data.params[baselineKey],nonDefault,id+' stages exact value');
+    assert.equal(ui.requests.length,0,id+' must not auto-save');
+    control.value={swell_playback_speed:'1',swell_playback_step:'3',alertcalifornia_mode:'clustered'}[baselineKey];
+    ui.ctx.document.changeHandler({target:control});
+    assert.equal(ui.ctx.dirty,false,id+' returning to default clears dirty');
+  }
+  // The ALERTCalifornia overlay and tidal-range checkbox also stage a net
+  // value and clear it when restored to their previous checked state.
+  for(const [id,original] of [['map-show-alertcalifornia',false],['show-tide-range-overlay',true]]){
+    const toggle={id,checked:!original,matches(){return false}};
+    ui.ctx.document.changeHandler({target:toggle});
+    assert.equal(ui.ctx.dirty,true,id+' toggled activates Save');
+    toggle.checked=original;
+    ui.ctx.document.changeHandler({target:toggle});
+    assert.equal(ui.ctx.dirty,false,id+' reversed disables Save');
+  }
+  // Restoration must trigger the existing map/swell controller listeners,
+  // and a redrawn chart must receive the saved tide checkbox preference.
+  const restoreEvents=[];
+  const controlValues={
+    'map-swell-playback-speed':{value:'1'},
+    'map-swell-playback-step':{value:'3'},
+    'map-alertcalifornia-mode':{value:'clustered'},
+    'show-tide-range-overlay':{checked:true},
+  };
+  Object.entries(controlValues).forEach(([id,el])=>el.dispatchEvent=e=>restoreEvents.push(id+':'+e.type));
+  ui.ctx.document.getElementById=id=>controlValues[id]||controls[id]||null;
+  const savedForRestore=JSON.parse(JSON.stringify(ui.ctx.savedSnapshot));
+  savedForRestore.params.swell_playback_speed='2';
+  savedForRestore.params.swell_playback_step='6';
+  savedForRestore.params.alertcalifornia_mode='all';
+  savedForRestore.overlays['show-tide-range-overlay']=false;
+  ui.ctx.restoreControlPreferences(savedForRestore,false);
+  assert.equal(controlValues['map-swell-playback-speed'].value,'2');
+  assert.equal(controlValues['map-swell-playback-step'].value,'6');
+  assert.equal(controlValues['map-alertcalifornia-mode'].value,'all');
+  assert.equal(controlValues['show-tide-range-overlay'].checked,false);
+  assert.equal(restoreEvents.length,4,'restoration dispatches controller change events');
+  // The chart redraw does not reset the saved/pending selection.
+  const changedTide={id:'show-tide-range-overlay',checked:false,matches(){return false}};
+  ui.ctx.document.changeHandler({target:changedTide});
+  controlValues['show-tide-range-overlay'].checked=true; // server-rendered replacement
+  ui.ctx.document['on_sailing-current-chart-updated']();
+  assert.equal(controlValues['show-tide-range-overlay'].checked,false,'AJAX chart keeps pending checkbox selection');
+
  }
  }
  console.log('SailingGo explicit Save/Discard: personal, Guest, net-zero edits, 409, failure and unload checks passed.');
