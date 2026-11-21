@@ -481,6 +481,14 @@
       (signedIn ? pending.user===user : pending.user===(guestIdentity || "local"))
       ? pending.data : signedIn ? baseline : getJSON(localKey,true);
     const next = settingsFromPage(fallback);
+    if (target.matches("input[name='map-type']")) {
+      // This capture listener executes before the map controller updates the
+      // URL via history.replaceState. Never compare the newly selected radio
+      // against the previous map_layer query parameter.
+      if (target.value === "map") delete next.params.map_layer;
+      else next.params.map_layer = target.value;
+      next.mapType = target.value;
+    }
     if (target.id === "wind-unit-select") next.params.wind_unit = target.value === "mph" ? "mph" : "kts";
     if (target.id === "distance-unit-select") next.params.distance_unit = target.value === "mi" ? "mi" : "nmi";
     if (target.id === "wind-reading-hours") next.params.wind_hours = String(target.value);
