@@ -275,16 +275,17 @@ function testNauticalResponseDiagnostics(){
  assert.equal(tileContainer.style.visibility,'hidden','chart pixels cannot precede the progress panel');
  timer();
  assert.equal(context.nauticalFailureNotice,true,'stalled WMS must record visible warning');
- assert.equal(fallbackEvents,1,'timeout must issue one staged Street radio event');
- assert.equal(stagedMapType,'map','Street is a pending preference, not an automatic Save');
- assert.equal(context.preferredMapLayerName,'map','timeout must reset Street radio choice');
+ assert.equal(fallbackEvents,0,'timeout must never force a Street radio change');
+ assert.equal(stagedMapType,'nautical','timeout preserves staged Nautical preference');
+ assert.equal(context.preferredMapLayerName,'nautical','Nautical must stay selected after timeout');
  assert.equal(context.nauticalCheckTimer,null,'timeout must not leave a running timer');
- assert.equal(note.hidden,false,'warning must remain visible after switching radio to Street');
+ assert.equal(note.hidden,false,'the original progress panel must transition to a dismissible warning');
  assert.equal(cancelButton.hidden,true,'Cancel hidden after timeout');
  assert.equal(progress.hidden,true,'progress bar hidden after timeout');
  assert.equal(tileContainer.style.visibility,'','failed chart container is not kept permanently hidden');
  assert.equal(closeButton.hidden,false,'same status panel offers Close after failure');
- assert.ok(statusText.textContent.includes('not responding'));
+ assert.ok(statusText.textContent.includes('Try changing zoom levels'),
+  'failure must suggest changing zoom levels instead of switching to Street');
  assert.ok([...timers.values()].some(t=>t.ms===8000),
   'failure status should be automatically dismissed');
  closeButton.click();
@@ -310,7 +311,7 @@ function testNauticalResponseDiagnostics(){
  callbacks.loading();
  assert.equal(note.hidden,false);
  cancelButton.click();
- assert.equal(fallbackEvents,3,'Cancel must reset radio through staged change');
+ assert.equal(fallbackEvents,1,'ONLY explicit Cancel must reset Street via staged change');
  assert.equal(context.nauticalFailureNotice,false);
  assert.equal(note.hidden,true,'Cancel removes loading message');
  assert.equal(progress.hidden,true,'Cancel removes busy progress bar');
@@ -326,6 +327,7 @@ function testNauticalResponseDiagnostics(){
  assert.equal(context.nauticalAdvisory,false,'successful tile must not leave an advisory');
  assert.equal(note.hidden,true,'a successful tile must clear the status panel');
  assert.equal(progress.hidden,true,'successful tile must clear the progress bar');
+ assert.equal(fallbackEvents,1,'successful chart responses never change the radio');
 
  // A separate, explicitly opted-in loopback mock inspector must not trigger
  // NOAA failure-to-Street events when only some fixture tiles exist.
@@ -348,6 +350,25 @@ function testNauticalResponseDiagnostics(){
  assert.equal(fallbackEvents,fallbackBeforeMock,'mock mode suppresses generic fallback');
  assert.equal(context.nauticalFailureNotice,false,'mock mode suppresses failure popup');
  context.nauticalMockInspection=false;
+ // Ordinary (non-mock) navigation with no new usable chart tiles also
+ // retains Nautical and suggests zoom, rather than changing selection.
+ context.preferredMapLayerName='nautical';
+ const fallbackBeforeError=fallbackEvents;
+ callbacks.loading();
+ callbacks.tileerror();
+ callbacks.load();
+ assert.equal(context.preferredMapLayerName,'nautical','all-error zoom retains Nautical');
+ assert.equal(fallbackEvents,fallbackBeforeError,'all-error zoom must not stage Street');
+ assert.equal(closeButton.hidden,false,'failed zoom displays Close on the same panel');
+ assert.ok(statusText.textContent.includes('Try changing zoom levels'));
+ // Repeated zoom attempts must clear stale error and allow new tiles.
+ callbacks.loading();
+ assert.equal(context.nauticalFailureNotice,false,'new zoom dismisses prior failure');
+ assert.equal(progress.hidden,false,'new zoom shows progress in the same panel');
+ callbacks.tileload();
+ callbacks.load();
+ assert.equal(context.preferredMapLayerName,'nautical');
+ assert.equal(note.hidden,true,'success after failed zoom clears the panel');
  assert.ok(source.includes('window.location.hostname === "localhost"') &&
   source.includes('window.location.hostname === "127.0.0.1"') &&
   source.includes('get("nautical_mock_test") === "1"'),
