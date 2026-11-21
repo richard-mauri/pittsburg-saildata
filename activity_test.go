@@ -70,7 +70,7 @@ func TestSailingReporterHomepageWireProtocol(t *testing.T){
 
 func TestSailingReporterDoesNotMutateWeatherContracts(t *testing.T){
  if appVersion!="1.16.0"{t.Fatal("semantic app version changed")}
- if buildVersion!="v435"{t.Fatal("expected next development build lineage")}
+ if buildVersion!="v436"{t.Fatal("expected next development build lineage")}
  if os.Getenv("SAILING_ACTIVITY_URL")=="" && sailingActivityConfigured(){t.Fatal("unexpected reporter configuration")}
 }
 
