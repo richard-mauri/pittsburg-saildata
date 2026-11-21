@@ -352,8 +352,10 @@ function testNauticalResponseDiagnostics(){
  assert.equal(fallbackEvents,fallbackBeforeMock,'mock mode suppresses generic fallback');
  assert.equal(context.nauticalFailureNotice,false,'mock mode suppresses failure popup');
  context.nauticalMockInspection=false;
- // Ordinary (non-mock) navigation with no new usable chart tiles also
- // retains Nautical and suggests zoom, rather than changing selection.
+ // Ordinary (non-mock) navigation at a genuinely unvisited zoom with
+ // no prior valid tiles retains Nautical and suggests another zoom.
+ // Clear earlier successful z10 state to isolate a fresh tile-less map view.
+ context.nauticalSuccessfulZooms={};
  context.preferredMapLayerName='nautical';
  const fallbackBeforeError=fallbackEvents;
  callbacks.loading();
