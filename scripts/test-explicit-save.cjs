@@ -178,6 +178,10 @@ function testMapTileFallback(){
  context.applyPreferredBaseMap();
  assert.ok(map.hasLayer(satelliteLayer),'satellite selection remains intact');
  assert.ok(!map.hasLayer(streetLayer),'other basemaps should not keep Street');
+ assert.ok(source.includes('nauticalStatusMessage = "NOAA nautical charts are temporarily unavailable. Showing Street Map instead; please try again later.";'),
+  'a complete NOAA nautical tile failure must tell users to retry later');
+ assert.ok(source.includes('if (showNotice) nauticalZoomNote.textContent = belowMinimum'),
+  'the failure notice must be displayed through the existing nautical status UI');
  assert.ok(source.includes('transparent: true,\n      version: "1.3.0"'),
   'NOAA WMS must be transparent outside chart coverage');
  assert.ok(source.includes('ridge::USCOMP-N0Q-0/{z}/{x}/{y}.png'),
