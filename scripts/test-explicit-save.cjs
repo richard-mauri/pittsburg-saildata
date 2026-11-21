@@ -217,7 +217,7 @@ function testNauticalResponseDiagnostics(){
 
  const callbacks={};
  const nauticalLayer={on(name,fn){callbacks[name]=fn;}};
- const note={hidden:true}, statusText={textContent:''};
+ const note={hidden:true}, statusText={textContent:''}, progress={hidden:true};
  const cancelButton={hidden:true,addEventListener(name,fn){this[name]=fn;}};
  const typeInput={disabled:false,setAttribute(){},title:''};
  const label={classList:{toggle(){}}};
@@ -237,7 +237,7 @@ function testNauticalResponseDiagnostics(){
  const context={
   nauticalLayer, preferredMapLayerName:'nautical',
   nauticalZoomNote:note,nauticalStatusText:statusText,
-  nauticalCancelButton:cancelButton,nauticalTypeInput:typeInput,
+  nauticalCancelButton:cancelButton,nauticalProgress:progress,nauticalTypeInput:typeInput,
   nauticalTypeLabel:label,minimumNauticalZoom:9,
   map:{hasLayer(x){return x===nauticalLayer},getZoom(){return 10}},
   document:{querySelector(sel){
@@ -260,6 +260,7 @@ function testNauticalResponseDiagnostics(){
  assert.equal(note.hidden,false,'progress must appear as soon as loading begins');
  assert.ok(statusText.textContent.includes('Loading NOAA nautical chart'));
  assert.equal(cancelButton.hidden,false,'loading must offer Cancel');
+ assert.equal(progress.hidden,false,'indeterminate progress bar appears while waiting');
  timer();
  assert.equal(context.nauticalFailureNotice,true,'stalled WMS must record visible warning');
  assert.equal(fallbackEvents,1,'timeout must issue one staged Street radio event');
@@ -268,6 +269,7 @@ function testNauticalResponseDiagnostics(){
  assert.equal(context.nauticalCheckTimer,null,'timeout must not leave a running timer');
  assert.equal(note.hidden,false,'warning must remain visible after switching radio to Street');
  assert.equal(cancelButton.hidden,true,'Cancel hidden after timeout');
+ assert.equal(progress.hidden,true,'progress bar hidden after timeout');
  assert.ok(statusText.textContent.includes('not responding'));
 
  // Manual Cancel must also reset Street, without displaying the outage warning.
@@ -280,6 +282,7 @@ function testNauticalResponseDiagnostics(){
  assert.equal(fallbackEvents,2,'Cancel must reset radio through staged change');
  assert.equal(context.nauticalFailureNotice,false);
  assert.equal(note.hidden,true,'Cancel removes loading message');
+ assert.equal(progress.hidden,true,'Cancel removes busy progress bar');
 
  // A tile that arrived must not be labeled as a hard outage.
  context.preferredMapLayerName='nautical';
