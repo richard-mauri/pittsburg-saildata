@@ -12,7 +12,9 @@ func TestSailingExplicitSaveReplacesAutosync(t *testing.T){
  for _,fragment:=range []string{
   `saveButton.id = "sailing-save-changes"`,
   `saveButton.textContent = "Save Changes"`,
-  `saveRow.append(saveButton,discardButton,saveNote)`,
+  `saveRow.append(saveButton,discardButton)`,
+  `saveRow.after(saveNote)`,
+  `saveNote.className = "sailing-save-status"`,
   `saveButton.addEventListener("click",function(){void flush();})`,
   `discardButton.id = "sailing-discard-changes"`,
   `discardButton.textContent = "Discard Changes"`,
@@ -61,6 +63,15 @@ func TestSailingExplicitSaveReplacesAutosync(t *testing.T){
   for _,fragment:=range []string{`sailing-save-changes`,`sailing-discard-changes`,`sailing-save-status`,`Save Changes`,`Discard Changes`}{
    if !strings.Contains(markup,fragment){t.Errorf("%s missing save control %q",path,fragment)}
   }
+ }
+ // The status line must not join the flex row with Save/Discard.
+ if strings.Contains(s,`saveRow.append(saveButton,discardButton,saveNote)`){
+  t.Fatal("dynamic status text must never affect toolbar flex layout")
+ }
+ theme,err:=sailingUIFiles.ReadFile("web/static/theme.css")
+ if err!=nil{t.Fatal(err)}
+ for _,fragment:=range []string{`.sailing-save-status {`,`min-height:1.4rem;`,`font-size:.75rem;`,`text-align:right;`}{
+  if !strings.Contains(string(theme),fragment){t.Errorf("separate status style missing %q",fragment)}
  }
  for _,path:=range []string{"web/templates/welcome.html","web/templates/details.html","web/templates/stations.html"}{
   if strings.Contains(readSailingUITemplate(path),`sailing-save-changes`){t.Errorf("unexpected Save Changes control on %s",path)}
