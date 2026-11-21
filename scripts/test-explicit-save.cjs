@@ -215,6 +215,7 @@ async function run(){
   // Map viewport URL state is present but was not changed by the radio event.
   ui.ctx.location={href:'https://weather.themauris.org/planning?wind_unit=kts&map_center_lat=38.01'};
   ui.ctx.URL=URL;
+  const redrawHandler=ui.ctx.document['on_sailing-current-chart-updated'];
   ui.ctx.document={
    querySelector(selector){return selector==='input[name="map-type"]:checked'?radio:null},
    querySelectorAll(selector){return selector==='.map-marine-place-toggle'?[category]:[]},
@@ -323,7 +324,7 @@ async function run(){
   const changedTide={id:'show-tide-range-overlay',checked:false,matches(){return false}};
   ui.ctx.document.changeHandler({target:changedTide});
   controlValues['show-tide-range-overlay'].checked=true; // server-rendered replacement
-  ui.ctx.document['on_sailing-current-chart-updated']();
+  redrawHandler();
   assert.equal(controlValues['show-tide-range-overlay'].checked,false,'AJAX chart keeps pending checkbox selection');
 
  }
