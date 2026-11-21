@@ -87,12 +87,17 @@
   discardButton.type = "button";
   discardButton.textContent = "Discard Changes";
   discardButton.disabled = true;
-  const saveNote = document.createElement("span");
+  // The status occupies a separate, permanently reserved line below the
+  // toolbar. Its changing text must never participate in flex row layout.
+  const saveNote = document.createElement("div");
   saveNote.id = "sailing-save-status";
+  saveNote.className = "sailing-save-status";
   saveNote.setAttribute("role","status");
   saveNote.setAttribute("aria-live","polite");
-  saveNote.style.cssText = "font-size:.83rem;color:var(--muted);max-width:25rem";
-  if (saveRow) saveRow.append(saveButton,discardButton,saveNote);
+  if (saveRow) {
+    saveRow.append(saveButton,discardButton);
+    saveRow.after(saveNote);
+  }
   function updateSaveUI(message) {
     saveButton.disabled = saving || blocked || !dirty;
     discardButton.disabled = saving || (!dirty && !blocked);
