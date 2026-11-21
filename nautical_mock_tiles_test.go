@@ -23,6 +23,11 @@ func TestMockNauticalXYZCacheToBrowser(t *testing.T) {
  output,err:=cmd.CombinedOutput()
  if err!=nil{t.Fatalf("generate mock XYZ fixtures: %v: %s",err,output)}
  if !bytes.Contains(output,[]byte("MOCK TEST DATA")){t.Fatalf("fixture not labeled: %s",output)}
+ // The intentionally bounded high-zoom fixtures cover all supported z9–18,
+ // not the full Bay/Delta at z18 (which would require enormous downloads).
+ if !strings.Contains(string(output),"Created 954 MOCK TEST DATA XYZ PNG tiles"){
+  t.Fatalf("unexpected bounded mock tile count: %s",output)
+ }
 
  var upstreamCalls atomic.Int32
  upstream:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
@@ -35,11 +40,16 @@ func TestMockNauticalXYZCacheToBrowser(t *testing.T) {
  // Independently known Leaflet/Web Mercator tile coordinates, not an MBTiles
  // TMS row. z10 Pittsburgh around x165/y394, z12 Delta around x664/y1578.
  centers:=[]struct{site string;z,x,y int}{
-  {"Pittsburg",9,82,197},
-  {"Pittsburg",10,165,394},
-  {"Delta",12,664,1578},
-  {"Pittsburg",14,2644,6318},
-  {"Delta",14,2658,6314},
+  {"Pittsburg-z9",9,82,197},
+  {"Pittsburg-z10",10,165,394},
+  {"Pittsburg-z11",11,330,789},
+  {"Delta-z12",12,664,1578},
+  {"Pittsburg-z13",13,1322,3159},
+  {"Delta-z14",14,2658,6314},
+  {"Pittsburg-z15",15,5289,12636},
+  {"Selected-z16",16,10579,25269},
+  {"Delta-z17",17,21266,50514},
+  {"Selected-z18",18,42316,101079},
  }
  for _,center:=range centers {
   t.Run(center.site,func(t *testing.T){
