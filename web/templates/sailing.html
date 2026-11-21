@@ -930,6 +930,21 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   function nauticalNoCoverageMessage() {
     return "No nautical chart tiles are available in this area at the current zoom. Try panning back toward chart coverage or changing zoom levels.";
   }
+  function checkNauticalViewportAfterMove() {
+    if (preferredMapLayerName !== "nautical" || !map.hasLayer(nauticalLayer)) return;
+    // A successful load elsewhere at the same zoom is not local coverage.
+    if (nauticalFailureNotice) dismissNauticalFailureNotice();
+    if (nauticalCheckTimer !== null) {
+      if (nauticalRequestView !== nauticalViewportKey()) startNauticalResponseCheck();
+      return;
+    }
+    if (!nauticalViewportHasTiles()) {
+      showNauticalFailureNotice(nauticalNoCoverageMessage());
+    } else {
+      nauticalStatusMessage = "";
+      updateNauticalZoomUI();
+    }
+  }
   function checkNauticalResponse() {
     nauticalCheckTimer = null;
     if (preferredMapLayerName !== "nautical" || !map.hasLayer(nauticalLayer) ||
@@ -6688,21 +6703,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   });
 
   map.on("moveend", function() {
-    // Leaflet may have no new requests on a same-zoom pan. Reevaluate the
-    // viewport anyway: earlier tiles elsewhere at this zoom are irrelevant.
-    if (preferredMapLayerName === "nautical" && map.hasLayer(nauticalLayer)) {
-      if (nauticalFailureNotice) dismissNauticalFailureNotice();
-      if (nauticalCheckTimer === null) {
-        if (!nauticalViewportHasTiles()) {
-          showNauticalFailureNotice(nauticalNoCoverageMessage());
-        } else {
-          nauticalStatusMessage = "";
-          updateNauticalZoomUI();
-        }
-      } else if (nauticalRequestView !== nauticalViewportKey()) {
-        startNauticalResponseCheck();
-      }
-    }
+    checkNauticalViewportAfterMove();
     syncCoordinateInputsToMapCenter();
     updateMapScaleStatus();
     if (mapState.structureOverlayVisible) scheduleStructureRefresh();
