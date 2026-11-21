@@ -153,6 +153,7 @@ function testMapTileFallback(){
   map,streetLayer,nauticalLayer,satelliteLayer,hybridLayer,
   preferredMapLayerName:'nautical',activeMapLayerName:'map',
   nauticalUnavailable:false,nauticalCheckTimer:null,nauticalAdvisory:false,nauticalTileLoads:0,
+  nauticalLoading:false,setNauticalTileVisibility(){},
   nauticalAutomaticFallback:false,nauticalFailureNotice:false,nauticalStatusMessage:'',minimumNauticalZoom:9,
   nauticalMockInspection:false,
   mapState:{cloudOverlayVisible:false,radarOverlayVisible:false},
@@ -220,7 +221,8 @@ function testNauticalResponseDiagnostics(){
  assert.ok(a>=0&&b>a,'real NOAA tile and notice code must be present');
 
  const callbacks={};
- const nauticalLayer={on(name,fn){callbacks[name]=fn;}};
+ const tileContainer={style:{visibility:''}};
+ const nauticalLayer={on(name,fn){callbacks[name]=fn;},getContainer(){return tileContainer;}};
  const note={hidden:true}, statusText={textContent:''}, progress={hidden:true};
  const cancelButton={hidden:true,addEventListener(name,fn){this[name]=fn;}};
  const closeButton={hidden:true,addEventListener(name,fn){this[name]=fn;}};
@@ -270,6 +272,7 @@ function testNauticalResponseDiagnostics(){
  assert.ok(statusText.textContent.includes('Loading NOAA nautical chart'));
  assert.equal(cancelButton.hidden,false,'loading must offer Cancel');
  assert.equal(progress.hidden,false,'indeterminate progress bar appears while waiting');
+ assert.equal(tileContainer.style.visibility,'hidden','chart pixels cannot precede the progress panel');
  timer();
  assert.equal(context.nauticalFailureNotice,true,'stalled WMS must record visible warning');
  assert.equal(fallbackEvents,1,'timeout must issue one staged Street radio event');
@@ -279,6 +282,7 @@ function testNauticalResponseDiagnostics(){
  assert.equal(note.hidden,false,'warning must remain visible after switching radio to Street');
  assert.equal(cancelButton.hidden,true,'Cancel hidden after timeout');
  assert.equal(progress.hidden,true,'progress bar hidden after timeout');
+ assert.equal(tileContainer.style.visibility,'','failed chart container is not kept permanently hidden');
  assert.equal(closeButton.hidden,false,'same status panel offers Close after failure');
  assert.ok(statusText.textContent.includes('not responding'));
  assert.ok([...timers.values()].some(t=>t.ms===8000),
@@ -315,7 +319,9 @@ function testNauticalResponseDiagnostics(){
  context.preferredMapLayerName='nautical';
  callbacks.loading();
  callbacks.tileload();
- timer();
+ assert.equal(tileContainer.style.visibility,'hidden','a cached image stays hidden until settled');
+ callbacks.load();
+ assert.equal(tileContainer.style.visibility,'','tiles are revealed only when progress closes');
  assert.equal(context.nauticalFailureNotice,false,'successful image is not proof of outage');
  assert.equal(context.nauticalAdvisory,false,'successful tile must not leave an advisory');
  assert.equal(note.hidden,true,'a successful tile must clear the status panel');
@@ -327,10 +333,14 @@ function testNauticalResponseDiagnostics(){
  context.preferredMapLayerName='nautical';
  const fallbackBeforeMock=fallbackEvents;
  callbacks.loading();
- assert.equal(note.hidden,true,'mock mode suppresses misleading NOAA progress');
- assert.equal(context.nauticalCheckTimer,null,'mock mode never starts the 12s timer');
+ assert.equal(note.hidden,false,'mock mode uses the SAME progress panel');
+ assert.equal(progress.hidden,false,'mock inspection shows progress before tiles');
+ assert.equal(tileContainer.style.visibility,'hidden','mock tiles stay hidden until load settles');
+ assert.ok([...timers.values()].some(t=>t.ms===2500),'mock progress is bounded without NOAA fallback');
  callbacks.tileerror();
  callbacks.load();
+ assert.equal(tileContainer.style.visibility,'','mock missing tiles reveal Street underlay after load');
+ assert.equal(progress.hidden,true,'mock progress closes on settled tile errors');
  assert.equal(fallbackEvents,fallbackBeforeMock,'missing mock tile must not force Street');
  assert.equal(context.preferredMapLayerName,'nautical','mock inspection retains Nautical choice');
  assert.equal(note.hidden,true,'mock inspection does not obstruct map');
@@ -342,8 +352,11 @@ function testNauticalResponseDiagnostics(){
   source.includes('window.location.hostname === "127.0.0.1"') &&
   source.includes('get("nautical_mock_test") === "1"'),
   'mock inspection must require both explicit URL opt-in and loopback host');
- assert.ok(source.includes('if (showNautical && !nauticalMockInspection'),
-  'mock mode must not arm a timeout during map reapplication');
+ assert.ok(source.includes('if (showNautical && nauticalCheckTimer === null && !nauticalLoading'),
+  'initial chart selection must start a single progress state before adding tiles');
+ assert.ok(source.indexOf('startNauticalResponseCheck();',source.indexOf('function applyPreferredBaseMap()')) <
+  source.indexOf('streetLayer.addTo(map)',source.indexOf('function applyPreferredBaseMap()')),
+  'progress must be initiated before Leaflet adds any chart tiles');
  assert.ok(source.includes('white-space:normal;max-width:min(520px'),
   'long notice must wrap rather than be clipped');
 }
