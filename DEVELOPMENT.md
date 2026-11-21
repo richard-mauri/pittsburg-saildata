@@ -201,3 +201,14 @@ Verify that there is **no progress animation, loading bubble, or error panel dra
 ### Safari visual check — Nautical status legibility
 
 When the current viewport has no chart coverage, the small out-of-map Nautical status line below the map footer must use high-contrast pale amber `#ffe1a1` on the dark page (not the previous unreadable dark red `#9b1c1c`). Text has a .82rem base size and stronger unavailable-state font weight. Ensure the message is readable while panning at zoom 9 and the map remains unobstructed. Verify in owner Safari; CI enforces the CSS value but cannot establish visual acceptance.
+
+## Nautical Tile Manager test and dry-run handoff
+
+The CLI is exercised by CI with `go test -count=1 ./cmd/nauticaltilemanager` plus `go build ./cmd/nauticaltilemanager`; its test NOAA endpoint is a local `httptest` server. The regular `./devbuild.sh` remains the owner Mac root application test/build command. Planning is read-only and safe:
+
+```sh
+cd ~/projects/sailing-go
+go run ./cmd/nauticaltilemanager -west -123 -south 36.5 -east -121.45 -north 38.45 -min-zoom 9 -max-zoom 12 -max-tiles 1000
+```
+
+Only an explicit subsequent owner action with `-download` and a **new distinct** `-dir` makes disk writes or live NOAA requests. An optional `-max-bytes` guards bytes. Resume is permitted only against the manager's matching marker/configuration, with individual existing PNG files validated and preserved. The CLI never runs implicitly during map navigation and does not touch local production services/tunnels. Do not run download mode from CI or as part of the Mac root build. To verify the command's own tests locally, `go test -count=1 ./cmd/nauticaltilemanager` is separate from `./devbuild.sh`, which tests only the root application package. Do not update or restart the production instance without owner authorization.
