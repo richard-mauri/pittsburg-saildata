@@ -158,6 +158,7 @@ function testMapTileFallback(){
   marineZoneLayer:null,smokeLayer:null,smokeOutlineLayer:null,
   updateNauticalZoomUI(){},updateSmokeLegendForBaseMap(){},
   startNauticalResponseCheck(){timeoutStarts++;context.nauticalCheckTimer=1;},
+  stopNauticalWaiting(){context.nauticalCheckTimer=null;},
   clearTimeout(){context.nauticalCheckTimer=null;},
   persistPreferredMapLayer(){},
   document:{querySelectorAll(){return radio}},
@@ -194,7 +195,7 @@ function testMapTileFallback(){
  assert.equal(context.preferredMapLayerName,'nautical','retry retains Nautical preference');
  assert.ok(source.includes('nauticalStatusMessage = "NOAA nautical charts are temporarily unavailable. Showing Street Map instead; please try again later.";'),
   'a complete NOAA nautical tile failure must tell users to retry later');
- assert.ok(source.includes('if (showNotice) nauticalZoomNote.textContent = belowMinimum'),
+ assert.ok(source.includes('nauticalStatusText.textContent = nauticalFailureNotice'),
   'the failure notice must be displayed through the existing nautical status UI');
  assert.ok(source.includes('transparent: true,\n      version: "1.3.0"'),
   'NOAA WMS must be transparent outside chart coverage');
@@ -210,38 +211,85 @@ function testMapTileFallback(){
 function testNauticalResponseDiagnostics(){
  const source=fs.readFileSync('web/templates/sailing.html','utf8');
  const a=source.indexOf('  var nauticalTileLoads = 0;');
- const b=source.indexOf('  function baseLayerForName(name) {',a);
- assert.ok(a>=0&&b>a,'tile event implementation must be present');
+ const b=source.indexOf('  function persistPreferredMapLayer() {',a);
+ assert.ok(a>=0&&b>a,'real NOAA tile and notice code must be present');
+
  const callbacks={};
  const nauticalLayer={on(name,fn){callbacks[name]=fn;}};
- let timer=null, updates=0, fallbacks=0;
+ const note={hidden:true}, statusText={textContent:''};
+ const cancelButton={hidden:true,addEventListener(name,fn){this[name]=fn;}};
+ const typeInput={disabled:false,setAttribute(){},title:''};
+ const label={classList:{toggle(){}}};
+ let timer=null, updates=0, fallbackEvents=0, stagedMapType='nautical';
+ const streetInput={
+  checked:false,
+  dispatchEvent(ev){
+   assert.equal(ev.type,'change');
+   assert.equal(ev.bubbles,true);
+   stagedMapType='map'; // the real capture listener stages Street, does not Save.
+   fallbackEvents++;
+   context.preferredMapLayerName='map';
+   context.updateNauticalZoomUI();
+   return true;
+  },
+ };
  const context={
   nauticalLayer, preferredMapLayerName:'nautical',
-  map:{hasLayer(x){return x===nauticalLayer;}},
+  nauticalZoomNote:note,nauticalStatusText:statusText,
+  nauticalCancelButton:cancelButton,nauticalTypeInput:typeInput,
+  nauticalTypeLabel:label,minimumNauticalZoom:9,
+  map:{hasLayer(x){return x===nauticalLayer},getZoom(){return 10}},
+  document:{querySelector(sel){
+   if(sel==='input[name="map-type"][value="map"]')return streetInput;
+   throw new Error('unexpected selector: '+sel);
+  }},
+  Event:class Event{constructor(type,opts){this.type=type;this.bubbles=opts.bubbles}},
   setTimeout(fn){timer=fn;return 1;},
   clearTimeout(){timer=null;},
-  updateNauticalZoomUI(){updates++;},
-  applyPreferredBaseMap(){fallbacks++;},
+  updateNauticalZoomUI(){updates++;return context.realUpdateNauticalZoomUI();},
+  setBaseMapLayer(name){context.preferredMapLayerName=name;},
  };
  vm.createContext(context);
  vm.runInContext(source.slice(a,b),context);
+ context.realUpdateNauticalZoomUI=()=>vm.runInContext('updateNauticalZoomUI()',context);
+ // The real timeout code must show immediate feedback before NOAA answers.
  assert.equal(typeof callbacks.loading,'function');
  callbacks.loading();
  assert.equal(typeof timer,'function','tile loading should arm bounded response check');
+ assert.equal(note.hidden,false,'progress must appear as soon as loading begins');
+ assert.ok(statusText.textContent.includes('Loading NOAA nautical chart'));
+ assert.equal(cancelButton.hidden,false,'loading must offer Cancel');
  timer();
- assert.equal(context.nauticalUnavailable,true,'unanswered WMS tiles should produce fallback');
- assert.ok(context.nauticalStatusMessage.includes('not responding'));
- assert.equal(fallbacks,1);
+ assert.equal(context.nauticalFailureNotice,true,'stalled WMS must record visible warning');
+ assert.equal(fallbackEvents,1,'timeout must issue one staged Street radio event');
+ assert.equal(stagedMapType,'map','Street is a pending preference, not an automatic Save');
+ assert.equal(context.preferredMapLayerName,'map','timeout must reset Street radio choice');
+ assert.equal(context.nauticalCheckTimer,null,'timeout must not leave a running timer');
+ assert.equal(note.hidden,false,'warning must remain visible after switching radio to Street');
+ assert.equal(cancelButton.hidden,true,'Cancel hidden after timeout');
+ assert.ok(statusText.textContent.includes('not responding'));
 
- context.nauticalUnavailable=false;
+ // Manual Cancel must also reset Street, without displaying the outage warning.
+ context.preferredMapLayerName='nautical';
+ context.nauticalFailureNotice=false;
+ context.nauticalStatusMessage='';
+ callbacks.loading();
+ assert.equal(note.hidden,false);
+ cancelButton.click();
+ assert.equal(fallbackEvents,2,'Cancel must reset radio through staged change');
+ assert.equal(context.nauticalFailureNotice,false);
+ assert.equal(note.hidden,true,'Cancel removes loading message');
+
+ // A tile that arrived must not be labeled as a hard outage.
+ context.preferredMapLayerName='nautical';
  callbacks.loading();
  callbacks.tileload();
  timer();
- assert.equal(context.nauticalUnavailable,false,'successful image response is not proven outage');
- assert.equal(context.nauticalAdvisory,true,'successful image may still be blank');
+ assert.equal(context.nauticalFailureNotice,false,'successful image is not proof of outage');
+ assert.equal(context.nauticalAdvisory,true,'an image may still be visually blank');
  assert.ok(updates>0);
  assert.ok(source.includes('If NOAA chart detail is missing, the service may be unavailable or outside chart coverage.'),
-  'ambiguous blank WMS response needs an honest visible advisory');
+  'ambiguous blank WMS response needs conditional advisory');
  assert.ok(source.includes('white-space:normal;max-width:min(520px'),
   'long notice must wrap rather than be clipped');
 }
