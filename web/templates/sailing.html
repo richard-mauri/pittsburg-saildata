@@ -839,9 +839,12 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       return;
     }
     if (nauticalFailureTimer !== null) clearTimeout(nauticalFailureTimer);
+    stopNauticalWaiting();
     nauticalStatusMessage = message;
     nauticalFailureNotice = true;
-    returnToStreetFromNautical();
+    // Keep the user's Nautical selection and available tiles at this zoom.
+    // Only explicit Cancel or selecting Street changes the map preference.
+    updateNauticalZoomUI();
     // A final result occupies the SAME status panel as loading, with Close.
     // It also dismisses itself so the map is not covered indefinitely.
     nauticalFailureTimer = setTimeout(dismissNauticalFailureNotice, 8000);
@@ -901,7 +904,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     }
     stopNauticalWaiting();
     if (nauticalTileLoads === 0) {
-      showNauticalFailureNotice("NOAA nautical charts are not responding. Showing Street Map instead; please try again later.");
+      showNauticalFailureNotice("Nautical chart tiles are unavailable at this zoom. Try changing zoom levels or moving the map.");
 
       return;
     }
@@ -920,6 +923,9 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   }
   nauticalLayer.on("loading", function() {
     if (preferredMapLayerName !== "nautical") return;
+    // A new zoom/pan attempt clears any previous advisory, without altering
+    // the chosen map type or changing saved/unsaved account preferences.
+    if (nauticalFailureNotice) dismissNauticalFailureNotice();
     nauticalTileLoads = 0;
     nauticalTileErrors = 0;
     nauticalAdvisory = false;
@@ -932,7 +938,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   nauticalLayer.on("load", function() {
     if (preferredMapLayerName !== "nautical" || !map.hasLayer(nauticalLayer)) return;
     if (nauticalTileLoads === 0 && nauticalTileErrors > 0 && !nauticalMockInspection) {
-      showNauticalFailureNotice("NOAA nautical charts are temporarily unavailable. Showing Street Map instead; please try again later.");
+      showNauticalFailureNotice("Nautical chart tiles are unavailable at this zoom. Try changing zoom levels or moving the map.");
       return;
     }
     // Leaflet's load event means the current view settled; for mock tests it
