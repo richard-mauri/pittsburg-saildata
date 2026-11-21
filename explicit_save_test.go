@@ -33,6 +33,10 @@ func TestSailingExplicitSaveReplacesAutosync(t *testing.T){
   `putJSON(draftKey,{user:user,revision:revision,data:data},false)`,
   `if (signedIn) stage(next)`,
   `else stageGuest(next)`,
+  `if (target.matches("input[name=\'map-type\']"))`,
+  `if (target.value === "map") delete next.params.map_layer`,
+  `else next.params.map_layer = target.value`,
+  `next.mapType = target.value`,
  }{
   if !strings.Contains(s,fragment){t.Errorf("explicit-save contract missing %q",fragment)}
  }
