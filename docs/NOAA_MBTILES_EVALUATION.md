@@ -97,3 +97,30 @@ Current change is **documentation-only**, without a Go prototype, binary acquisi
 - NOAA Chart Display and chart imagery safety: https://nauticalcharts.noaa.gov/learn/faq.html
 - NOAA ENC user agreement (not proof of raster hosting rights): https://charts.noaa.gov/ENCs/Agreement.shtml
 - MBTiles technical reference: https://gdal.org/en/stable/drivers/raster/mbtiles.html
+
+## NEXT 2026-11-21 — authoritative NOAA regional metadata discovery
+
+NOAA also publishes an authoritative ArcGIS **region polygon layer** at:
+
+https://encdirect.noaa.gov/arcgis/rest/services/MarineChart_Services/ncds_tilecache_metadata/MapServer/0
+
+The verified layer schema provides `name` (region), `date_creat` (creation string), `size` (published **MB**, **not exact byte count**), `baseline` (package locator), and bounding-box coordinate fields `ext_min_x`, `ext_min_y`, `ext_max_x`, `ext_max_y`. **These are available published fields, not yet retrieved live values.** NOAA polygon intersection queries in this evaluation environment were blocked by network/DNS restrictions; the layer's metadata was reachable through a browser index, but no four-site coverage results could be collected. Do not treat a bounding box or presence of a region index as confirmation that raster tiles exist at a requested zoom.
+
+A new standalone, read-only standard-library tool, [scripts/noaa_mbtiles_audit.py](../scripts/noaa_mbtiles_audit.py), makes this check repeatable. It uses `esriSpatialRelIntersects` point queries to discover matching NOAA **regions for each of four representative locations**, then reports the exact attributes returned by NOAA:
+
+```sh
+cd ~/projects/sailing-go
+python3 scripts/noaa_mbtiles_audit.py --catalog
+```
+
+Run the catalog query only when NOAA ArcGIS connectivity is available; it requires no credentials, and its output is evidence about **catalog region intersections**, not downloaded chart detail. After downloading a NOAA-selected regional file outside the repository:
+
+```sh
+python3 scripts/noaa_mbtiles_audit.py --audit ~/Downloads/sailing-noaa-evaluation/candidate.mbtiles
+```
+
+The local audit reads SQLite **read-only**, verifies `PRAGMA integrity_check`, hashes the file with SHA-256, reports actual on-disk byte count and per-level tile counts, and probes the same four locations at **every actual level** after translating XYZ to TMS. It detects PNG/JPEG/WebP binary signatures. It works on a conventional MBTiles `tiles` relation (physical table or view), and will fail explicitly on unsupported schemas. A present tile at a single center point does not prove all surrounding waterways are covered. No MBTiles package or artifact is committed.
+
+Offline synthetic fixtures exercise TMS inversion, raster signature, SQLite integrity and negative coverage. Tests: `python3 -m unittest discover -s scripts -p 'test_noaa_mbtiles_audit.py' -v`. These tests **do not validate NOAA's live contents** or a Go tile server. CI runs the fixture test independently of the Go build.
+
+**Implementation hold:** The standalone inspector is not the Go tile-server prototype. Choosing/pinning a Go SQLite backend, adding an actual chart endpoint, chart source selection, exposing server storage, or changing production settings requires subsequent approved steps after the exact NOAA dataset and hosting constraints are verified. This iteration makes no change to SailingGo's runtime, map, authentication, user accounts or preferences.
