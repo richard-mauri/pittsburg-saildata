@@ -154,6 +154,7 @@ function testMapTileFallback(){
   preferredMapLayerName:'nautical',activeMapLayerName:'map',
   nauticalUnavailable:false,nauticalCheckTimer:null,nauticalAdvisory:false,nauticalTileLoads:0,
   nauticalAutomaticFallback:false,nauticalFailureNotice:false,nauticalStatusMessage:'',minimumNauticalZoom:9,
+  nauticalMockInspection:false,
   mapState:{cloudOverlayVisible:false,radarOverlayVisible:false},
   cloudLayer:null,radarLayer:null,marineZoneHaloLayer:null,
   marineZoneLayer:null,smokeLayer:null,smokeOutlineLayer:null,
@@ -315,12 +316,33 @@ function testNauticalResponseDiagnostics(){
  callbacks.tileload();
  timer();
  assert.equal(context.nauticalFailureNotice,false,'successful image is not proof of outage');
- assert.equal(context.nauticalAdvisory,true,'an image may still be visually blank');
- assert.equal(note.hidden,false,'conditional response advisory should remain visible');
- assert.ok(statusText.textContent.includes('If NOAA chart detail is missing'),
-  'successful image response must be described as potentially blank, not an outage');
- assert.ok(source.includes('If NOAA chart detail is missing, the service may be unavailable or outside chart coverage.'),
-  'ambiguous blank WMS response needs conditional advisory');
+ assert.equal(context.nauticalAdvisory,false,'successful tile must not leave an advisory');
+ assert.equal(note.hidden,true,'a successful tile must clear the status panel');
+ assert.equal(progress.hidden,true,'successful tile must clear the progress bar');
+
+ // A separate, explicitly opted-in loopback mock inspector must not trigger
+ // NOAA failure-to-Street events when only some fixture tiles exist.
+ context.nauticalMockInspection=true;
+ context.preferredMapLayerName='nautical';
+ const fallbackBeforeMock=fallbackEvents;
+ callbacks.loading();
+ assert.equal(note.hidden,true,'mock mode suppresses misleading NOAA progress');
+ assert.equal(context.nauticalCheckTimer,null,'mock mode never starts the 12s timer');
+ callbacks.tileerror();
+ callbacks.load();
+ assert.equal(fallbackEvents,fallbackBeforeMock,'missing mock tile must not force Street');
+ assert.equal(context.preferredMapLayerName,'nautical','mock inspection retains Nautical choice');
+ assert.equal(note.hidden,true,'mock inspection does not obstruct map');
+ context.showNauticalFailureNotice('simulated miss');
+ assert.equal(fallbackEvents,fallbackBeforeMock,'mock mode suppresses generic fallback');
+ assert.equal(context.nauticalFailureNotice,false,'mock mode suppresses failure popup');
+ context.nauticalMockInspection=false;
+ assert.ok(source.includes('window.location.hostname === "localhost"') &&
+  source.includes('window.location.hostname === "127.0.0.1"') &&
+  source.includes('get("nautical_mock_test") === "1"'),
+  'mock inspection must require both explicit URL opt-in and loopback host');
+ assert.ok(source.includes('if (showNautical && !nauticalMockInspection'),
+  'mock mode must not arm a timeout during map reapplication');
  assert.ok(source.includes('white-space:normal;max-width:min(520px'),
   'long notice must wrap rather than be clipped');
 }
