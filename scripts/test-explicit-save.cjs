@@ -129,7 +129,66 @@ async function assertChartFailureKeepsPage(){
    'failed AJAX should report a non-destructive inline error');
  assert.ok(logs.includes('busy:false'),'chart status must reset after failure');
 }
+// Exercise the real Leaflet base-map switch logic with fake tile layers.
+// Nautical must keep Street below the NOAA chart and revert to Street if
+// its tiles fail; radar must use a transparent PNG cache (not opaque WMS).
+function testMapTileFallback(){
+ const source=fs.readFileSync('web/templates/sailing.html','utf8');
+ const a=source.indexOf('  function applyPreferredBaseMap() {');
+ const b=source.indexOf('  function setBaseMapLayer(name) {',a);
+ assert.ok(a>=0&&b>a,'actual basemap implementation must be available');
+ const makeLayer=name=>({
+  name,addTo(map){map.layers.add(this);map.order.push(this.name);return this},
+  bringToFront(){map.order.push(this.name)},setStyle(){}
+ });
+ const map={layers:new Set(),order:[],hasLayer(x){return this.layers.has(x)},removeLayer(x){this.layers.delete(x)},getZoom(){return 10}};
+ const streetLayer=makeLayer('street');
+ const nauticalLayer=makeLayer('nautical');
+ const satelliteLayer=makeLayer('satellite');
+ const hybridLayer=makeLayer('hybrid');
+ const radio=[{value:'map'},{value:'nautical'},{value:'satellite'}];
+ const context={
+  map,streetLayer,nauticalLayer,satelliteLayer,hybridLayer,
+  preferredMapLayerName:'nautical',activeMapLayerName:'map',
+  nauticalUnavailable:false,minimumNauticalZoom:9,
+  mapState:{cloudOverlayVisible:false,radarOverlayVisible:false},
+  cloudLayer:null,radarLayer:null,marineZoneHaloLayer:null,
+  marineZoneLayer:null,smokeLayer:null,smokeOutlineLayer:null,
+  updateNauticalZoomUI(){},updateSmokeLegendForBaseMap(){},
+  document:{querySelectorAll(){return radio}},
+  effectiveMapLayerName(){return context.preferredMapLayerName},
+  baseLayerForName(name){return {map:streetLayer,nautical:nauticalLayer,satellite:satelliteLayer,hybrid:hybridLayer}[name]},
+ };
+ vm.createContext(context);
+ vm.runInContext(source.slice(a,b),context);
+ context.applyPreferredBaseMap();
+ assert.ok(map.hasLayer(streetLayer),'nautical must retain street underlay');
+ assert.ok(map.hasLayer(nauticalLayer),'nautical layer should render over street');
+ assert.equal(context.activeMapLayerName,'nautical');
+ assert.ok(map.order.indexOf('street')<map.order.indexOf('nautical'),
+  'Street must load before chart tiles');
+ context.nauticalUnavailable=true;
+ context.applyPreferredBaseMap();
+ assert.ok(map.hasLayer(streetLayer),'NOAA failure must leave Street visible');
+ assert.ok(!map.hasLayer(nauticalLayer),'failed NOAA chart must be removed');
+ assert.equal(context.preferredMapLayerName,'nautical',
+  'fallback must not silently change saved preference');
+ assert.equal(context.activeMapLayerName,'map');
+ context.preferredMapLayerName='satellite';
+ context.applyPreferredBaseMap();
+ assert.ok(map.hasLayer(satelliteLayer),'satellite selection remains intact');
+ assert.ok(!map.hasLayer(streetLayer),'other basemaps should not keep Street');
+ assert.ok(source.includes('transparent: true,\n      version: "1.3.0"'),
+  'NOAA WMS must be transparent outside chart coverage');
+ assert.ok(source.includes('ridge::USCOMP-N0Q-0/{z}/{x}/{y}.png'),
+  'radar must use IEM cached NEXRAD transparency-preserving tiles');
+ assert.ok(!source.includes('L.tileLayer.wms(\n    "https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q.cgi?'),
+  'old problematic WMS radar tiles must not return');
+ assert.ok(source.includes('radarTileErrors > 0'),
+  'partial radar tile failures must be visible to the user');
+}
 async function run(){
+ testMapTileFallback();
  await assertChartFailureKeepsPage();
  const personal=makeFixture();
  const next={schema:1,params:{wind_unit:'mph'},overlays:{},mapType:'map',marineCategories:{}};
