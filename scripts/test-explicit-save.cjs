@@ -238,6 +238,10 @@ function testNauticalResponseDiagnostics(){
  assert.ok(!source.includes('nauticalProgressTimer') &&
   !source.includes('setNauticalTileVisibility'),
   'no progress timing or whole-layer tile visibility manipulation');
+ assert.ok(source.includes('.map-nautical-zoom-note[data-state="unavailable"]{color:#ffe1a1;font-weight:800}'),
+  'unavailable status must use a bright high-contrast warning color on the dark page');
+ assert.ok(!source.includes('.map-nautical-zoom-note[data-state="unavailable"]{color:#9b1c1c}'),
+  'the formerly unreadable dark-red warning text must not return');
 
  const callbacks={};
  const tileContainer={style:{visibility:''}};
