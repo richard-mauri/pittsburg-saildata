@@ -247,6 +247,7 @@ function testNauticalResponseDiagnostics(){
   nauticalCancelButton:cancelButton,nauticalCloseButton:closeButton,
   nauticalProgress:progress,nauticalTypeInput:typeInput,
   nauticalTypeLabel:label,minimumNauticalZoom:9,
+  nauticalMockInspection:false,
   map:{hasLayer(x){return x===nauticalLayer},getZoom(){return 10}},
   document:{querySelector(sel){
    if(sel==='input[name="map-type"][value="map"]')return streetInput;
