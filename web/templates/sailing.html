@@ -916,6 +916,13 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     if (showNautical && !map.hasLayer(streetLayer)) streetLayer.addTo(map);
     if (!map.hasLayer(targetLayer)) targetLayer.addTo(map);
     if (showNautical) nauticalLayer.bringToFront();
+    // Start the bounded response check from the selected map state itself.
+    // A stalled WMS request may never deliver a Leaflet "loading" event.
+    // Also covers Nautical restored from a saved URL at initial page load.
+    if (showNautical && nauticalCheckTimer === null &&
+        !nauticalAdvisory && nauticalTileLoads === 0) {
+      startNauticalResponseCheck();
+    }
 
     activeMapLayerName = showNautical ? "nautical" :
       effectiveName === "nautical" ? "map" : effectiveName;
