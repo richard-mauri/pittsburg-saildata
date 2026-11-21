@@ -98,7 +98,39 @@ const makeFixture=({guest=false,failSave=false,conflict=false}={})=>{
  vm.runInContext(operations+'\n'+restoreOperations,ctx);
  return {ctx,store,requests,notices,saveButton,discardButton,restored,saved};
 };
+// A current-chart preference edit is an AJAX update, never a full-page
+// navigation on network or authentication failure. Exercise the actual refresh
+// function with a failing fetch and a navigation spy.
+const chartSource=fs.readFileSync('web/templates/sailing.html','utf8');
+const chartStart=chartSource.indexOf('  async function loadCurrentURL(target, pushHistory) {');
+const chartEnd=chartSource.indexOf('  document.addEventListener("click", function(e) {',chartStart);
+assert.ok(chartStart>=0 && chartEnd>chartStart,'chart fetch controller must exist');
+assert.ok(!chartSource.slice(chartStart,chartEnd).includes('location.assign('),
+ 'AJAX chart update must not cause a full-page reload on failure');
+assert.ok(!chartSource.includes('.current-refreshing{opacity:.55'),
+ 'changing chart preferences must not fade all report cards');
+
+async function assertChartFailureKeepsPage(){
+ const logs=[],original='https://weather.themauris.org/report?format=html&planning=1';
+ const ctx={
+  URL,Error,Promise,requestSerial:0,
+  fetch:async()=>{throw Error('simulated server failure')},
+  setRefreshing:on=>logs.push('busy:'+on),
+  currentRefreshStatus:message=>logs.push('status:'+message),
+  window:{location:{href:original,assign(){throw Error('navigation prohibited')}}},
+  history:{pushState(){throw Error('history should not change on failure')}},
+  document:{},DOMParser:class{},
+ };
+ vm.createContext(ctx);
+ vm.runInContext('var requestSerial=0;'+chartSource.slice(chartStart,chartEnd),ctx);
+ await ctx.loadCurrentURL(new URL(original),true);
+ assert.equal(ctx.window.location.href,original,'failed refresh must preserve page URL');
+ assert.ok(logs.some(s=>s.includes('Previous results remain visible')),
+   'failed AJAX should report a non-destructive inline error');
+ assert.ok(logs.includes('busy:false'),'chart status must reset after failure');
+}
 async function run(){
+ await assertChartFailureKeepsPage();
  const personal=makeFixture();
  const next={schema:1,params:{wind_unit:'mph'},overlays:{},mapType:'map',marineCategories:{}};
  personal.ctx.stage(next);
