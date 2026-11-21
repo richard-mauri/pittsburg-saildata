@@ -42,28 +42,7 @@ file candidate.mbtiles
 sqlite3 -readonly candidate.mbtiles 'PRAGMA integrity_check; SELECT name, value FROM metadata ORDER BY name; SELECT MIN(zoom_level),MAX(zoom_level),COUNT(*) FROM tiles; SELECT zoom_level,COUNT(*) FROM tiles GROUP BY zoom_level ORDER BY zoom_level;'
 ```
 
-Use a disposable Python 3 stdlib inspection to check exact **individual** tile availability for the four sites and image signatures; metadata bounds alone is insufficient. MBTiles stores **TMS tile_row**, so for an XYZ request `y` at `z`, the SQLite row is `(1 << z) - 1 - y`.
-
-```python
-import math, sqlite3
-db = sqlite3.connect("file:candidate.mbtiles?mode=ro", uri=True)
-sites = {"Pittsburg": (38.028, -121.885), "Delta": (38.095, -121.590),
-         "SF Bay": (37.800, -122.365), "Golden Gate": (37.819, -122.478)}
-for z in (8, 9, 10, 11, 12, 13, 14, 15):
-    print("zoom", z)
-    for name, (lat, lon) in sites.items():
-        lat = max(-85.05112878, min(85.05112878, lat))
-        x = int((lon + 180) / 360 * (1 << z))
-        y = int((1 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2 * (1 << z))
-        tms_y = (1 << z) - 1 - y
-        row = db.execute("SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?", (z,x,tms_y)).fetchone()
-        blob = row[0] if row else b""
-        sig = "PNG" if blob.startswith(b"\\x89PNG\\r\\n\\x1a\\n") else "JPEG" if blob.startswith(b"\\xff\\xd8") else "WEBP" if blob[0:4] == b"RIFF" and blob[8:12] == b"WEBP" else "none/other"
-        print(f"  {name}: {'present' if row else 'absent'}, {len(blob)} bytes, {sig}")
-db.close()
-```
-
-These sample probes are not a substitute for polygon coverage or tileset boundary seam inspection, and zoom 8–15 are **test probes, not a claim about the NOAA zoom range**. If NOAA uses `map`/`images` normalized schemas rather than a direct `tiles` table, first inspect `sqlite_master` and adapt the read-only query.
+Use the standalone Go auditor described below for exact individual tile probes; metadata bounds are insufficient. MBTiles stores **TMS tile_row**, so for an XYZ request at zoom `z`, SQLite row `tile_row = (1 << z) - 1 - y`. Examine the schema before relying on the conventional `tiles` relation.
 
 ## Proposed Go/Leaflet integration after dataset acceptance
 
@@ -88,7 +67,7 @@ NOAA states the ENC viewer/Chart Display Service images are **not suitable for n
 **Gate C (blocked):** NCDS redistribution/attribution review.  
 **Gate D (future):** Standalone Go/SQLite local tile-server prototype, tests and measured latency. No production route or map integration until accepted.
 
-Current change is **documentation-only**, without a Go prototype, binary acquisition, source selection UI, running process or listener. Await the owner's `NEXT` and actual NOAA dataset access before proceeding.
+Current change adds a standalone Go metadata/binary audit utility and its isolated tests, without a Go HTTP tile-server prototype, binary acquisition, source selection UI, running process or listener. Await the owner's `NEXT` and actual NOAA dataset access before proceeding.
 
 ## References
 
@@ -106,21 +85,27 @@ https://encdirect.noaa.gov/arcgis/rest/services/MarineChart_Services/ncds_tileca
 
 The verified layer schema provides `name` (region), `date_creat` (creation string), `size` (published **MB**, **not exact byte count**), `baseline` (package locator), and bounding-box coordinate fields `ext_min_x`, `ext_min_y`, `ext_max_x`, `ext_max_y`. **These are available published fields, not yet retrieved live values.** NOAA polygon intersection queries in this evaluation environment were blocked by network/DNS restrictions; the layer's metadata was reachable through a browser index, but no four-site coverage results could be collected. Do not treat a bounding box or presence of a region index as confirmation that raster tiles exist at a requested zoom.
 
-A new standalone, read-only standard-library tool, [scripts/noaa_mbtiles_audit.py](../scripts/noaa_mbtiles_audit.py), makes this check repeatable. It uses `esriSpatialRelIntersects` point queries to discover matching NOAA **regions for each of four representative locations**, then reports the exact attributes returned by NOAA:
+The standalone Go utility [scripts/noaa_mbtiles_audit.go](../scripts/noaa_mbtiles_audit.go) queries the official NOAA region polygons at the four sample locations without requiring a third-party Go module. It prints catalog attributes as JSON.
 
 ```sh
 cd ~/projects/sailing-go
-python3 scripts/noaa_mbtiles_audit.py --catalog
+go run scripts/noaa_mbtiles_audit.go -catalog
 ```
 
-Run the catalog query only when NOAA ArcGIS connectivity is available; it requires no credentials, and its output is evidence about **catalog region intersections**, not downloaded chart detail. After downloading a NOAA-selected regional file outside the repository:
+Once a NOAA-selected regional MBTiles file is downloaded **outside the repository**, the same Go program audits the real bytes:
 
 ```sh
-python3 scripts/noaa_mbtiles_audit.py --audit ~/Downloads/sailing-noaa-evaluation/candidate.mbtiles
+go run scripts/noaa_mbtiles_audit.go -audit ~/Downloads/sailing-noaa-evaluation/candidate.mbtiles
 ```
 
-The local audit reads SQLite **read-only**, verifies `PRAGMA integrity_check`, hashes the file with SHA-256, reports actual on-disk byte count and per-level tile counts, and probes the same four locations at **every actual level** after translating XYZ to TMS. It detects PNG/JPEG/WebP binary signatures. It works on a conventional MBTiles `tiles` relation (physical table or view), and will fail explicitly on unsupported schemas. A present tile at a single center point does not prove all surrounding waterways are covered. No MBTiles package or artifact is committed.
+The local audit requires the existing `sqlite3` command-line utility and runs it with `-readonly`. It validates SQLite integrity, computes SHA-256 and the exact file size, enumerates available zoom levels and tile counts, and inspects tile presence plus PNG/JPEG/WebP signatures at the four locations. This is an **offline read-only inspection**, not an implemented Go HTTP chart server. A tile found at a point does not guarantee complete coverage of the surrounding waterway or seamless geographic coverage. No downloadable chart database is committed.
 
-Offline synthetic fixtures exercise TMS inversion, raster signature, SQLite integrity and negative coverage. Tests: `python3 -m unittest discover -s scripts -p 'test_noaa_mbtiles_audit.py' -v`. These tests **do not validate NOAA's live contents** or a Go tile server. CI runs the fixture test independently of the Go build.
+Go unit tests in [scripts/noaa_mbtiles_audit_test.go](../scripts/noaa_mbtiles_audit_test.go) validate XYZ-to-TMS conversion, invalid coordinates and raster signatures:
+
+```sh
+go test scripts/noaa_mbtiles_audit.go scripts/noaa_mbtiles_audit_test.go
+```
+
+The tests run in CI and do not claim to validate live NOAA binary contents. **No Python tooling or Python runtime is used or required.**
 
 **Implementation hold:** The standalone inspector is not the Go tile-server prototype. Choosing/pinning a Go SQLite backend, adding an actual chart endpoint, chart source selection, exposing server storage, or changing production settings requires subsequent approved steps after the exact NOAA dataset and hosting constraints are verified. This iteration makes no change to SailingGo's runtime, map, authentication, user accounts or preferences.
