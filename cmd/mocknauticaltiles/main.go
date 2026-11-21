@@ -1,6 +1,6 @@
 // Command mocknauticaltiles pre-generates lower-zoom test PNGs for the full
-// San Francisco Bay through Monterey region. At higher zooms the explicitly
-// enabled loopback-only SailingGo mock gateway renders requested tiles lazily.
+// San Francisco Bay through Monterey region at z9..12. Use the standalone
+// nauticaltilemanager for additional local mock XYZ paths at native z13..16.
 // These are fake images, never for navigation.
 package main
 
@@ -28,8 +28,8 @@ func xyz(lon,lat float64,z int) tile {
  return tile{z,x,y}
 }
 
-// The full region is available through z18 via local on-demand rendering.
 // Pre-generating z9..12 keeps disk usage and owner Mac build costs bounded.
+// Missing z13..16 tiles must be created with the separate Tile Manager.
 func run(directory string) error {
  if directory=="" {return fmt.Errorf("-dir is required")}
  abs,err:=filepath.Abs(directory);if err!=nil{return err}
@@ -53,7 +53,7 @@ func run(directory string) error {
  // Strict marker enables on-demand render only when an expressly opted-in
  // loopback SailingGo test process is used (never on the public hostname).
  if err=os.WriteFile(filepath.Join(abs,mockchart.MarkerName),[]byte(mockchart.MarkerText),0600);err!=nil{return err}
- fmt.Printf("Created %d MOCK TEST DATA XYZ PNG tiles at %s (never for navigation); region z9-18 via loopback-only on-demand mode\n",len(tiles),abs)
+ fmt.Printf("Created %d MOCK TEST DATA XYZ PNG tiles at %s (never for navigation); region z9-12 only; use nauticaltilemanager for z13-16\n",len(tiles),abs)
  return nil
 }
 func main(){
