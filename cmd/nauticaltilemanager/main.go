@@ -11,6 +11,7 @@ import (
  "image/png"
  "io"
  "math"
+ "net"
  "net/http"
  "net/url"
  "os"
@@ -32,6 +33,8 @@ type options struct {
  MaxBytes int64
  Dir, Source string
  Download bool
+ Timeout time.Duration
+ Retries int
 }
 type rectangle struct {Z,X0,Y0,X1,Y1 int}
 func (r rectangle) count() int64 {return int64(r.X1-r.X0+1)*int64(r.Y1-r.Y0+1)}
@@ -56,6 +59,8 @@ func buildPlan(o options) (plan,error) {
  }
  if o.MaxTiles<=0 {return p,errors.New("-max-tiles must be positive")}
  if o.MaxBytes<0 {return p,errors.New("-max-bytes must be nonnegative")}
+ if o.Timeout<=0 {return p,errors.New("-timeout must be positive")}
+ if o.Retries<0||o.Retries>5{return p,errors.New("-retries must be within 0..5")}
  if o.Source!="noaa" && o.Source!="mock" {return p,errors.New("-source must be noaa or mock")}
  if o.Source=="mock" && (o.West<mockchart.West||o.East>mockchart.East||
    o.South<mockchart.South||o.North>mockchart.North) {
@@ -134,6 +139,36 @@ func getTile(ctx context.Context,o options,base string,client *http.Client,z,x,y
  if !validPNG(b){return nil,errors.New("NOAA returned invalid/non-256px PNG")}
  return b,nil
 }
+
+// downloadWithRetry retries only transport timeouts and retryable upstream
+// HTTP statuses. Invalid PNGs, authentication failures and malformed requests
+// stop immediately so a bad request does not hammer NOAA repeatedly.
+func downloadWithRetry(ctx context.Context,o options,base string,client *http.Client,z,x,y int)([]byte,error){
+ for attempt:=0;attempt<=o.Retries;attempt++{
+  b,err:=getTile(ctx,o,base,client,z,x,y)
+  if err==nil{return b,nil}
+  if ctx.Err()!=nil{return nil,ctx.Err()}
+  if o.Source=="mock"{return nil,err}
+  retryable:=errors.Is(err,context.DeadlineExceeded)
+  var netErr net.Error
+  if errors.As(err,&netErr)&&(netErr.Timeout()||netErr.Temporary()){retryable=true}
+  // NOAA WMS may return transient 429/5xx responses during service load.
+  msg:=err.Error()
+  if strings.HasPrefix(msg,"NOAA HTTP 429")||strings.HasPrefix(msg,"NOAA HTTP 5"){retryable=true}
+  if !retryable||attempt==o.Retries{
+   return nil,fmt.Errorf("after %d attempt(s): %w",attempt+1,err)
+  }
+  delay:=time.Duration(1<<uint(attempt))*time.Second
+  fmt.Fprintf(os.Stderr,"NOAA tile %d/%d/%d attempt %d/%d failed: %v; retrying in %s\\n",
+   z,x,y,attempt+1,o.Retries+1,err,delay)
+  select{
+  case <-ctx.Done():return nil,ctx.Err()
+  case <-time.After(delay):
+  }
+ }
+ return nil,errors.New("unreachable retry state")
+}
+
 func atomicPNG(path string,b []byte)error{
  dir:=filepath.Dir(path)
  if err:=os.MkdirAll(dir,0700);err!=nil{return err}
@@ -153,7 +188,7 @@ func execute(ctx context.Context,o options,base string,client *http.Client)(tota
  o.print(p)
  if !o.Download{return t,nil}
  dir,err:=safeOutput(o);if err!=nil{return t,err}
- if client==nil{client=&http.Client{Timeout:5*time.Second}}
+ if client==nil{client=&http.Client{Timeout:o.Timeout}}
  // Serial and deterministic; no unbounded concurrent NOAA downloads.
  for _,row:=range p.Rows{
   for x:=row.X0;x<=row.X1;x++{for y:=row.Y0;y<=row.Y1;y++{
@@ -165,7 +200,7 @@ func execute(ctx context.Context,o options,base string,client *http.Client)(tota
     if o.MaxBytes>0&&t.Bytes>o.MaxBytes{return t,fmt.Errorf("existing cache exceeds -max-bytes=%d",o.MaxBytes)}
     continue
    }else if !os.IsNotExist(err){return t,err}
-   b,err:=getTile(ctx,o,base,client,row.Z,x,y)
+   b,err:=downloadWithRetry(ctx,o,base,client,row.Z,x,y)
    if err!=nil{return t,fmt.Errorf("tile %d/%d/%d: %w",row.Z,x,y,err)}
    if !validPNG(b){return t,fmt.Errorf("tile %d/%d/%d: invalid PNG",row.Z,x,y)}
    if o.MaxBytes>0&&t.Bytes+int64(len(b))>o.MaxBytes{return t,fmt.Errorf("next tile exceeds -max-bytes=%d; resume with larger budget only if intended",o.MaxBytes)}
@@ -186,11 +221,13 @@ func main(){
  flag.IntVar(&o.MaxZoom,"max-zoom",12,"last native nautical zoom (9..16)")
  flag.IntVar(&o.MaxTiles,"max-tiles",0,"required hard ceiling on planned XYZ tile count")
  flag.Int64Var(&o.MaxBytes,"max-bytes",0,"optional total cached PNG bytes ceiling (0 = not configured)")
+ flag.DurationVar(&o.Timeout,"timeout",30*time.Second,"NOAA request timeout for each attempt")
+ flag.IntVar(&o.Retries,"retries",2,"extra attempts after a timeout or HTTP 429/5xx (0..5)")
  flag.StringVar(&o.Dir,"dir","","isolated output directory (required for -download)")
  flag.StringVar(&o.Source,"source","noaa","noaa or mock")
  flag.BoolVar(&o.Download,"download",false,"explicitly enable file creation and NOAA downloads")
  flag.Parse()
  if flag.NArg()!=0 {fmt.Fprintln(os.Stderr,"unexpected positional arguments");os.Exit(2)}
- _,err:=execute(context.Background(),o,noaaURL,&http.Client{Timeout:5*time.Second})
+ _,err:=execute(context.Background(),o,noaaURL,&http.Client{Timeout:o.Timeout})
  if err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)}
 }
