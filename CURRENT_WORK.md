@@ -25,3 +25,5 @@ git status --short --branch
 ./sailing-go -version
 ```
 Owner separately chooses whether/when to launch or restart the service; running processes and Terminal were not touched.
+
+**Latest scoped update (diagnostics):** The Go chart endpoint now emits `X-Sailing-Chart-Source`, `X-Sailing-Chart-Result` and (when applicable) `X-Sailing-Chart-Upstream-Status`, so Safari Network can differentiate disk hit, Go-to-NOAA successful fetch, timeout, upstream HTTP error, invalid PNG, cache-write error, queue timeout, cache unavailable and 30-second cooldown without changing the JavaScript UI. Actual outbound Go NOAA requests produce compact `NAUTICAL tile=z/x/y upstream=noaa result=... status=... duration_ms=...` log records with no path, full URL, credential or response body. Offline Go httptest regression covers header combinations and successful cache reuse. Latest PR head/CI to verify after documentation update. Owner Mac/Safari/live NOAA unverified, no version/build change, deployment or restart.
