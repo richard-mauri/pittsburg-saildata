@@ -35,7 +35,7 @@ import (
 
 const (
 	appVersion                      = "1.16.0"
-	buildVersion                    = "v427"
+	buildVersion                    = "v439"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -4175,8 +4175,14 @@ func runServer(
    mux.ServeHTTP(w,r)
   })
  }
- // The normal listener is unchanged. A loopback-only test override prevents
- // isolated test instances from binding all network interfaces.
+ // Verify all protected weather/report/API requests at the Go server boundary,
+ // including direct URLs, AJAX chart fetches and future unknown API routes.
+ // Browser navigation uses a sealed HttpOnly first-party handoff cookie.
+ authGate,authErr:=NewSailingHTTPAuth(NewSailingSuiteGate())
+ if authErr!=nil {fatal(authErr)}
+ handler=authGate.ProtectWeather(handler)
+ // A loopback-only test override prevents isolated test instances from
+ // binding all network interfaces.
  if localAddr:=os.Getenv("SAILING_ACTIVITY_TEST_LISTEN");localAddr!="" {
   host,_,parseErr:=net.SplitHostPort(localAddr)
   if parseErr!=nil || (host!="127.0.0.1" && host!="::1") {

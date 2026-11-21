@@ -307,3 +307,21 @@ a.details-link:focus-visible { outline:2px solid var(--accent);outline-offset:5p
   color:var(--ink);
   background:var(--panel);
 }
+
+/* Fixed-height status beneath the preference toolbar: text changes cannot
+   alter the width/position of the Save and Discard buttons. */
+.sailing-save-status {
+  box-sizing:border-box;
+  width:100%;
+  min-height:1.4rem;
+  padding:3px 0 0;
+  margin:0;
+  color:var(--muted);
+  font-size:.75rem;
+  line-height:1.2rem;
+  font-weight:500;
+  text-align:right;
+}
+@media(max-width:640px) {
+  .sailing-save-status {text-align:left}
+}
