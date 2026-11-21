@@ -221,272 +221,138 @@ function testNauticalResponseDiagnostics(){
  const source=fs.readFileSync('web/templates/sailing.html','utf8');
  const a=source.indexOf('  var nauticalTileLoads = 0;');
  const b=source.indexOf('  function persistPreferredMapLayer() {',a);
- assert.ok(a>=0&&b>a,'real NOAA tile and notice code must be present');
+ assert.ok(a>=0&&b>a,'actual nautical status and tile events must be present');
+ // The status is a sibling AFTER the map and footer, never an overlay.
+ const statusMarkup='<div id="map-nautical-zoom-note"';
+ const statusAt=source.indexOf(statusMarkup);
+ const footerAt=source.indexOf('<div class="map-footer-row">');
+ const controlsAt=source.indexOf('<div class="map-state-controls"');
+ assert.ok(footerAt>=0&&statusAt>footerAt&&statusAt<controlsAt,
+  'Nautical status must live outside the map, after its footer');
+ assert.ok(!source.includes('id="map-nautical-progress"') &&
+  !source.includes('id="map-nautical-cancel"') &&
+  !source.includes('id="map-nautical-close"'),
+  'no progress bar, popup buttons or overlay controls may exist');
+ assert.ok(!source.includes('nauticalProgressTimer') &&
+  !source.includes('setNauticalTileVisibility'),
+  'no progress timing or whole-layer tile visibility manipulation');
 
  const callbacks={};
  const tileContainer={style:{visibility:''}};
  const nauticalLayer={options:{maxNativeZoom:16},getTileSize(){return {x:256}},
   on(name,fn){callbacks[name]=fn;},getContainer(){return tileContainer;}};
- const note={hidden:true}, statusText={textContent:''}, progress={hidden:true};
- const cancelButton={hidden:true,addEventListener(name,fn){this[name]=fn;}};
- const closeButton={hidden:true,addEventListener(name,fn){this[name]=fn;}};
+ const note={hidden:true,state:'',setAttribute(name,value){
+  assert.equal(name,'data-state');this.state=value;
+ }};
+ const statusText={textContent:''};
  const typeInput={disabled:false,setAttribute(){},title:''};
  const label={classList:{toggle(){}}};
- let timer=null, updates=0, fallbackEvents=0, stagedMapType='nautical';
  const timers=new Map();
- let timerId=0;
- let viewX=165, viewY=394;
- const tileCoords=()=>({z:Math.min(context.map.getZoom(),16),x:viewX,y:viewY});
- const success=()=>callbacks.tileload({coords:tileCoords()});
- const failure=()=>callbacks.tileerror({coords:tileCoords()});
- const fire=(ms)=>{
-  const found=[...timers.entries()].find(([,t])=>t.ms===ms);
-  assert.ok(found,'expected live timer at '+ms+'ms');
-  timers.delete(found[0]);
-  found[1].fn();
- };
- const expired=(ms)=>[...timers.values()].find(t=>t.ms===ms)?.fn;
- const streetInput={
-  checked:false,
-  dispatchEvent(ev){
-   assert.equal(ev.type,'change');
-   assert.equal(ev.bubbles,true);
-   stagedMapType='map'; // the real capture listener stages Street, does not Save.
-   fallbackEvents++;
-   context.preferredMapLayerName='map';
-   context.updateNauticalZoomUI();
-   return true;
-  },
- };
- const context={
-  nauticalLayer, preferredMapLayerName:'nautical',
-  nauticalZoomNote:note,nauticalStatusText:statusText,
-  nauticalCancelButton:cancelButton,nauticalCloseButton:closeButton,
-  nauticalProgress:progress,nauticalTypeInput:typeInput,
-  nauticalTypeLabel:label,minimumNauticalZoom:9,
-  nauticalMockInspection:false,
-  map:{hasLayer(x){return x===nauticalLayer},getZoom(){return 10},
-   getBounds(){return {getNorthWest(){return {x:viewX,y:viewY}},
-    getSouthEast(){return {x:viewX+0.9,y:viewY+0.9}}};},
-   project(point){return {x:point.x*256,y:point.y*256};}},
-  document:{querySelector(sel){
-   if(sel==='input[name="map-type"][value="map"]')return streetInput;
-   throw new Error('unexpected selector: '+sel);
-  }},
-  Event:class Event{constructor(type,opts){this.type=type;this.bubbles=opts.bubbles}},
-  setTimeout(fn,ms){timer=fn;const id=++timerId;timers.set(id,{fn,ms});return id;},
-  clearTimeout(id){timers.delete(id);timer=null;},
-  updateNauticalZoomUI(){updates++;return context.realUpdateNauticalZoomUI();},
-  setBaseMapLayer(name){context.preferredMapLayerName=name;},
+ let timerId=0,viewX=165,viewY=394,zoom=10;
+ const map={hasLayer(layer){return layer===nauticalLayer},getZoom(){return zoom},
+  getBounds(){return {getNorthWest(){return {x:viewX,y:viewY}},
+   getSouthEast(){return {x:viewX+0.9,y:viewY+0.9}}};},
+  project(point){return {x:point.x*256,y:point.y*256};}};
+ const context={nauticalLayer,preferredMapLayerName:'nautical',
+  nauticalZoomNote:note,nauticalStatusText:statusText,nauticalTypeInput:typeInput,
+  nauticalTypeLabel:label,minimumNauticalZoom:9,nauticalMockInspection:false,map,
+  setTimeout(fn,ms){const id=++timerId;timers.set(id,{fn,ms});return id;},
+  clearTimeout(id){timers.delete(id);},
+  updateNauticalZoomUI(){return context.realUpdateNauticalZoomUI();},
  };
  vm.createContext(context);
  vm.runInContext(source.slice(a,b),context);
  context.realUpdateNauticalZoomUI=()=>vm.runInContext('updateNauticalZoomUI()',context);
- // Fast cached tiles complete before 200ms: no progress panel, even if
- // the browser later executes a previously queued callback.
- assert.equal(typeof callbacks.loading,'function');
+ const success=(x=viewX,y=viewY)=>callbacks.tileload({coords:{z:Math.min(zoom,16),x,y}});
+ const failure=(x=viewX,y=viewY)=>callbacks.tileerror({coords:{z:Math.min(zoom,16),x,y}});
+ const fire=ms=>{const timer=[...timers.entries()].find(([,t])=>t.ms===ms);
+  assert.ok(timer,'expected '+ms+'ms safety timer');timers.delete(timer[0]);timer[1].fn();};
+
+ // A fast cached batch produces no overlay, and a short status below map.
  callbacks.loading();
- assert.equal(typeof timer,'function','tile loading arms a bounded response check');
- assert.equal(note.hidden,true,'loading must NOT immediately show a popup');
- assert.equal(progress.hidden,true,'fast cached tiles never display progress');
- const staleFastProgress=expired(200);
+ assert.equal(note.hidden,false,'status line remains outside map');
+ assert.ok(statusText.textContent.includes('Checking chart coverage'));
+ assert.equal(timers.size,1,'only a safety timer; no 200ms progress timer');
+ assert.ok(![...timers.values()].some(t=>t.ms===200));
  success();
  callbacks.load();
- assert.equal(note.hidden,true,'fast success must remain popup-free');
- staleFastProgress();
- assert.equal(note.hidden,true,'stale 200ms callback cannot resurrect popup');
- assert.equal(progress.hidden,true);
- assert.equal(tileContainer.style.visibility,'','loading never hides chart pixels');
- // A genuinely slow request shows progress only after the short threshold,
- // then converts that SAME panel to an error on the 12-second timeout.
- context.nauticalSuccessfulTiles={};
- context.map.getZoom=()=>9;
- callbacks.loading();
- assert.equal(note.hidden,true);
- fire(200);
- assert.equal(note.hidden,false,'slow request shows the one status panel after 200ms');
- assert.ok(statusText.textContent.includes('Loading NOAA nautical chart'));
- assert.equal(cancelButton.hidden,false,'visible loading offers Cancel');
- assert.equal(progress.hidden,false,'visible loading offers progress bar');
- fire(12000);
- assert.equal(context.nauticalFailureNotice,true,'stalled WMS must record visible warning');
- assert.equal(fallbackEvents,0,'timeout must never force a Street radio change');
- assert.equal(stagedMapType,'nautical','timeout preserves staged Nautical preference');
- assert.equal(context.preferredMapLayerName,'nautical','Nautical must stay selected after timeout');
- assert.equal(context.nauticalCheckTimer,null,'timeout must not leave a running timer');
- assert.equal(note.hidden,false,'the original progress panel must transition to a dismissible warning');
- assert.equal(cancelButton.hidden,true,'Cancel hidden after timeout');
- assert.equal(progress.hidden,true,'progress bar hidden after timeout');
- assert.equal(tileContainer.style.visibility,'','failure must leave chart layer visible');
- assert.equal(closeButton.hidden,false,'same status panel offers Close after failure');
- assert.ok(statusText.textContent.includes('changing zoom levels'),
-  'failure must suggest changing zoom levels instead of switching to Street');
- assert.ok([...timers.values()].some(t=>t.ms===8000),
-  'failure status should be automatically dismissed');
- closeButton.click();
- assert.equal(note.hidden,true,'Close dismisses failure in the same panel');
- assert.equal(context.nauticalFailureNotice,false,'Close clears failure state');
- assert.equal(closeButton.hidden,true,'Close hides itself');
- assert.ok(![...timers.values()].some(t=>t.ms===8000),
-  'manual Close cancels automatic dismissal timer');
+ assert.equal(note.hidden,false,'status text remains visible for selected Nautical');
+ assert.ok(statusText.textContent.includes('Chart tiles visible'));
+ assert.equal(context.nauticalLoading,false,'Leaflet completion clears loading state');
+ assert.equal(timers.size,0,'successful load cancels safety timer');
+ assert.equal(tileContainer.style.visibility,'','tile container is never hidden');
 
- // The same error panel automatically dismisses without requiring Close.
- context.preferredMapLayerName='nautical';
+ // A failed viewport reports coverage in the same out-of-map status line.
+ zoom=9;viewX=82;viewY=197;
  callbacks.loading();
- fire(12000);
- const autoDismiss=[...timers.values()].find(t=>t.ms===8000);
- assert.ok(autoDismiss,'timeout should schedule automatic dismissal');
- autoDismiss.fn();
- assert.equal(note.hidden,true,'final failure popup must not stay forever');
- assert.equal(context.nauticalFailureNotice,false);
- // Manual Cancel must also reset Street, without displaying the outage warning.
- context.preferredMapLayerName='nautical';
- context.nauticalFailureNotice=false;
- context.nauticalStatusMessage='';
- callbacks.loading();
- assert.equal(note.hidden,true,'progress has a 200ms threshold');
- fire(200);
+ assert.ok(statusText.textContent.includes('Checking chart coverage'));
+ failure();
+ callbacks.load();
  assert.equal(note.hidden,false);
- cancelButton.click();
- assert.equal(fallbackEvents,1,'ONLY explicit Cancel must reset Street via staged change');
- assert.equal(context.nauticalFailureNotice,false);
- assert.equal(note.hidden,true,'Cancel removes loading message');
- assert.equal(progress.hidden,true,'Cancel removes busy progress bar');
+ assert.equal(note.state,'unavailable');
+ assert.ok(statusText.textContent.includes('this area at the current zoom'));
+ assert.equal(context.preferredMapLayerName,'nautical');
+ assert.equal(timers.size,0,'settled failures have no wait or dismiss timers');
 
- // A tile that arrived must not be labeled as a hard outage.
- context.preferredMapLayerName='nautical';
- context.map.getZoom=()=>10;
+ // Moving back to known coverage clears the warning and never overlays map.
+ zoom=10;viewX=165;viewY=394;
+ context.checkNauticalViewportAfterMove();
+ assert.equal(note.state,'ready');
+ assert.ok(statusText.textContent.includes('Chart tiles visible'));
+
+ // Missing peripheral tile does not erase valid visible chart coverage.
  callbacks.loading();
- success();
- assert.equal(tileContainer.style.visibility,'','cached tiles must remain visible during progress');
+ failure(166,394);
  callbacks.load();
- assert.equal(tileContainer.style.visibility,'','load completion must not toggle tile container visibility');
- assert.equal(context.nauticalFailureNotice,false,'successful image is not proof of outage');
- assert.equal(context.nauticalAdvisory,false,'successful tile must not leave an advisory');
- assert.equal(note.hidden,true,'a successful tile must clear the status panel');
- assert.equal(progress.hidden,true,'successful tile must clear the progress bar');
- assert.equal(fallbackEvents,1,'successful chart responses never change the radio');
+ assert.equal(note.state,'ready');
+ assert.ok(statusText.textContent.includes('Chart tiles visible'));
 
- // A separate, explicitly opted-in loopback mock inspector must not trigger
- // NOAA failure-to-Street events when only some fixture tiles exist.
+ // Distant same-zoom pan uses current XYZ viewport, not zoom history.
+ viewX=220;viewY=410;
+ context.checkNauticalViewportAfterMove();
+ assert.equal(note.state,'unavailable');
+ assert.ok(statusText.textContent.includes('this area'));
+ viewX=165;viewY=394;
+ context.checkNauticalViewportAfterMove();
+ assert.equal(note.state,'ready');
+
+ // Slow chart requests never pop a progress bar: safety timeout sets status.
+ zoom=11;viewX=330;viewY=789;
+ callbacks.loading();
+ assert.equal(timers.size,1);
+ assert.ok(statusText.textContent.includes('Checking chart coverage'));
+ fire(12000);
+ assert.equal(context.nauticalFailureNotice,true);
+ assert.equal(note.state,'unavailable');
+ assert.equal(timers.size,0,'timeout generates no auto-dismiss timer');
+
+ // Loopback mock inspection also uses only text, not a progress overlay.
+ zoom=12;viewX=661;viewY=1579;
  context.nauticalMockInspection=true;
- context.preferredMapLayerName='nautical';
- const fallbackBeforeMock=fallbackEvents;
  callbacks.loading();
- assert.equal(note.hidden,true,'mock fast tiles must not trigger a late popup');
- assert.equal(progress.hidden,true,'mock progress remains delayed by 200ms');
- assert.equal(tileContainer.style.visibility,'','mock images never disappear during zoom');
- assert.ok([...timers.values()].some(t=>t.ms===2500),'mock progress is bounded without NOAA fallback');
+ assert.ok(statusText.textContent.includes('Checking mock chart coverage'));
+ assert.ok([...timers.values()].some(t=>t.ms===2500));
  failure();
  callbacks.load();
- assert.equal(tileContainer.style.visibility,'','mock missing tiles preserve the Street underlay and any loaded tiles');
- assert.equal(progress.hidden,true,'mock progress closes on settled tile errors');
- assert.equal(fallbackEvents,fallbackBeforeMock,'missing mock tile must not force Street');
- assert.equal(context.preferredMapLayerName,'nautical','mock inspection retains Nautical choice');
- assert.equal(note.hidden,false,'uncovered mock viewport gives one dismissible advisory');
- assert.ok(statusText.textContent.includes('this area at the current zoom'));
- context.showNauticalFailureNotice('simulated miss');
- assert.equal(fallbackEvents,fallbackBeforeMock,'mock mode never changes selection');
- assert.equal(context.nauticalFailureNotice,true,
-  'genuinely uncovered mock viewport must show zoom/pan advice');
- closeButton.click();
- context.nauticalMockInspection=false;
- // Ordinary (non-mock) navigation at a genuinely unvisited zoom with
- // no prior valid tiles retains Nautical and suggests another zoom.
- // Clear earlier successful z10 state to isolate a fresh tile-less map view.
- context.nauticalSuccessfulTiles={};
- context.preferredMapLayerName='nautical';
- const fallbackBeforeError=fallbackEvents;
+ assert.equal(note.state,'unavailable');
+ assert.equal(context.preferredMapLayerName,'nautical');
+
+ // Stale timer from an obsolete zoom cannot overwrite the newer state.
+ zoom=13;viewX=1322;viewY=3159;
  callbacks.loading();
- failure();
- callbacks.load();
- assert.equal(context.preferredMapLayerName,'nautical','all-error zoom retains Nautical');
- assert.equal(fallbackEvents,fallbackBeforeError,'all-error zoom must not stage Street');
- assert.equal(closeButton.hidden,false,'failed zoom displays Close on the same panel');
- assert.ok(statusText.textContent.includes('changing zoom levels'));
- // Repeated zoom attempts must clear stale error and allow new tiles.
+ const obsolete=[...timers.values()][0].fn;
+ zoom=14;viewX=2644;viewY=6318;
  callbacks.loading();
- assert.equal(context.nauticalFailureNotice,false,'new zoom dismisses prior failure');
- assert.equal(progress.hidden,true,'new zoom keeps popup hidden for fast requests');
- const staleRetryProgress=expired(200);
  success();
  callbacks.load();
- assert.equal(context.preferredMapLayerName,'nautical');
- assert.equal(note.hidden,true,'success after failed zoom clears the panel');
- staleRetryProgress();
- assert.equal(note.hidden,true,'stale callback cannot show progress after recovery');
- // An additional failed batch at the same zoom must NOT claim that all chart
- // tiles are unavailable if some mock or NOAA tiles already succeeded there.
- const zoomTen=10;
- context.map.getZoom=()=>zoomTen;
- viewX=165; viewY=394;
- const beforePartial=fallbackEvents;
- callbacks.loading();
- callbacks.tileerror({coords:{z:10,x:166,y:394}});
- callbacks.load();
- assert.equal(context.nauticalFailureNotice,false,
-  'later peripheral tile failures are partial coverage, not total outage');
- assert.equal(note.hidden,true,'partial coverage has no incorrect error popup');
- assert.equal(context.preferredMapLayerName,'nautical');
- assert.equal(fallbackEvents,beforePartial,'partial failure never selects Street');
- // At a genuinely different zoom with no prior successful tiles, the
- // existing single error panel should still suggest a zoom adjustment.
- context.map.getZoom=()=>9;
- viewX=82; viewY=197;
- callbacks.loading();
- failure();
- callbacks.load();
- assert.equal(context.nauticalFailureNotice,true,'missing z9 has its own error');
- assert.ok(statusText.textContent.includes('changing zoom levels'));
- context.map.getZoom=()=>10;
- closeButton.click();
- // At the same zoom a distant pan must NOT inherit the earlier success.
- viewX=165; viewY=394;
- context.nauticalSuccessfulTiles['10/165/394']=true;
- assert.equal(context.nauticalViewportHasTiles(),true);
- viewX=220; viewY=410;
- assert.equal(context.nauticalViewportHasTiles(),false,
-  'historical success elsewhere at the same zoom is not visible coverage');
- context.checkNauticalViewportAfterMove();
- assert.equal(note.hidden,false,'uncovered same-zoom pan shows one status notice');
- assert.ok(statusText.textContent.includes('this area at the current zoom'));
- assert.equal(context.preferredMapLayerName,'nautical');
- assert.equal(fallbackEvents,beforePartial);
- closeButton.click();
- viewX=165; viewY=394;
- context.checkNauticalViewportAfterMove();
- assert.equal(context.nauticalViewportHasTiles(),true,
-  'panning back into fixture coverage restores status');
- assert.equal(note.hidden,true,'covered viewport has no popup');
- // An all-failure tile batch in a NEW viewport must show the warning,
- // even if the old viewport had successes at the same zoom.
- viewX=220; viewY=410;
- callbacks.loading();
- failure();
- callbacks.load();
- assert.equal(context.nauticalFailureNotice,true,
-  'all missing tiles after same-zoom pan show a warning');
- assert.equal(context.preferredMapLayerName,'nautical',
-  'missing chart viewport does not switch map type');
- closeButton.click();
- assert.ok(source.includes('window.location.hostname === "localhost"') &&
-  source.includes('window.location.hostname === "127.0.0.1"') &&
-  source.includes('get("nautical_mock_test") === "1"'),
-  'mock inspection must require both explicit URL opt-in and loopback host');
- assert.ok(source.includes('if (showNautical && nauticalCheckTimer === null &&'),
-  'initial chart selection must schedule the request check before adding tiles');
- assert.ok(source.includes('}, 200);'),
-  'progress panel must have a 200ms delay for fast cached tiles');
- assert.ok(source.indexOf('startNauticalResponseCheck();',source.indexOf('function applyPreferredBaseMap()')) <
-  source.indexOf('streetLayer.addTo(map)',source.indexOf('function applyPreferredBaseMap()')),
-  'progress must be initiated before Leaflet adds any chart tiles');
- assert.ok(!source.includes('setNauticalTileVisibility'),
-  'chart status must never hide the entire Leaflet tile container');
+ obsolete();
+ assert.ok(statusText.textContent.includes('Chart tiles visible'));
+ assert.equal(note.state,'ready');
+ assert.equal(tileContainer.style.visibility,'');
  assert.ok(source.includes('maxNativeZoom: ((window.location.hostname === "localhost"'),
-  'loopback fixture mode must render native z17 and z18 PNGs');
- assert.ok(source.includes('white-space:normal;max-width:min(520px'),
-  'long notice must wrap rather than be clipped');
+  'loopback fixture mode retains native z17/18 PNG inspection');
 }
+
 async function run(){
  testMapTileFallback();
  testNauticalResponseDiagnostics();
