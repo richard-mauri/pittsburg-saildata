@@ -202,8 +202,10 @@ function testMapTileFallback(){
   'a failed viewport must recommend panning or changing zoom without forcing Street');
  assert.ok(!source.includes('returnToStreetFromNautical();\n    // A final result'),
   'automatic chart failure must never call the Street transition');
- assert.ok(source.includes('nauticalStatusText.textContent = nauticalFailureNotice'),
-  'the failure notice must be displayed through the existing nautical status UI');
+ assert.ok(source.includes('nauticalStatusText.textContent = status') &&
+  source.includes('nauticalFailureNotice') &&
+  source.includes('nauticalZoomNote.hidden = !selected'),
+  'chart failure must update the below-map status text, not an overlay');
  assert.ok(source.includes('L.tileLayer("/api/charts/tiles/{z}/{x}/{y}.png"'),
   'NOAA tiles must always be fetched through the local SailingGo Go endpoint');
  assert.ok(!source.includes('gis.charttools.noaa.gov'),
