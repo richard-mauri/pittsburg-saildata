@@ -67,6 +67,13 @@ func TestSailingHTTPAuthLiveGuardAndBrowserHandoff(t *testing.T) {
   r:=do("GET",path,"",nil,"")
   if r.Code!=401{t.Errorf("unprotected %s: got %d want 401",path,r.Code)}
  }
+ // AJAX chart refresh must receive 401, never a login HTML page that
+ // its DOM parser might mistake for a successful weather report.
+ ajax:=httptest.NewRequest("GET","https://weather.themauris.org/report?format=html",nil)
+ ajax.Header.Set("X-Requested-With","current-date-controls")
+ ajaxResult:=httptest.NewRecorder()
+ handler.ServeHTTP(ajaxResult,ajax)
+ if ajaxResult.Code!=401 {t.Fatalf("anonymous AJAX chart status %d",ajaxResult.Code)}
  if routeCalls!=0||calls!=0{t.Fatal("anonymous weather data reached handler or authority")}
  for _,path:=range []string{"/health","/welcome","/assets/tanner.jpg","/assets/hero.jpg","/activity.js"}{
   if r:=do("GET",path,"",nil,"");r.Code!=200{t.Errorf("public asset %s blocked: %d",path,r.Code)}
@@ -97,6 +104,19 @@ func TestSailingHTTPAuthLiveGuardAndBrowserHandoff(t *testing.T) {
    }
   }
  }
+ // Cross-origin cookie writes must be rejected even after login.
+ req:=httptest.NewRequest("POST","https://weather.themauris.org/api/activity/identity",nil)
+ req.AddCookie(cookie)
+ req.Header.Set("Origin","https://attacker.example")
+ denied:=httptest.NewRecorder()
+ handler.ServeHTTP(denied,req)
+ if denied.Code!=403{t.Fatalf("cross-origin cookie write status %d",denied.Code)}
+ req=httptest.NewRequest("POST","https://weather.themauris.org/api/activity/identity",nil)
+ req.AddCookie(cookie)
+ req.Header.Set("Origin",sailingSuiteOrigin)
+ accepted:=httptest.NewRecorder()
+ handler.ServeHTTP(accepted,req)
+ if accepted.Code!=200{t.Fatalf("same-origin cookie write status %d",accepted.Code)}
  // A CLI bearer is verified per-request, too, without a browser cookie.
  if r:=do("GET","/wind-readings",token,nil,"");r.Code!=200{t.Fatalf("direct API bearer %d",r.Code)}
  tampered:=*cookie
