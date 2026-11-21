@@ -175,7 +175,7 @@
   async function browserOnly(guestName) {
     signedIn = false;
     const localIdentity = guestName || guestIdentity;
-    if (localIdentity) signedInStatus(localIdentity,"Guest (browser-only preferences)");
+    if (localIdentity) signedInStatus(localIdentity,"");
     else {SuiteBannerStatus.setText("Browser-only mode");status("Not signed in");}
     const old = getJSON(localKey,true);
     let data = valid(old) ? old : settingsFromPage(null);
@@ -283,7 +283,7 @@
           await browserOnly(user);
         } catch (_) {
           document.documentElement.classList.remove("sailing-units-pending");
-          signedInStatus(user,"Guest (browser-only preferences)");
+          signedInStatus(user,"");
         }
         return;
       }
@@ -326,8 +326,7 @@
       // but do not mutate the account or claim a valid login.
       signedIn = false;
       SuiteBannerStatus.setText("Browser-only mode");
-      status(guestIdentity ? "Guest (browser-only preferences)" :
-        /HTTP (401|403)|Invalid session/.test(String(err.message)) ? "Session expired or revoked — Sign in again" :
+      status(/HTTP (401|403)|Invalid session/.test(String(err.message)) ? "Session expired or revoked — Sign in again" :
         "Not signed in · Homepage verification unavailable");
       if(/HTTP (401|403)|Invalid session/.test(String(err.message))) requireSignIn();
       document.documentElement.classList.remove("sailing-units-pending");
