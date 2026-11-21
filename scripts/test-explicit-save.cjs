@@ -191,8 +191,49 @@ function testMapTileFallback(){
  assert.ok(source.includes('radarTileErrors > 0'),
   'partial radar tile failures must be visible to the user');
 }
+// Exercise actual NOAA tile-event logic, including HTTP-successful images
+// which may be visually blank, and requests that never complete.
+function testNauticalResponseDiagnostics(){
+ const source=fs.readFileSync('web/templates/sailing.html','utf8');
+ const a=source.indexOf('  var nauticalTileLoads = 0;');
+ const b=source.indexOf('  function baseLayerForName(name) {',a);
+ assert.ok(a>=0&&b>a,'tile event implementation must be present');
+ const callbacks={};
+ const nauticalLayer={on(name,fn){callbacks[name]=fn;}};
+ let timer=null, updates=0, fallbacks=0;
+ const context={
+  nauticalLayer, preferredMapLayerName:'nautical',
+  map:{hasLayer(x){return x===nauticalLayer;}},
+  setTimeout(fn){timer=fn;return 1;},
+  clearTimeout(){timer=null;},
+  updateNauticalZoomUI(){updates++;},
+  applyPreferredBaseMap(){fallbacks++;},
+ };
+ vm.createContext(context);
+ vm.runInContext(source.slice(a,b),context);
+ assert.equal(typeof callbacks.loading,'function');
+ callbacks.loading();
+ assert.equal(typeof timer,'function','tile loading should arm bounded response check');
+ timer();
+ assert.equal(context.nauticalUnavailable,true,'unanswered WMS tiles should produce fallback');
+ assert.ok(context.nauticalStatusMessage.includes('not responding'));
+ assert.equal(fallbacks,1);
+
+ context.nauticalUnavailable=false;
+ callbacks.loading();
+ callbacks.tileload();
+ timer();
+ assert.equal(context.nauticalUnavailable,false,'successful image response is not proven outage');
+ assert.equal(context.nauticalAdvisory,true,'successful image may still be blank');
+ assert.ok(updates>0);
+ assert.ok(source.includes('If NOAA chart detail is missing, the service may be unavailable or outside chart coverage.'),
+  'ambiguous blank WMS response needs an honest visible advisory');
+ assert.ok(source.includes('white-space:normal;max-width:min(520px'),
+  'long notice must wrap rather than be clipped');
+}
 async function run(){
  testMapTileFallback();
+ testNauticalResponseDiagnostics();
  await assertChartFailureKeepsPage();
  const personal=makeFixture();
  const next={schema:1,params:{wind_unit:'mph'},overlays:{},mapType:'map',marineCategories:{}};
