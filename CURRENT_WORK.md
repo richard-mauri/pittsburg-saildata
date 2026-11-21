@@ -39,3 +39,14 @@ git status --short --branch
 ```
 
 For isolated fixture generation after the ordinary build (no service restart): `go run ./cmd/mocknauticaltiles -dir "$HOME/Downloads/sailing-nautical-mock-$(date +%Y%m%d-%H%M%S)"`. To inspect tiles through Safari, a **separately owner-authorized test instance** pointed at the fixture directory is required. Never repoint or restart the production service/tunnel or use these fictional tiles as navigational data. Check actual browser image alignment at z10, z11, z12 and Save/Discard separately; mark this unverified until owner performs it.
+
+## Owner NEXT — single-panel mock testing usability / wider zoom coverage (2026-11-21)
+
+Owner reported that mock tiles appeared **before** the later progress panel, followed by a separate-seeming failure notice and automatic Street selection; zooming/panning was unusable for Stage A testing. Root cause: Leaflet could paint fast cached PNGs before a separate status event, and sparse fixture coverage triggered NOAA fallback when the loopback-only inspection mode was not active. A public `weather.themauris.org` URL must **not** bypass normal production safety.
+
+In the **same existing draft PR #38**, `web/templates/sailing.html` now starts the existing **single** progress/Cancel panel synchronously before adding Nautical, hides the nautical Leaflet container until the request cycle settles, then reveals tiles and closes the status on success. On ordinary NOAA all-failure, the same panel transitions to error/Close and the existing staged Street fallback with eight-second dismiss; timeout remains 12 seconds. Explicit local `nautical_mock_test=1` on loopback hosts uses the same single panel, a 2.5-second reveal deadline, and **does not** switch to Street on missing fictional tiles. Real Go NOAA proxy, cache, wind/current data, auth, personal/Guest explicit Save/Discard, overlays, tunnels and version counters unchanged.
+
+`cmd/mocknauticaltiles/main.go` now generates a **new** bounded tile set over lon [-121.98,-121.48], lat [37.96,38.16] at z9–z14 (hard ceiling 1,000 PNGs). `nautical_mock_tiles_test.go` checks endpoint cache hits at z9 and z14 in addition to earlier points; `scripts/test-explicit-save.cjs` checks loading-before-reveal, common status panel, mock missing-cell retention, and ordinary error/Close/Street behaviors. Old z10–z12 generated mock files remain unchanged and are inadequate for the expanded acceptance. **Actual owner Safari z9–z14 verification remains outstanding.**
+
+The current exact branch head and GitHub Actions result must be rechecked from GitHub after the last documentation commit. No FINISH, merge, Issue closure, remote branch deletion, deployment, owner Mac restart, production cache mutation, tag, version or release is authorized. Owner-local dirty/unpushed tree remains inaccessible to this GitHub-only session. The owner must restore any public mock cache with separately approved process control before further Safari testing.
+
