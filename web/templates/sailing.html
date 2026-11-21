@@ -744,18 +744,14 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     attribution: '&copy; OpenStreetMap contributors'
   });
 
-  var nauticalLayer = L.tileLayer.wms(
-    "https://gis.charttools.noaa.gov/arcgis/rest/services/MCS/NOAAChartDisplay/MapServer/exts/MaritimeChartService/WMSServer",
-    {
-      layers: "0,1,2,3,4,5,6,7,8,9,10,11,12",
-      format: "image/png",
-      // Transparent outside NOAA chart coverage; Street Map remains beneath
-      // this WMS so a blank chart tile cannot erase the entire basemap.
-      transparent: true,
-      version: "1.3.0",
-      attribution: "NOAA Office of Coast Survey"
-    }
-  );
+  // All chart images come from this SailingGo origin. NOAA access, when
+  // implemented, belongs to the Go server rather than Safari.
+  var nauticalLayer = L.tileLayer("/api/charts/tiles/{z}/{x}/{y}.png", {
+    minZoom: 9,
+    maxZoom: 18,
+    maxNativeZoom: 16,
+    attribution: "NOAA Office of Coast Survey"
+  });
 
   var satelliteLayer = L.tileLayer(
     "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
@@ -870,7 +866,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   if (nauticalCloseButton) {
     nauticalCloseButton.addEventListener("click", dismissNauticalFailureNotice);
   }
-  // A successful WMS image response can still be completely transparent. The
+  // A successful chart tile image response can still be completely transparent. The
   // browser cannot reliably prove chart content without cross-origin pixel
   // access, so show a conditional advisory instead of asserting an outage.
   function checkNauticalResponse() {
@@ -989,7 +985,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     if (!map.hasLayer(targetLayer)) targetLayer.addTo(map);
     if (showNautical) nauticalLayer.bringToFront();
     // Start the bounded response check from the selected map state itself.
-    // A stalled WMS request may never deliver a Leaflet "loading" event.
+    // A stalled chart tile request may never deliver a Leaflet "loading" event.
     // Also covers Nautical restored from a saved URL at initial page load.
     if (showNautical && nauticalCheckTimer === null &&
         !nauticalAdvisory && nauticalTileLoads === 0) {
