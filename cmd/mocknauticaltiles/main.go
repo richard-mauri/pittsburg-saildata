@@ -1,29 +1,21 @@
-// Command mocknauticaltiles creates small, unmistakably fake XYZ chart tiles
-// for offline, owner-controlled testing. Never point it at a live NOAA cache.
+// Command mocknauticaltiles pre-generates lower-zoom test PNGs for the full
+// San Francisco Bay through Monterey region. At higher zooms the explicitly
+// enabled loopback-only SailingGo mock gateway renders requested tiles lazily.
+// These are fake images, never for navigation.
 package main
 
 import (
- "bytes"
  "flag"
  "fmt"
- "image"
- "image/color"
- "image/draw"
- "image/png"
  "math"
  "os"
  "path/filepath"
  "strconv"
- "strings"
+
+ "pittsburg-saildata/internal/mockchart"
 )
 
-type location struct{name string; lon,lat float64}
-var sites=[]location{
- {"PITTSBURG",-121.885,38.028},
- {"DELTA",-121.590,38.095},
-}
 type tile struct{z,x,y int}
-
 func xyz(lon,lat float64,z int) tile {
  lat=math.Max(-85.05112878,math.Min(85.05112878,lat))
  n:=math.Exp2(float64(z))
@@ -36,128 +28,37 @@ func xyz(lon,lat float64,z int) tile {
  return tile{z,x,y}
 }
 
-// This 5x7 block font deliberately avoids external dependencies/network.
-var glyphs=map[rune][7]string{
- 'A':{"01110","10001","10001","11111","10001","10001","10001"},
- 'B':{"11110","10001","10001","11110","10001","10001","11110"},
- 'C':{"01111","10000","10000","10000","10000","10000","01111"},
- 'D':{"11110","10001","10001","10001","10001","10001","11110"},
- 'E':{"11111","10000","10000","11110","10000","10000","11111"},
- 'F':{"11111","10000","10000","11110","10000","10000","10000"},
- 'G':{"01111","10000","10000","10111","10001","10001","01111"},
- 'H':{"10001","10001","10001","11111","10001","10001","10001"},
- 'I':{"11111","00100","00100","00100","00100","00100","11111"},
- 'K':{"10001","10010","10100","11000","10100","10010","10001"},
- 'L':{"10000","10000","10000","10000","10000","10000","11111"},
- 'M':{"10001","11011","10101","10101","10001","10001","10001"},
- 'N':{"10001","11001","10101","10011","10001","10001","10001"},
- 'O':{"01110","10001","10001","10001","10001","10001","01110"},
- 'P':{"11110","10001","10001","11110","10000","10000","10000"},
- 'R':{"11110","10001","10001","11110","10100","10010","10001"},
- 'S':{"01111","10000","10000","01110","00001","00001","11110"},
- 'T':{"11111","00100","00100","00100","00100","00100","00100"},
- 'U':{"10001","10001","10001","10001","10001","10001","01110"},
- 'V':{"10001","10001","10001","10001","10001","01010","00100"},
- 'X':{"10001","10001","01010","00100","01010","10001","10001"},
- 'Y':{"10001","10001","01010","00100","00100","00100","00100"},
- '0':{"01110","10001","10011","10101","11001","10001","01110"},
- '1':{"00100","01100","00100","00100","00100","00100","01110"},
- '2':{"01110","10001","00001","00010","00100","01000","11111"},
- '3':{"11110","00001","00001","01110","00001","00001","11110"},
- '4':{"00010","00110","01010","10010","11111","00010","00010"},
- '5':{"11111","10000","10000","11110","00001","00001","11110"},
- '6':{"01110","10000","10000","11110","10001","10001","01110"},
- '7':{"11111","00001","00010","00100","01000","01000","01000"},
- '8':{"01110","10001","10001","01110","10001","10001","01110"},
- '9':{"01110","10001","10001","01111","00001","00001","01110"},
- '/':{"00001","00001","00010","00100","01000","10000","10000"},
- '-':{"00000","00000","00000","11111","00000","00000","00000"},
- ':':{"00000","00100","00100","00000","00100","00100","00000"},
- ' ':{"00000","00000","00000","00000","00000","00000","00000"},
-}
-
-func printLine(img *image.RGBA,x,y,scale int,s string,c color.RGBA) {
- for _,letter:=range strings.ToUpper(s){
-  pattern,ok:=glyphs[letter];if !ok {panic("missing mock glyph")}
-  for dy,row:=range pattern {
-   for dx,px:=range row {
-    if px=='1' {
-     draw.Draw(img,image.Rect(x+dx*scale,y+dy*scale,x+(dx+1)*scale,y+(dy+1)*scale),&image.Uniform{C:c},image.Point{},draw.Src)
-    }
-   }
-  }
-  x+=6*scale
- }
-}
-func render(t tile) ([]byte,error) {
- img:=image.NewRGBA(image.Rect(0,0,256,256))
- draw.Draw(img,img.Bounds(),&image.Uniform{C:color.RGBA{20,39,65,255}},image.Point{},draw.Src)
- // Grid and diagonals make tile orientation and seams unmistakable.
- grid:=color.RGBA{65,124,151,255}
- for v:=0;v<256;v++ {img.Set(v,0,grid);img.Set(0,v,grid);img.Set(v,v,grid);img.Set(255-v,v,grid)}
- orange:=color.RGBA{255,180,65,255}
- white:=color.RGBA{255,255,255,255}
- printLine(img,13,30,2,"MOCK TEST DATA",orange)
- printLine(img,13,100,2,"NOT FOR",white)
- printLine(img,13,120,2,"NAVIGATION",white)
- printLine(img,13,180,2,fmt.Sprintf("%d/%d/%d",t.z,t.x,t.y),orange)
- var b bytes.Buffer
- err:=png.Encode(&b,img)
- return b.Bytes(),err
-}
-func run(directory string,zooms []int) error {
+// The full region is available through z18 via local on-demand rendering.
+// Pre-generating z9..12 keeps disk usage and owner Mac build costs bounded.
+func run(directory string) error {
  if directory=="" {return fmt.Errorf("-dir is required")}
  abs,err:=filepath.Abs(directory);if err!=nil{return err}
- // Avoid accidental writes to any existing chart cache. Fresh directory only.
- if _,err=os.Lstat(abs);err==nil {return fmt.Errorf("fixture output already exists: %s",abs)}
+ if _,err=os.Lstat(abs);err==nil{return fmt.Errorf("fixture output already exists: %s",abs)}
  if !os.IsNotExist(err){return err}
- // Cover EVERY nautical map display zoom (9..18) with bounded fixtures.
- // At low/mid zooms a geographic rectangle provides room for pan/zoom.
- // At z15..18 a complete rectangle would explode exponentially in size;
- // use 7x7 neighborhoods at fixed Pittsburg, the owner's selected location,
- // and Delta. High-zoom coverage is intentionally local, not a corridor map.
- const west,east=-121.98,-121.48
- const north,south=38.16,37.96
- const maxTiles=1600
  tiles:=map[tile]struct{}{}
- for _,z:=range zooms {
-  if z<9||z>18{return fmt.Errorf("zoom %d outside supported nautical range 9..18",z)}
-  if z<=14 {
-   nw,se:=xyz(west,north,z),xyz(east,south,z)
-   for x:=nw.x;x<=se.x;x++ {for y:=nw.y;y<=se.y;y++ {
-    tiles[tile{z,x,y}]=struct{}{}
-    if len(tiles)>maxTiles{return fmt.Errorf("mock tile ceiling exceeded")}
-   }}
-  } else {
-   anchors:=[]location{
-    {"PITTSBURG",-121.885,38.028},
-    {"SELECTED",-121.887,38.040},
-    {"DELTA",-121.590,38.095},
-   }
-   limit:=1<<uint(z)
-   for _,site:=range anchors {
-    center:=xyz(site.lon,site.lat,z)
-    for dx:=-3;dx<=3;dx++ {for dy:=-3;dy<=3;dy++ {
-     x,y:=center.x+dx,center.y+dy
-     if x>=0&&x<limit&&y>=0&&y<limit {tiles[tile{z,x,y}]=struct{}{}}
-     if len(tiles)>maxTiles{return fmt.Errorf("mock tile ceiling exceeded")}
-    }}
-   }
-  }
+ for z:=9;z<=12;z++ {
+  nw,se:=xyz(mockchart.West,mockchart.North,z),xyz(mockchart.East,mockchart.South,z)
+  for x:=nw.x;x<=se.x;x++ {for y:=nw.y;y<=se.y;y++ {
+   tiles[tile{z,x,y}]=struct{}{}
+   if len(tiles)>1200{return fmt.Errorf("pre-generated mock tile ceiling exceeded")}
+  }}
  }
  if err=os.MkdirAll(abs,0700);err!=nil{return err}
- for t:=range tiles{
-  pngBytes,err:=render(t);if err!=nil{return err}
+ for t:=range tiles {
+  pngBytes,err:=mockchart.Render(t.z,t.x,t.y);if err!=nil{return err}
   dir:=filepath.Join(abs,strconv.Itoa(t.z),strconv.Itoa(t.x))
   if err=os.MkdirAll(dir,0700);err!=nil{return err}
   if err=os.WriteFile(filepath.Join(dir,fmt.Sprintf("%d.png",t.y)),pngBytes,0600);err!=nil{return err}
  }
- fmt.Printf("Created %d MOCK TEST DATA XYZ PNG tiles at %s (never for navigation)\n",len(tiles),abs)
+ // Strict marker enables on-demand render only when an expressly opted-in
+ // loopback SailingGo test process is used (never on the public hostname).
+ if err=os.WriteFile(filepath.Join(abs,mockchart.MarkerName),[]byte(mockchart.MarkerText),0600);err!=nil{return err}
+ fmt.Printf("Created %d MOCK TEST DATA XYZ PNG tiles at %s (never for navigation); region z9-18 via loopback-only on-demand mode\n",len(tiles),abs)
  return nil
 }
 func main(){
  directory:=flag.String("dir","","new, nonexistent test-only tile directory outside Git/live cache")
  flag.Parse()
  if flag.NArg()!=0 {fmt.Fprintln(os.Stderr,"unexpected arguments");os.Exit(2)}
- if err:=run(*directory,[]int{9,10,11,12,13,14,15,16,17,18});err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)}
+ if err:=run(*directory);err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)}
 }
