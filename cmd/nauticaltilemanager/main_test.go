@@ -11,13 +11,14 @@ import (
  "strings"
  "sync/atomic"
  "testing"
+ "time"
 
  "pittsburg-saildata/internal/mockchart"
 )
 
 func localPlan()options{
  return options{West:-122.42,South:37.75,East:-122.41,North:37.76,
-  MinZoom:9,MaxZoom:9,MaxTiles:20,Source:"mock"}
+  MinZoom:9,MaxZoom:9,MaxTiles:20,Source:"mock",Timeout:30*time.Second,Retries:2}
 }
 func TestBoundsAndLimits(t *testing.T){
  o:=localPlan()
@@ -93,3 +94,16 @@ func TestNOAAWMSAndAtomicOutput(t *testing.T){
  b,err:=os.ReadFile(path);if err!=nil||!bytes.Equal(b,png){t.Fatal("wrong saved NOAA bytes",err)}
 }
 func itoa(n int)string{return strings.TrimSpace(strconv.Itoa(n))}
+
+func TestTransientNOAARetry(t *testing.T){
+ o:=localPlan();o.Source="noaa";o.Dir=filepath.Join(t.TempDir(),"retries");o.Download=true
+ data,err:=mockchart.Render(9,81,197);if err!=nil{t.Fatal(err)}
+ var calls atomic.Int32
+ upstream:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
+  if calls.Add(1)==1 {http.Error(w,"temporarily unavailable",503);return}
+  w.Header().Set("Content-Type","image/png");_,_=w.Write(data)
+ }));defer upstream.Close()
+ total,err:=execute(context.Background(),o,upstream.URL,upstream.Client())
+ if err!=nil{t.Fatal(err)}
+ if total.Created<1||calls.Load()!=int32(total.Created+1){t.Fatalf("expected one transient NOAA retry, got %+v calls=%d",total,calls.Load())}
+}
