@@ -6,3 +6,5 @@ github.com/richard-mauri/homepage/shared/ui v0.0.0-20261118145337-1ce69470b53c h
 github.com/richard-mauri/homepage/shared/ui v0.0.0-20261118145337-1ce69470b53c/go.mod h1:8o5LPN0ziOWOzyyuMYbJ+CaO6hED6uIkmwfwdITSX3o=
 github.com/richard-mauri/homepage/shared/ui v0.0.0-20261120183652-a93b6b4e5539 h1:bku/5sgbDYqdQIt2rPVr/QZ0Y8MoTxR37KZCHAoilVY=
 github.com/richard-mauri/homepage/shared/ui v0.0.0-20261120183652-a93b6b4e5539/go.mod h1:8o5LPN0ziOWOzyyuMYbJ+CaO6hED6uIkmwfwdITSX3o=
+github.com/richard-mauri/homepage/shared/auth v0.0.0-20261121002806-dbbf3a024ea2 h1:/kicBkyGbQDkhOCTPeX0eC5CCNHm2G2HSkmR86/ceyE=
+github.com/richard-mauri/homepage/shared/auth v0.0.0-20261121002806-dbbf3a024ea2/go.mod h1:sBZ1+3q43kAC+L6HR9Udph9P5qW/FvrHCcUdOhbcRl0=
