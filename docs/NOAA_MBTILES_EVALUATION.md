@@ -109,3 +109,11 @@ go test scripts/noaa_mbtiles_audit.go scripts/noaa_mbtiles_audit_test.go
 The tests run in CI and do not claim to validate live NOAA binary contents. **No Python tooling or Python runtime is used or required.**
 
 **Implementation hold:** The standalone inspector is not the Go tile-server prototype. Choosing/pinning a Go SQLite backend, adding an actual chart endpoint, chart source selection, exposing server storage, or changing production settings requires subsequent approved steps after the exact NOAA dataset and hosting constraints are verified. This iteration makes no change to SailingGo's runtime, map, authentication, user accounts or preferences.
+
+## Terminal-safety correction (owner-reported, 2026-11-21)
+
+On the owner's Mac, the NOAA catalog request timed out while awaiting HTTP headers and `go run` returned `exit status 1`; the Terminal window then displayed `Saving session... [Process completed]`. A child process cannot normally terminate an interactive parent shell, but a shell configured to exit on errors or a one-command Terminal session can end after a nonzero exit. **Do not assume the remote NOAA server is reachable.**
+
+The Go auditor now treats **all interactive diagnostics**, including NOAA network timeouts, invalid input and missing files, as **nonfatal**: it prints a clear warning, returns normally and leaves the process exit status at zero. This is intentional for an owner-operated diagnostic command, **not a machine-checkable success signal**. **Do not use the command's exit status to establish dataset success.** Only JSON containing actual NOAA records or an audited MBTiles result is evidence; warnings mean no verification occurred. Isolated Go regressions simulate the timeout and missing-file cases.
+
+The tool still cannot control macOS Terminal session configuration. Run it only from a normal interactive shell, **not a Terminal profile that opens a single command and then exits**, and do not use shell options or wrappers that close the session on command completion. Network failure alone should no longer produce a nonzero exit from the Go auditor. This does not imply NOAA availability or correct chart coverage.
