@@ -150,7 +150,7 @@ function testMapTileFallback(){
  const context={
   map,streetLayer,nauticalLayer,satelliteLayer,hybridLayer,
   preferredMapLayerName:'nautical',activeMapLayerName:'map',
-  nauticalUnavailable:false,minimumNauticalZoom:9,
+  nauticalUnavailable:false,nauticalCheckTimer:null,minimumNauticalZoom:9,
   mapState:{cloudOverlayVisible:false,radarOverlayVisible:false},
   cloudLayer:null,radarLayer:null,marineZoneHaloLayer:null,
   marineZoneLayer:null,smokeLayer:null,smokeOutlineLayer:null,
