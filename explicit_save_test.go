@@ -12,8 +12,14 @@ func TestSailingExplicitSaveReplacesAutosync(t *testing.T){
  for _,fragment:=range []string{
   `saveButton.id = "sailing-save-changes"`,
   `saveButton.textContent = "Save Changes"`,
-  `saveRow.append(saveButton,saveNote)`,
+  `saveRow.append(saveButton,discardButton,saveNote)`,
   `saveButton.addEventListener("click",function(){void flush();})`,
+  `discardButton.id = "sailing-discard-changes"`,
+  `discardButton.textContent = "Discard Changes"`,
+  `discardButton.addEventListener("click"`,
+  `function refreshDirty(next,guest)`,
+  `if (saved && same(next,saved))`,
+  `savedSnapshot=JSON.parse(JSON.stringify(saved))`,
   `window.addEventListener("beforeunload"`,
   `if (!suppressUnload && dirty)`,
   `const guestDraftKey = "sailing.preferences.pending-guest.v1"`,
@@ -40,7 +46,7 @@ func TestSailingExplicitSaveReplacesAutosync(t *testing.T){
  }
  for _,path:=range []string{"web/templates/sailing.html"}{
   markup:=readSailingUITemplate(path)
-  for _,fragment:=range []string{`sailing-save-changes`,`sailing-save-status`,`Save Changes`}{
+  for _,fragment:=range []string{`sailing-save-changes`,`sailing-discard-changes`,`sailing-save-status`,`Save Changes`,`Discard Changes`}{
    if !strings.Contains(markup,fragment){t.Errorf("%s missing save control %q",path,fragment)}
   }
  }
