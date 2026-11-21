@@ -239,3 +239,69 @@ func TestNauticalUpstreamConcurrencyLimit(t *testing.T){
  }
  if highest.Load()>4 {t.Fatalf("more than four upstream calls concurrent: %d",highest.Load())}
 }
+
+func TestNauticalDiagnosticHeaders(t *testing.T) {
+ const path="/api/charts/tiles/11/327/792.png"
+ check:=func(w *httptest.ResponseRecorder,source,result string) {
+  t.Helper()
+  if got:=w.Header().Get("X-Sailing-Chart-Source");got!=source {t.Errorf("source: got %q want %q",got,source)}
+  if got:=w.Header().Get("X-Sailing-Chart-Result");got!=result {t.Errorf("result: got %q want %q",got,result)}
+ }
+ w:=httptest.NewRecorder()
+ nauticalTileHandlerWithUpstream("","http://127.0.0.1:1",nil).ServeHTTP(w,httptest.NewRequest("GET",path,nil))
+ check(w,"unavailable","cache-unavailable")
+
+ pngData:=testNauticalPNG(t)
+ root:=t.TempDir()
+ hits:=0
+ service:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request) {
+  hits++
+  w.Header().Set("Content-Type","image/png")
+  _,_=w.Write(pngData)
+ }))
+ h:=nauticalTileHandlerWithUpstream(root,service.URL,service.Client())
+ w=httptest.NewRecorder()
+ h.ServeHTTP(w,httptest.NewRequest("GET",path,nil))
+ check(w,"noaa","noaa-fetched")
+ if hits!=1 || w.Code!=200 {t.Fatal("expected real upstream fixture fetch")}
+ service.Close()
+ w=httptest.NewRecorder()
+ h.ServeHTTP(w,httptest.NewRequest("GET",path,nil))
+ check(w,"cache","cache-hit")
+ if hits!=1 {t.Fatal("cache hit contacted upstream")}
+
+ failing:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request) {
+  w.WriteHeader(http.StatusBadGateway)
+ }))
+ defer failing.Close()
+ fh:=nauticalTileHandlerWithUpstream(t.TempDir(),failing.URL,failing.Client())
+ w=httptest.NewRecorder()
+ fh.ServeHTTP(w,httptest.NewRequest("GET",path,nil))
+ check(w,"unavailable","noaa-http-error")
+ if got:=w.Header().Get("X-Sailing-Chart-Upstream-Status");got!="502" {t.Fatalf("upstream HTTP status: %q",got)}
+ w=httptest.NewRecorder()
+ fh.ServeHTTP(w,httptest.NewRequest("GET",path,nil))
+ check(w,"unavailable","cooldown")
+ if w.Header().Get("X-Sailing-Chart-Upstream-Status")!="" {t.Fatal("cooldown must not assert an upstream HTTP response")}
+
+ timed:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request) {
+  time.Sleep(130*time.Millisecond)
+  w.WriteHeader(200)
+ }))
+ defer timed.Close()
+ th:=nauticalTileHandlerWithUpstream(t.TempDir(),timed.URL,&http.Client{Timeout:25*time.Millisecond})
+ w=httptest.NewRecorder()
+ th.ServeHTTP(w,httptest.NewRequest("GET",path,nil))
+ check(w,"unavailable","noaa-timeout")
+ if w.Header().Get("X-Sailing-Chart-Upstream-Status")!="" {t.Fatal("timeout must not invent HTTP status")}
+
+ corrupted:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request) {
+  w.Header().Set("Content-Type","image/png")
+  _,_=w.Write([]byte("not really PNG"))
+ }))
+ defer corrupted.Close()
+ ch:=nauticalTileHandlerWithUpstream(t.TempDir(),corrupted.URL,corrupted.Client())
+ w=httptest.NewRecorder()
+ ch.ServeHTTP(w,httptest.NewRequest("GET",path,nil))
+ check(w,"unavailable","noaa-invalid-png")
+}
