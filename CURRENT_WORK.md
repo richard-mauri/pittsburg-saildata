@@ -1,25 +1,28 @@
 # Current work — SailingGo
 
-**Active scope:** [Issue #37](https://github.com/richard-mauri/pittsburg-saildata/issues/37), branch `charts/37-ncds-mbtiles-evaluation`, one draft PR to `main`. Initial first deliverable is the documented NCDS MBTiles evaluation in [docs/NOAA_MBTILES_EVALUATION.md](docs/NOAA_MBTILES_EVALUATION.md). **No integration or chart source selector is authorized in this phase.**
+**Active:** [Issue #37](https://github.com/richard-mauri/pittsburg-saildata/issues/37), [draft PR #38](https://github.com/richard-mauri/pittsburg-saildata/pull/38), branch `charts/37-ncds-mbtiles-evaluation` targeting `main`. Baseline is merged `main` `01b5fab6c3e2d8c67dbd07bd9419ab5c14c99c47` (PR #36). Only this PR is active for downloaded-chart evaluation.
 
-**Verified starting baseline:** GitHub `main` merge commit `01b5fab6c3e2d8c67dbd07bd9419ab5c14c99c47` (PR #36 merged). This chart project is independent of authentication; the existing auth implementation, per-user/Guest explicit Save Changes / Discard Changes, and all NOAA weather/current and map overlay features must remain unchanged.
+**NEXT 2026-11-21:** Identified NOAA's official NCDS ArcGIS regional polygon metadata service, exposing `name`, `date_creat`, `size` (MB), `baseline` and polygon extent. Actual results were blocked by external DNS/network access, so **region identity, current size, file timestamps, SQLite zooms, binary format, package coverage, visual parity and NCDS hosting terms remain unverified**. The existing [evaluation](docs/NOAA_MBTILES_EVALUATION.md) documents the source and blockers. Added `scripts/noaa_mbtiles_audit.py` standard-library Python read-only NOAA catalog / downloaded SQLite inspector, `scripts/test_noaa_mbtiles_audit.py` synthetic offline regression, and a GitHub CI step to run the fixture. No NOAA binary was downloaded; the server-hosted **Go tile endpoint is still a future prototype**, not implemented or validated in this NEXT.
 
-**Dataset evaluation:** NOAA's official NCDS page confirms raster ENC-derived chart MBTiles and weekly baseline package updates. **Current region ID(s), exact byte sizes, effective zoom, image format, geographic tile occupancy, dataset date, visual parity and NCDS-specific redistribution terms remain unverified.** The evaluation environment cannot fetch the NOAA binary. The evidence table and reproducible on-Mac verification commands are in the evaluation document. Do not claim test success or integrate chart basemaps until those checks are complete.
+**Data safety:** No modifications to authentication, user/Guest Save Changes/Discard Changes, private preference records, embedded map/overlays, NOAA environmental routes, production listeners, tunnels, deployment, tags, versions or Git-private build counters. Owner Mac local checkout/state, tokens, browser history and persistent server storage could not be inspected and were not changed. `*.mbtiles` remains gitignored; audit is read-only.
 
-**Data safety:** Documentation-only evaluation; no MBTiles binary committed, no authenticated routes, settings, Homepage storage, browser history, private user data, Mac checkout, build counters, binaries, running services, launchers, Cloudflare tunnels, deployment, tags or releases touched. Owner Mac local tree and production storage are inaccessible and **not inspected**.
+**Documentation / policy:** Full current Homepage merged-main SUITE_DEVELOPMENT_POLICY.md v1.1.0 and SailingGo AGENTS, README, ARCHITECTURE, DEVELOPMENT, CURRENT_WORK reviewed. Only evaluation and CURRENT_WORK were updated this iteration; README/ARCHITECTURE/DEVELOPMENT/AGENTS unchanged because runtime contracts are unchanged.
 
-**Policy and docs:** Homepage `main` [SUITE_DEVELOPMENT_POLICY.md](https://github.com/richard-mauri/homepage/blob/main/SUITE_DEVELOPMENT_POLICY.md) v1.1.0 read in full on November 21, 2026; SailingGo AGENTS.md, README.md, ARCHITECTURE.md, DEVELOPMENT.md and CURRENT_WORK.md reviewed. New evaluation doc and this snapshot changed; older handoffs remain in Git history.
+**Verification:** Standalone inspector's equivalent fixture ran locally (three unit tests passed) against synthetic SQLite bytes; source committed to PR, and latest-head GitHub CI must be verified after push. Live NOAA, owner Mac/Safari, chart images, zoom/coverage, persistence and actual tile-serving remain **unverified**.
 
-**Checks:** Documentation source and links inspected. Exact-head CI status must be verified against the latest PR head; no owner Mac/Safari comparisons, live NOAA measurements or local prototype have been performed. `NEXT` only for later approved scoped development; `FINISH` for PR closeout after acceptance. No merge, Issue closure, remote branch deletion, restart, deployment, tag or release authorized.
+**Approval boundary:** Follow-up dataset verification and isolated Go/SQLite prototype belong in Issue #37/PR #38 after `NEXT` and source access. No automatic integration, merge, Issue closure, branch cleanup, production restart/deploy, tag or release. `FINISH` alone authorizes accepted PR closeout.
 
-**Owner Mac handoff (docs-only; don't start/restart services):**
+**Owner Mac inspection (without restarting or launching any service):**
 ```sh
 cd ~/projects/sailing-go
 git status --short --branch
-# STOP if there are uncommitted local changes; do not discard them.
+# Stop if any uncommitted changes; never overwrite owner-local work.
 git fetch origin
 git checkout charts/37-ncds-mbtiles-evaluation
 git pull --ff-only origin charts/37-ncds-mbtiles-evaluation
 git status --short --branch
-# Read docs/NOAA_MBTILES_EVALUATION.md, then perform the NOAA measurements outside this checkout.
+python3 -m unittest discover -s scripts -p 'test_noaa_mbtiles_audit.py' -v
+python3 scripts/noaa_mbtiles_audit.py --catalog
+# Once a NOAA-selected file has been downloaded OUTSIDE the repository:
+# python3 scripts/noaa_mbtiles_audit.py --audit ~/Downloads/sailing-noaa-evaluation/candidate.mbtiles
 ```
