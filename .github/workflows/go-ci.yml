@@ -31,6 +31,10 @@ jobs:
         run: node scripts/test-explicit-save.cjs
       - name: Test standalone NOAA Go auditor helpers
         run: go test scripts/noaa_mbtiles_audit.go scripts/noaa_mbtiles_audit_test.go
+      - name: Test standalone Nautical Tile Manager (no external NOAA requests)
+        run: go test -count=1 ./cmd/nauticaltilemanager
+      - name: Build standalone Nautical Tile Manager
+        run: go build ./cmd/nauticaltilemanager
       - name: Test root application package
         run: go test -count=1 .
       - name: Build root application
