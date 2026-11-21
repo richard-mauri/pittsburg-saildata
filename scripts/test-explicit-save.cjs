@@ -288,7 +288,9 @@ function testNauticalResponseDiagnostics(){
  timer();
  assert.equal(context.nauticalFailureNotice,false,'successful image is not proof of outage');
  assert.equal(context.nauticalAdvisory,true,'an image may still be visually blank');
- assert.ok(updates>0);
+ assert.equal(note.hidden,false,'conditional response advisory should remain visible');
+ assert.ok(statusText.textContent.includes('If NOAA chart detail is missing'),
+  'successful image response must be described as potentially blank, not an outage');
  assert.ok(source.includes('If NOAA chart detail is missing, the service may be unavailable or outside chart coverage.'),
   'ambiguous blank WMS response needs conditional advisory');
  assert.ok(source.includes('white-space:normal;max-width:min(520px'),
