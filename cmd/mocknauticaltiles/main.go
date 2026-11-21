@@ -111,19 +111,39 @@ func run(directory string,zooms []int) error {
  // Avoid accidental writes to any existing chart cache. Fresh directory only.
  if _,err=os.Lstat(abs);err==nil {return fmt.Errorf("fixture output already exists: %s",abs)}
  if !os.IsNotExist(err){return err}
- // Bounded geographic rectangle includes both sites plus room to pan and
- // zoom. Exactly the same Web Mercator XYZ grid used by Leaflet, not TMS.
- // A hard ceiling prevents accidental generation of a huge tile pyramid.
+ // Cover EVERY nautical map display zoom (9..18) with bounded fixtures.
+ // At low/mid zooms a geographic rectangle provides room for pan/zoom.
+ // At z15..18 a complete rectangle would explode exponentially in size;
+ // use 7x7 neighborhoods at fixed Pittsburg, the owner's selected location,
+ // and Delta. High-zoom coverage is intentionally local, not a corridor map.
  const west,east=-121.98,-121.48
  const north,south=38.16,37.96
+ const maxTiles=1600
  tiles:=map[tile]struct{}{}
  for _,z:=range zooms {
-  if z<9||z>14{return fmt.Errorf("zoom %d outside approved test range 9..14",z)}
-  nw,se:=xyz(west,north,z),xyz(east,south,z)
-  for x:=nw.x;x<=se.x;x++ {for y:=nw.y;y<=se.y;y++ {
-   tiles[tile{z,x,y}]=struct{}{}
-   if len(tiles)>1000{return fmt.Errorf("mock tile ceiling exceeded")}
-  }}
+  if z<9||z>18{return fmt.Errorf("zoom %d outside supported nautical range 9..18",z)}
+  if z<=14 {
+   nw,se:=xyz(west,north,z),xyz(east,south,z)
+   for x:=nw.x;x<=se.x;x++ {for y:=nw.y;y<=se.y;y++ {
+    tiles[tile{z,x,y}]=struct{}{}
+    if len(tiles)>maxTiles{return fmt.Errorf("mock tile ceiling exceeded")}
+   }}
+  } else {
+   anchors:=[]location{
+    {"PITTSBURG",-121.885,38.028},
+    {"SELECTED",-121.887,38.040},
+    {"DELTA",-121.590,38.095},
+   }
+   limit:=1<<uint(z)
+   for _,site:=range anchors {
+    center:=xyz(site.lon,site.lat,z)
+    for dx:=-3;dx<=3;dx++ {for dy:=-3;dy<=3;dy++ {
+     x,y:=center.x+dx,center.y+dy
+     if x>=0&&x<limit&&y>=0&&y<limit {tiles[tile{z,x,y}]=struct{}{}}
+     if len(tiles)>maxTiles{return fmt.Errorf("mock tile ceiling exceeded")}
+    }}
+   }
+  }
  }
  if err=os.MkdirAll(abs,0700);err!=nil{return err}
  for t:=range tiles{
@@ -139,5 +159,5 @@ func main(){
  directory:=flag.String("dir","","new, nonexistent test-only tile directory outside Git/live cache")
  flag.Parse()
  if flag.NArg()!=0 {fmt.Fprintln(os.Stderr,"unexpected arguments");os.Exit(2)}
- if err:=run(*directory,[]int{9,10,11,12,13,14});err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)}
+ if err:=run(*directory,[]int{9,10,11,12,13,14,15,16,17,18});err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)}
 }
