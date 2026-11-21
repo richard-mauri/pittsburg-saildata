@@ -4,6 +4,7 @@ import (
  "fmt"
  "net/http"
  "net/http/httptest"
+ "os"
  "strings"
  "testing"
  "time"
@@ -147,4 +148,20 @@ func TestSailingHTTPAuthLocalCookieAndFailClosed(t *testing.T) {
  if sailingCookieName(r)!=sailingLocalSessionCookie{t.Fatal("loopback cookie name incorrect")}
  if !sailingBootstrapRoute(httptest.NewRequest("GET","http://127.0.0.1:9321/report?format=html",nil)){t.Fatal("browser HTML bootstrap missing")}
  if sailingBootstrapRoute(httptest.NewRequest("GET","http://127.0.0.1:9321/report?format=json",nil)){t.Fatal("JSON must not get login bootstrap")}
+}
+
+func TestSailingProductionListenerInstallsHTTPAuthorization(t *testing.T) {
+ raw,err:=os.ReadFile("main.go")
+ if err!=nil{t.Fatal(err)}
+ script:=string(raw)
+ for _,required:=range []string{
+  "NewSailingHTTPAuth(NewSailingSuiteGate())",
+  "handler=authGate.ProtectWeather(handler)",
+  "http.ListenAndServe(addr, handler)",
+ }{
+  if !strings.Contains(script,required){t.Errorf("production route guard absent: %s",required)}
+ }
+ if strings.Index(script,"handler=authGate.ProtectWeather(handler)")>strings.Index(script,"http.ListenAndServe(addr, handler)"){
+  t.Fatal("production listener starts before guard installation")
+ }
 }
