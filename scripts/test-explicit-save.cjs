@@ -380,6 +380,7 @@ async function run(){
   const savedWithPlanning=JSON.parse(JSON.stringify(ui.ctx.savedSnapshot));
   savedWithPlanning.params.planning_start='13:30';
   savedWithPlanning.params.caution_flood='1.9';
+  savedWithPlanning.overlays['show-tide-range-overlay']=false;
   ui.ctx.restoreControlPreferences(savedWithPlanning,true);
   assert.equal(planningEls['planning-start'].value,'13:30');
   assert.equal(planningEls['planning-caution-flood'].value,'1.9');
