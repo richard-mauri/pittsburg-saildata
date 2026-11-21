@@ -13,8 +13,15 @@ assert.ok(guestStart>=0&&guestEnd>guestStart&&stageStart>=0&&stageEnd>stageStart
 const comparisonStart=source.indexOf('  // Compare preference values,');
 const comparisonEnd=source.indexOf('  function actualParameterChanges(',comparisonStart);
 assert.ok(comparisonStart>=0 && comparisonEnd>comparisonStart);
+const settingsStart=source.indexOf('  function settingsFromPage(fallback) {');
+const settingsEnd=source.indexOf('  function valid(data) {',settingsStart);
+const eventStart=source.indexOf('  document.addEventListener("change",function (event) {');
+const eventEnd=source.indexOf('  // A page-navigation change is recovered',eventStart);
+assert.ok(settingsStart>=0&&settingsEnd>settingsStart&&eventStart>=0&&eventEnd>eventStart);
 const operations=source.slice(comparisonStart,comparisonEnd)+'\n'+
   source.slice(guestStart,guestEnd)+'\n'+source.slice(stageStart,stageEnd);
+const realEventOperations=source.slice(settingsStart,settingsEnd)+'\n'+
+  source.slice(eventStart,eventEnd);
 assert.ok(!source.includes('setTimeout(function(){pendingSave=null;void flush()'));
 assert.ok(!source.includes('setTimeout(function () { pendingSave=null;void flush()'));
 assert.ok(!source.includes('await flush();'), 'account hydration must not save automatically');
@@ -151,6 +158,37 @@ async function run(){
  assert.equal(conflict.store.has('session:'+conflict.ctx.draftKey),false);
  assert.equal(conflict.requests.length,1,'discard after 409 never retries PUT');
 
+ // Exercise the ACTUAL capturing event handler, not only manually created
+ // stage() payloads. The map controller writes the map_layer URL AFTER this
+ // capture handler. On the return to Street the URL still says nautical.
+ for(const guestMode of [false,true]){
+  const ui=makeFixture({guest:guestMode});
+  let radio={value:'map',matches(selector){return selector==="input[name='map-type']";}};
+  ui.ctx.params=['wind_unit','map_layer'];
+  ui.ctx.overlays=[];
+  ui.ctx.location={href:'https://weather.themauris.org/planning?wind_unit=kts'};
+  ui.ctx.URL=URL;
+  ui.ctx.document={
+   querySelector(selector){return selector==='input[name="map-type"]:checked'?radio:null},
+   querySelectorAll(){return []},
+   getElementById(){return null},
+   addEventListener(name,handler){if(name==='change')this.changeHandler=handler},
+  };
+  vm.runInContext(realEventOperations,ui.ctx);
+  assert.equal(typeof ui.ctx.document.changeHandler,'function');
+  radio.value='nautical';
+  ui.ctx.document.changeHandler({target:radio});
+  assert.equal(ui.ctx.dirty,true,'real DOM Street -> Nautical must be dirty');
+  // Emulate the later map-controller history.replaceState.
+  ui.ctx.location.href='https://weather.themauris.org/planning?wind_unit=kts&map_layer=nautical';
+  radio.value='map';
+  ui.ctx.document.changeHandler({target:radio});
+  assert.equal(ui.ctx.dirty,false,'real DOM Nautical -> Street must clear dirty');
+  assert.equal(ui.saveButton.disabled,true,'real map undo must disable Save');
+  assert.equal(ui.discardButton.disabled,true,'real map undo must disable Discard');
+  assert.equal(ui.store.has('session:'+(guestMode?ui.ctx.guestDraftKey:ui.ctx.draftKey)),false,'real map undo clears draft');
+  assert.equal(ui.requests.length,0,'real map undo must not save');
+ }
  console.log('SailingGo explicit Save/Discard: personal, Guest, net-zero edits, 409, failure and unload checks passed.');
 }
 run().catch(err=>{console.error(err);process.exitCode=1});
