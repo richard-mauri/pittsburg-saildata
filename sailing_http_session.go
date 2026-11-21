@@ -6,7 +6,6 @@ import (
  "crypto/rand"
  "encoding/base64"
  "errors"
- "fmt"
  "io"
  "net"
  "net/http"
@@ -207,5 +206,3 @@ func (a *SailingHTTPAuth) ProtectWeather(next http.Handler) http.Handler {
  })
 }
 
-// Keep fmt linked for informative fail-fast errors without leaking credentials.
-var _ = fmt.Errorf
