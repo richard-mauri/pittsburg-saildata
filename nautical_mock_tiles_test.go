@@ -35,8 +35,11 @@ func TestMockNauticalXYZCacheToBrowser(t *testing.T) {
  // Independently known Leaflet/Web Mercator tile coordinates, not an MBTiles
  // TMS row. z10 Pittsburgh around x165/y394, z12 Delta around x664/y1578.
  centers:=[]struct{site string;z,x,y int}{
+  {"Pittsburg",9,82,197},
   {"Pittsburg",10,165,394},
   {"Delta",12,664,1578},
+  {"Pittsburg",14,2644,6318},
+  {"Delta",14,2658,6314},
  }
  for _,center:=range centers {
   t.Run(center.site,func(t *testing.T){
