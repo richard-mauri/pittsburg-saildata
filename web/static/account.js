@@ -10,8 +10,14 @@
   const restoreKey = "sailing.preferences.restoring.v2";
   const localKey = "sailing.preferences.browser.v2";
   const guestDraftKey = "sailing.preferences.pending-guest.v1";
-  const params = ["lat","lon","station","current_station","bin","wind_unit","distance_unit","wind_hours","map_center_lat","map_center_lon","map_zoom","map_layer","planning_start","planning_end","caution_ebb","caution_flood","max_ebb","max_flood","planning_buffer","current_distance_warning","current_days"];
-  const overlays = ["map-show-marine-zone","map-show-smoke","map-show-fire-perimeters","map-show-fire-detections","map-show-air-temperature","map-show-clouds","map-show-radar","map-show-wind-barbs","map-show-inland-wind-barbs","map-show-pressure","map-show-swell","map-show-structure","map-show-saildrone"];
+  // Distinguish report URL values from UI-only choices: the latter persist in
+  // the same schema-1 params record but must not trigger report navigation.
+  const urlParams = ["lat","lon","station","current_station","bin","wind_unit","distance_unit","wind_hours","map_center_lat","map_center_lon","map_zoom","map_layer","planning_start","planning_end","caution_ebb","caution_flood","max_ebb","max_flood","planning_buffer","current_distance_warning","current_days"];
+  const controlDefaults = {"swell_playback_speed":"1","swell_playback_step":"3","alertcalifornia_mode":"clustered"};
+  const controlIDs = {"map-swell-playback-speed":"swell_playback_speed","map-swell-playback-step":"swell_playback_step","map-alertcalifornia-mode":"alertcalifornia_mode"};
+  const controlOptions = {"swell_playback_speed":["0.5","1","2"],"swell_playback_step":["1","3","6"],"alertcalifornia_mode":["clustered","all"]};
+  const params = urlParams.concat(Object.keys(controlDefaults));
+  const overlays = ["map-show-marine-zone","map-show-smoke","map-show-fire-perimeters","map-show-fire-detections","map-show-air-temperature","map-show-clouds","map-show-radar","map-show-wind-barbs","map-show-inland-wind-barbs","map-show-pressure","map-show-swell","map-show-structure","map-show-saildrone","map-show-alertcalifornia","show-tide-range-overlay"];
   const onPublicHost = location.protocol === "https:" && location.hostname === "weather.themauris.org";
   const pageURL = location.pathname + location.search;
   const fragment = new URLSearchParams(location.hash.substring(1));
@@ -92,13 +98,19 @@
   function requireSignIn(){if(onPublicHost && !signInDialog.open)signInDialog.showModal();}
   function clearSignIn(){if(signInDialog.open)signInDialog.close();}
   window.addEventListener("sailing-session-invalid",function(){signedIn=false;bearer="";clearSession(handoffKey);SuiteBannerStatus.setText("Browser-only mode");status("Session expired or revoked — Sign in again");requireSignIn();});
+  function urlParamsList() { return urlParams; }
   function settingsFromPage(fallback) {
     const source = new URL(location.href).searchParams;
     const urlParams = {};
     // Retain preferences not represented on this view (such as map controls).
     if (fallback && fallback.params) Object.assign(urlParams, fallback.params);
-    params.forEach(function (key) {
+    urlParamsList().forEach(function (key) {
       if (source.has(key)) urlParams[key] = source.get(key).slice(0,256);
+    });
+    Object.entries(controlIDs).forEach(function (entry) {
+      const element = document.getElementById(entry[0]);
+      if (element && controlOptions[entry[1]].includes(element.value))
+        urlParams[entry[1]] = element.value;
     });
     const mapOverlays = Object.assign({}, fallback ? fallback.overlays : {});
     overlays.forEach(function (id) {
@@ -134,7 +146,14 @@
   function canonicalState(data) {
     if (!data) return null;
     const state = JSON.parse(JSON.stringify(data));
-    overlays.forEach(function (id) { state.overlays[id] = !!state.overlays[id]; });
+    overlays.forEach(function (id) {
+      state.overlays[id] = id === "show-tide-range-overlay"
+        ? state.overlays[id] !== false : !!state.overlays[id];
+    });
+    Object.keys(controlDefaults).forEach(function (key) {
+      const value = state.params[key];
+      if (!value || value === controlDefaults[key]) delete state.params[key];
+    });
     Object.keys(state.marineCategories).forEach(function (cat) {
       state.marineCategories[cat] = !!state.marineCategories[cat];
     });
@@ -189,7 +208,7 @@
     const before = new URL(previous,location.origin).searchParams;
     const after = new URL(location.href).searchParams;
     const changed = {};
-    params.forEach(function (key) {
+    urlParams.forEach(function (key) {
       // A different view may omit parameters as part of normal navigation.
       // Only treat an omitted parameter as intentional on the same path.
       if (after.has(key) && before.get(key) !== after.get(key)) changed[key] = after.get(key).slice(0,256);
@@ -223,14 +242,51 @@
       });
     } finally { applying = false; }
   }
+  // Restore UI-only selections through their existing controller listeners.
+  // No preference staging occurs during restoration because applying is true.
+  function restoreControlPreferences(data,chartOnly) {
+    if (!valid(data)) return;
+    applying = true;
+    try {
+      if (!chartOnly) Object.entries(controlIDs).forEach(function (entry) {
+        const element = document.getElementById(entry[0]);
+        if (!element) return;
+        const value = controlOptions[entry[1]].includes(data.params[entry[1]])
+          ? data.params[entry[1]] : controlDefaults[entry[1]];
+        if (element.value !== value) {
+          element.value = value;
+          element.dispatchEvent(new Event("change",{bubbles:true}));
+        }
+      });
+      // This checkbox sits inside the chart subtree, which is replaced by
+      // the chart's in-place AJAX refresh. Reapply after every replacement.
+      const tide = document.getElementById("show-tide-range-overlay");
+      if (tide) {
+        const enabled = data.overlays["show-tide-range-overlay"] !== false;
+        if (tide.checked !== enabled) {
+          tide.checked = enabled;
+          tide.dispatchEvent(new Event("change",{bubbles:true}));
+        }
+      }
+    } finally { applying = false; }
+  }
+  document.addEventListener("sailing-current-chart-updated",function(){
+    const key = signedIn ? draftKey : guestDraftKey;
+    const draft = getJSON(key,false);
+    const own = draft && valid(draft.data) &&
+      (signedIn ? draft.user === user : draft.user === (guestIdentity || "local"));
+    restoreControlPreferences(own ? draft.data : savedSnapshot,true);
+  });
   async function applySettings(data, identity) {
     if (!valid(data)) return;
     const previous = new URL(location.href);
     const next = new URL(location.href);
-    params.forEach(function (key) { next.searchParams.delete(key); });
-    Object.entries(data.params).forEach(function (pair) { next.searchParams.set(pair[0],pair[1]); });
+    urlParams.forEach(function (key) { next.searchParams.delete(key); });
+    Object.entries(data.params).forEach(function (pair) {
+      if (urlParams.includes(pair[0])) next.searchParams.set(pair[0],pair[1]);
+    });
     if (next.pathname + next.search !== previous.pathname + previous.search) {
-      const changed = params.filter(function(key) {
+      const changed = urlParams.filter(function(key) {
         return previous.searchParams.get(key) !== next.searchParams.get(key);
       });
       if (changed.every(function(key) { return key === "wind_unit" || key === "distance_unit"; }) &&
@@ -252,6 +308,7 @@
       }
     }
     restoreMap(data);
+    restoreControlPreferences(data,false);
     document.documentElement.classList.remove("sailing-units-pending");
   }
   function keepNavigation(identity) {
@@ -507,6 +564,7 @@
     if (!target) return;
     const preference = target.id === "wind-unit-select" || target.id === "distance-unit-select" ||
       target.id === "wind-reading-hours" || target.id === "current-days-picker" ||
+      Object.prototype.hasOwnProperty.call(controlIDs,target.id) ||
       target.matches("input[name='map-type']") ||
       target.matches(".map-marine-place-toggle") || overlays.includes(target.id);
     if (!preference) return;
@@ -527,6 +585,12 @@
     if (target.id === "wind-unit-select") next.params.wind_unit = target.value === "mph" ? "mph" : "kts";
     if (target.id === "distance-unit-select") next.params.distance_unit = target.value === "mi" ? "mi" : "nmi";
     if (target.id === "wind-reading-hours") next.params.wind_hours = String(target.value);
+    if (Object.prototype.hasOwnProperty.call(controlIDs,target.id)) {
+      const key = controlIDs[target.id];
+      if (!controlOptions[key].includes(target.value)) return;
+      if (target.value === controlDefaults[key]) delete next.params[key];
+      else next.params[key] = target.value;
+    }
     if (target.id === "current-days-picker") {
       // The chart refreshes by fetch + history.pushState, without a full
       // navigation. Stage the range now, before its DOM subtree is replaced.
