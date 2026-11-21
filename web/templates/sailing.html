@@ -749,11 +749,9 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   var nauticalLayer = L.tileLayer("/api/charts/tiles/{z}/{x}/{y}.png", {
     minZoom: 9,
     maxZoom: 18,
-    // Production NOAA native imagery is capped at z16. Explicit loopback
-    // fixture inspection can request native mock PNGs through z18.
-    maxNativeZoom: ((window.location.hostname === "localhost" ||
-      window.location.hostname === "127.0.0.1") &&
-      new URL(window.location.href).searchParams.get("nautical_mock_test") === "1") ? 18 : 16,
+    // Both NOAA and mock datasets use native z9..16. Leaflet overzooms
+    // stored z16 PNGs at display zooms 17 and 18.
+    maxNativeZoom: 16,
     attribution: "NOAA Office of Coast Survey"
   });
 
