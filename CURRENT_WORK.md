@@ -16,6 +16,8 @@
 
 **NEXT — state-delta capture (Build v432):** Owner reported v431 still left Save enabled. A new regression with legacy `mapType:""` reproduced false dirty state. Canonical comparison now treats the legacy empty type as Street (unless an explicit URL layer says otherwise), and the actual capture event modifies one field in the pending/saved state rather than rebuilding it from all current DOM/URL values. Expanded CI-only tests include unrelated map-center URL state, checked/unchecked overlays and marine categories, personal/Guest, and reversals. No schema, account, NOAA, listener, tunnel, local data or deployment changes. Exact-head CI and Safari verification pending.
 
+**NEXT — tidal-current Range (Build v433):** Owner Safari screenshot showed changing the Tidal Current chart's Range did not enable Save. Source confirmed `current-days-picker` refreshes the chart through fetch/`history.pushState()`, while account preference capture omitted this control. Its change now stages `params.current_days` (3/7 days, removing the default 1 day); canonical equality also recognizes legacy explicit 1-day defaults. Executable personal/Guest tests verify dirty detection, updates, reversals and no automatic writes. No saved user records, schema, NOAA, listener, tunnel or local Mac files touched; exact-head CI and owner Safari acceptance pending.
+
 ---
 
 ## Historical UI and NOAA work (previous CURRENT_WORK snapshot)

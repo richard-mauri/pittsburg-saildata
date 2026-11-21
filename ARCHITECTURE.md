@@ -111,3 +111,7 @@ The account preference `change` handler runs in the capture phase, before the ex
 ### Incremental state changes (Build v432)
 
 The captured preference event now starts from the tab's pending settings or `savedSnapshot`, and modifies **only** the changed control: map type and its URL layer pair, wind/distance/history units, one overlay checkbox or one marine-place category. `settingsFromPage()` is reserved for initial state creation; it is not used to reconstruct every event from incidental map viewport URL parameters and controls. Canonical comparison also resolves an older `mapType:""` to Street unless its stored `map_layer` explicitly names Nautical, Satellite or Hybrid. Regression covers a stale URL containing a separate map-center field and legacy empty map type. No change to the persisted schema or explicit-save authorization boundaries.
+
+### Tidal-current range and explicit Save (Build v433)
+
+The `#current-days-picker` control changes `current_days` through an in-place fetch and `history.pushState()`, not an account-client full-page navigation. Its capturing `change` event now stages exactly that property before the chart is replaced. Choices 3 and 7 are stored as strings; returning to the default 1 day removes the optional property. Canonical equality also treats legacy `current_days:"1"` as absent. The account/Guest persistence remains explicit-button-only, and the chart loader still owns its own fetch and URL update.

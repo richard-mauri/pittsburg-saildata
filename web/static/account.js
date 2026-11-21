@@ -144,6 +144,7 @@
       state.mapType = ["nautical","satellite","hybrid"].includes(state.params.map_layer)
         ? state.params.map_layer : "map";
     }
+    if (state.params.current_days === "1") delete state.params.current_days;
     // A radio selection is authoritative; the map controller updates the URL
     // after our capturing change listener runs.
     if (state.mapType === "map") delete state.params.map_layer;
@@ -505,7 +506,8 @@
     const target = event.target;
     if (!target) return;
     const preference = target.id === "wind-unit-select" || target.id === "distance-unit-select" ||
-      target.id === "wind-reading-hours" || target.matches("input[name='map-type']") ||
+      target.id === "wind-reading-hours" || target.id === "current-days-picker" ||
+      target.matches("input[name='map-type']") ||
       target.matches(".map-marine-place-toggle") || overlays.includes(target.id);
     if (!preference) return;
     const pending = signedIn ? getJSON(draftKey,false) : getJSON(guestDraftKey,false);
@@ -525,6 +527,12 @@
     if (target.id === "wind-unit-select") next.params.wind_unit = target.value === "mph" ? "mph" : "kts";
     if (target.id === "distance-unit-select") next.params.distance_unit = target.value === "mi" ? "mi" : "nmi";
     if (target.id === "wind-reading-hours") next.params.wind_hours = String(target.value);
+    if (target.id === "current-days-picker") {
+      // The chart refreshes by fetch + history.pushState, without a full
+      // navigation. Stage the range now, before its DOM subtree is replaced.
+      if (target.value === "3" || target.value === "7") next.params.current_days = target.value;
+      else delete next.params.current_days;
+    }
     if (overlays.includes(target.id)) next.overlays[target.id] = !!target.checked;
     if (target.matches(".map-marine-place-toggle")) {
       const cat = target.getAttribute("data-marine-category");

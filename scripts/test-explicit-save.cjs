@@ -220,6 +220,27 @@ async function run(){
   category.checked=false;
   ui.ctx.document.changeHandler({target:category});
   assert.equal(ui.ctx.dirty,false,'marine category reversal must clear dirty');
+  // The tidal-current Range select performs an AJAX chart refresh rather
+  // than full-page navigation. Its change must be staged before that refresh.
+  const range={id:'current-days-picker',value:'3',matches(){return false}};
+  ui.ctx.document.changeHandler({target:range});
+  assert.equal(ui.ctx.dirty,true,'1 day -> 3 days must enable Save');
+  assert.equal(ui.saveButton.disabled,false,'tidal current Range enables Save');
+  range.value='7';
+  ui.ctx.document.changeHandler({target:range});
+  assert.equal(ui.ctx.getJSON(guestMode?ui.ctx.guestDraftKey:ui.ctx.draftKey,false).data.params.current_days,'7');
+  range.value='1';
+  ui.ctx.document.changeHandler({target:range});
+  assert.equal(ui.ctx.dirty,false,'returning to default 1 day clears dirty');
+  assert.equal(ui.saveButton.disabled,true,'restored tidal range disables Save');
+  assert.equal(ui.requests.length,0,'tidal range changes cannot auto-save');
+  ui.ctx.savedSnapshot.params.current_days='3';
+  range.value='7';
+  ui.ctx.document.changeHandler({target:range});
+  assert.equal(ui.ctx.dirty,true,'saved 3 days -> 7 days must enable Save');
+  range.value='3';
+  ui.ctx.document.changeHandler({target:range});
+  assert.equal(ui.ctx.dirty,false,'restoring saved 3-day range clears dirty');
  }
  }
  console.log('SailingGo explicit Save/Discard: personal, Guest, net-zero edits, 409, failure and unload checks passed.');

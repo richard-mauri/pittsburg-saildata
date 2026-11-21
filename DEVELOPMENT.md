@@ -67,3 +67,7 @@ Repeat Street → Nautical → Street with an older saved account/Guest record t
 ### Incremental preference-state acceptance (Build v432)
 
 Repeat the above while the map URL contains viewport parameters such as `map_center_lat`, and with a saved preference record whose `mapType` was empty (legacy default). A Map Type radio event must only change map type/layer in its staged state; switching back to Street must clear Save/Discard. Change and reverse one marine-place category as well. Verify a genuinely changed map center, selected location or station still persists through the existing URL navigation flow; the new event handler must not drop independently staged navigation edits. Safari remains authoritative for UI behavior.
+
+### Tidal-current Range Save regression (Build v433)
+
+On Conditions Now, use the Tidal Current **Range** selector to switch from a saved 1-day range to 3 days: Save and Discard must enable even though the chart refreshes without page navigation. Switch to 7 days; the pending value must become 7, without any Homepage PUT. Return to 1 day; both buttons must disable. Repeat for a verified Guest and personal user, and verify that explicitly saving a 3-day range survives a reload. Confirm that the chart, dates and existing AJAX refresh behavior remain correct; CI-only tests cannot validate Safari rendering.
