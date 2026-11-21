@@ -39,7 +39,7 @@ func TestSailingSuiteGateFailClosed(t *testing.T){
   if auth!=""{req.Header.Set("Authorization",auth)}
   rec:=httptest.NewRecorder()
   handler.ServeHTTP(rec,req)
-  if rec.Code!=want{t.Errorf("%q %q: got %d want %d",path,auth!="" ,rec.Code,want)}
+  if rec.Code!=want{t.Errorf("%q authorized=%t: got %d want %d",path,auth!="",rec.Code,want)}
   if (path=="/api"||strings.HasPrefix(path,"/api/"))&&rec.Header().Get("Cache-Control")!="no-store"{
    t.Errorf("protected API %s missing no-store",path)
   }
