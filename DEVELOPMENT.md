@@ -171,3 +171,17 @@ At z9–z14 near Pittsburg and Delta, select Nautical: one existing panel must d
 ### Latest Safari regression acceptance — never force Street on missing chart tiles
 
 In owner-authorized isolated Safari testing at z9–z14, deliberately pan or zoom into a place with missing mock tiles. When the chart request fails or times out, verify **the Nautical radio remains selected**, any available mock tile remains displayed, Street stays beneath missing cells, and the **same** progress status panel displays **“Nautical chart tiles are unavailable at this zoom. Try changing zoom levels or moving the map.”** with Close and automatic dismissal. No second popup, automatic Street radio change or account PUT is permitted. Zoom again; the prior error should clear and loading can succeed without manually reselecting Nautical. Explicit Cancel should still stage Street and respect Save/Discard. The user previously reported forced Street fallback when testing on the public Cloudflare site; owner must independently restore the normal public cache and must not use the public tunnel as a mock fixture server. Existing 45-tile directory is insufficient for z9–z14; generate a new bounded fixture directory using the prior documented generator command. This document does not authorize any process restart or tunnel change.
+
+### Full supported zoom mock evaluation (z9–z18) — revised handoff
+
+The current generator creates **954 test tiles** over all ten displayed Nautical zooms 9–18, rather than only z9–z14. Generate to a **fresh**, separate directory (it refuses an existing destination):
+
+```sh
+cd ~/projects/sailing-go
+MOCK_DIR="$HOME/Downloads/sailing-nautical-mock-$(date +%Y%m%d-%H%M%S)"
+go run ./cmd/mocknauticaltiles -dir "$MOCK_DIR"
+```
+
+Never replace/merge the prior 45-tile output directory or use `s`/Cloudflare to publish these artificial images. Use an **owner-authorized separate localhost test server** with `SAILING_NAUTICAL_TILE_DIR` set specifically for that process and Safari `?nautical_mock_test=1`. That URL enables native mock images at 17–18 while normal NOAA production continues native up to 16. No process restart or test-listener launch has been authorized by this code commit.
+
+At zooms 9–18, check a Pittsburg/Delta position supported by the bounded fixture patches. Zoom repeatedly. The same status panel may indicate loading, but **existing image tiles must not disappear** because of progress. After peripheral or partially missing tile requests, valid imagery remains visible and the popup must **not falsely claim no tiles are available** for that zoom. On a genuinely empty zoom, a single error with Close suggests another zoom and keeps Nautical selected; Street remains underneath gaps. Check the owner-selected position (38.040,-121.887) at zooms 15–18. Outside tiny high-zoom patches, missing tiles are expected. Normal public site must use real chart cache and not mock fixtures. CI does not substitute for Mac/Safari visualization, which remains unverified.
