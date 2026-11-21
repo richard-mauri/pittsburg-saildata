@@ -1,18 +1,18 @@
 # Current work — SailingGo
 
-**Active:** [Issue #37](https://github.com/richard-mauri/pittsburg-saildata/issues/37), draft [PR #38](https://github.com/richard-mauri/pittsburg-saildata/pull/38) on `charts/37-ncds-mbtiles-evaluation` targeting merged `main` `01b5fab6c3e2d8c67dbd07bd9419ab5c14c99c47`. Continue this PR; not merged/released/deployed.
+**Active verified baseline:** [Issue #37](https://github.com/richard-mauri/pittsburg-saildata/issues/37), draft [PR #38](https://github.com/richard-mauri/pittsburg-saildata/pull/38), branch `charts/37-ncds-mbtiles-evaluation` against merged `main` `01b5fab6c3e2d8c67dbd07bd9419ab5c14c99c47`. Latest head and CI are to be checked after this documentation commit. PR stays draft.
 
-**New scoped phase — Go-owned nautical tile framework:** Safari now requests `/api/charts/tiles/{z}/{x}/{y}.png` on the SailingGo origin rather than NOAA WMS. New `nautical_tiles.go` registers a handler on the existing Go mux with the existing auth gate. No NOAA upstream request occurs. Without `SAILING_NAUTICAL_TILE_DIR` configured, valid tile requests return HTTP 503; existing browser progress/failure UI should return to Street. With a configured **pre-extracted XYZ PNG directory**, the Go handler validates z/x/y and serves tiles at `z/x/y.png`; 404 for missing tiles, 503 for bad/unreadable data, 400 invalid path, GET/HEAD only, and no-store errors. Existing Street underlay, loading/Cancel/failure Close, 12-second timeout, eight-second auto-dismiss and pending map preference Save/Discard remain in place. `nautical_tiles_test.go` covers offline handler behavior; browser Node test asserts local endpoint and no NOAA chart WMS URL.
+**Owner NEXT phase — implement Go NOAA fallback and self-populating cache:** Nautical browser layer always calls SailingGo's `/api/charts/tiles/{z}/{x}/{y}.png`, never NOAA directly. `nautical_tiles.go` now serves validated 256×256 PNGs from operator-provided `SAILING_NAUTICAL_TILE_DIR` or default `os.UserCacheDir()/sailing-go/nautical-tiles`. On cache miss, Go translates the XYZ tile into an EPSG:3857 WMS 1.3.0 GetMap request using the pre-existing NOAA NCDS MaritimeChartService endpoint, with a five-second timeout, maximum four concurrent upstream calls, deduplicated same-tile misses, and 30-second cooldown after failure. On valid NOAA response, the tile is atomically saved as `z/x/y.png`; later requests hit disk without NOAA. Invalid/upstream errors yield HTTP 503 and trigger the browser's existing Street fallback / Loading+Cancel / Failure+Close panel, including 12-second timeout and eight-second auto-dismiss. No automatic browser retries or direct NOAA WMS browser traffic.
 
-**Limitations and pending work:** No NOAA download, NOAA proxy/cache, automatic retries, local chart provisioning, direct NCDS MBTiles SQLite read or MBTiles TMS-row conversion yet; `ncds_19c.mbtiles` is not a ready-to-serve XYZ directory. Owner's existing 241,352,704-byte `ncds_19c.mbtiles` is outside Git; SHA-256 `6f887b5df127d142f6f6826f8968f41977e89417e2205fccd0cc7524fa26f096` and May 28, 2024 file timestamp. Dataset currency, relevant Pittsburg/Delta tile coverage, neighboring region packages and official rights/attribution remain unresolved. No fallback to old charts silently. NOAA availability-watch automation is separate and does not update code or the owner's Mac.
+**Testing:** Existing Go handler tests updated for true PNG fixtures. New offline httptest WMS tests validate web-mercator bbox orientation, PNG validation, disk persistence/offline hit, malformed upstream rejection and concurrent deduplication. Existing Node UI/prefs regression checks the same-origin endpoint. Exact-head GitHub Actions must pass; live NOAA, Safari, cache content/coverage and owner Mac are not verified. Standalone audit tooling unchanged.
 
-**Preservation:** Existing accounts, private tokens/settings, auth, Guest/personal explicit Save/Discard, weather/current APIs, chart popup behavior, radar, markers, overlays, cloudflared, binary build/version counters, releases and deployment untouched. Owner-local dirty/unpushed changes remain inaccessible. Root Go app and Node CI tests required; no Python; standalone Go auditor and GitHub CI unchanged. Current Homepage main suite policy v1.1.0 and SailingGo AGENTS, README, ARCHITECTURE, DEVELOPMENT, CURRENT_WORK reviewed. README, ARCHITECTURE, DEVELOPMENT, CURRENT_WORK updated for new endpoint; AGENTS unchanged.
+**Data/operations:** No NOAA bulk download, chart refresh/eviction, MBTiles SQLite reading, source update checker, automatic chart freshness determination or reliable offline corridor coverage yet. Owner's old `ncds_19c.mbtiles` remains outside Git and is not automatically served. Caching only begins on a successful real NOAA tile response after running the new binary; cached images may become stale and are not certified navigation data. NOAA watcher is a separate automation. No personal/Guest settings writes, account changes, credentials, subscription data, tunnel/listener/launcher changes, version/build-counter bump, merge or deployment. Owner-local dirty/unpushed source cannot be inspected by the GitHub connector.
 
-**Verification:** Latest CI head/results must be verified. Owner Mac/Safari/live test unverified. No local production restart or tunnel change authorized.
+**Policy/docs:** Homepage merged-main suite policy v1.1.0 and all five SailingGo documents read. README, ARCHITECTURE, DEVELOPMENT, CURRENT_WORK updated to describe this phase; AGENTS unchanged.
 
-**Approval boundary:** PR remains draft; no FINISH, merge, issue closure, remote deletion, config change, deployment, tag, semantic version or release authorized.
+**Approval:** No FINISH, merge, issue closure, remote branch deletion, launch/restart, deployment, tag, semantic version or release. Owner must accept Safari and NOAA results.
 
-**Owner commands after exact-head CI:**
+**Mac commands, stop if tree dirty:**
 ```sh
 cd ~/projects/sailing-go
 git status --short --branch
@@ -24,4 +24,4 @@ git status --short --branch
 ./devbuild.sh
 ./sailing-go -version
 ```
-Owner chooses service launch separately; no runner process or Terminal will be stopped.
+Owner separately chooses whether/when to launch or restart the service; running processes and Terminal were not touched.
