@@ -818,6 +818,9 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   var nauticalStatusMessage = "";
   var nauticalAdvisory = false;
   var nauticalCheckTimer = null;
+  var nauticalProgressTimer = null;
+  var nauticalLoadGeneration = 0;
+  var nauticalRequestZoom = null;
   var nauticalLoading = false;
   var nauticalFailureNotice = false;
   var nauticalAutomaticFallback = false;
@@ -854,8 +857,14 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 
 
   function stopNauticalWaiting() {
+    // Invalidate callbacks from the previous zoom, even if a timer has
+    // already fired or was queued before clearTimeout.
+    nauticalLoadGeneration++;
     if (nauticalCheckTimer !== null) clearTimeout(nauticalCheckTimer);
+    if (nauticalProgressTimer !== null) clearTimeout(nauticalProgressTimer);
     nauticalCheckTimer = null;
+    nauticalProgressTimer = null;
+    nauticalRequestZoom = null;
     nauticalLoading = false;
   }
 
@@ -895,7 +904,12 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   // access, so show a conditional advisory instead of asserting an outage.
   function checkNauticalResponse() {
     nauticalCheckTimer = null;
-    if (preferredMapLayerName !== "nautical" || !map.hasLayer(nauticalLayer)) return;
+    if (preferredMapLayerName !== "nautical" || !map.hasLayer(nauticalLayer) ||
+        nauticalRequestZoom !== map.getZoom()) {
+      stopNauticalWaiting();
+      updateNauticalZoomUI();
+      return;
+    }
     if (nauticalMockInspection) {
       // Local fixture misses may still be pending upstream; expose whichever
       // mock tiles are ready, but never switch the user's map selection.
@@ -913,12 +927,27 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     updateNauticalZoomUI();
   }
   function startNauticalResponseCheck() {
-    if (nauticalCheckTimer !== null) return;
-    nauticalLoading = true;
+    if (nauticalCheckTimer !== null) {
+      if (nauticalRequestZoom === map.getZoom()) return;
+      stopNauticalWaiting();
+    }
+    // A fast cached tile batch should complete before any progress UI is
+    // shown. The response timeout is ONLY a failure-safety bound.
+    nauticalLoading = false;
     nauticalAdvisory = false;
-    // Inspection mode is still a loading state, but it has a short bounded
-    // display window and NEVER triggers the production failure-to-Street path.
-    nauticalCheckTimer = setTimeout(checkNauticalResponse, nauticalMockInspection ? 2500 : 12000);
+    nauticalRequestZoom = map.getZoom();
+    var generation = ++nauticalLoadGeneration;
+    nauticalProgressTimer = setTimeout(function() {
+      if (generation !== nauticalLoadGeneration || nauticalCheckTimer === null ||
+          preferredMapLayerName !== "nautical" || !map.hasLayer(nauticalLayer) ||
+          nauticalRequestZoom !== map.getZoom()) return;
+      nauticalProgressTimer = null;
+      nauticalLoading = true;
+      updateNauticalZoomUI();
+    }, 200);
+    nauticalCheckTimer = setTimeout(function() {
+      if (generation === nauticalLoadGeneration) checkNauticalResponse();
+    }, nauticalMockInspection ? 2500 : 12000);
     updateNauticalZoomUI();
   }
   nauticalLayer.on("loading", function() {
@@ -929,7 +958,9 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     nauticalTileLoads = 0;
     nauticalTileErrors = 0;
     nauticalAdvisory = false;
-    if (nauticalCheckTimer === null) startNauticalResponseCheck();
+    if (nauticalCheckTimer === null || nauticalRequestZoom !== map.getZoom()) {
+      startNauticalResponseCheck();
+    }
     updateNauticalZoomUI();
   });
   nauticalLayer.on("tileload", function(event) {
@@ -939,7 +970,8 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   });
   nauticalLayer.on("tileerror", function() { nauticalTileErrors++; });
   nauticalLayer.on("load", function() {
-    if (preferredMapLayerName !== "nautical" || !map.hasLayer(nauticalLayer)) return;
+    if (preferredMapLayerName !== "nautical" || !map.hasLayer(nauticalLayer) ||
+        (nauticalRequestZoom !== null && nauticalRequestZoom !== map.getZoom())) return;
     if (nauticalTileLoads === 0 && nauticalTileErrors > 0 &&
         !nauticalSuccessfulZooms[map.getZoom()] && !nauticalMockInspection) {
       showNauticalFailureNotice("Nautical chart tiles are unavailable at this zoom. Try changing zoom levels or moving the map.");
@@ -1029,7 +1061,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     });
     // Start the ONE status panel synchronously, before adding chart tiles.
     // It must be visible before Leaflet can paint cached PNGs.
-    if (showNautical && nauticalCheckTimer === null && !nauticalLoading &&
+    if (showNautical && nauticalCheckTimer === null &&
         nauticalTileLoads === 0) startNauticalResponseCheck();
     // Order is significant: put the fallback in place before requesting NOAA.
     if (showNautical && !map.hasLayer(streetLayer)) streetLayer.addTo(map);
