@@ -152,7 +152,8 @@ function testMapTileFallback(){
  const context={
   map,streetLayer,nauticalLayer,satelliteLayer,hybridLayer,
   preferredMapLayerName:'nautical',activeMapLayerName:'map',
-  nauticalUnavailable:false,nauticalCheckTimer:null,nauticalAdvisory:false,nauticalTileLoads:0,minimumNauticalZoom:9,
+  nauticalUnavailable:false,nauticalCheckTimer:null,nauticalAdvisory:false,nauticalTileLoads:0,
+  nauticalAutomaticFallback:false,nauticalFailureNotice:false,nauticalStatusMessage:'',minimumNauticalZoom:9,
   mapState:{cloudOverlayVisible:false,radarOverlayVisible:false},
   cloudLayer:null,radarLayer:null,marineZoneHaloLayer:null,
   marineZoneLayer:null,smokeLayer:null,smokeOutlineLayer:null,
