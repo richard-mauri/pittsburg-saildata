@@ -126,3 +126,9 @@ git status --short --branch
 ./sailing-go -version
 ```
 Owner chooses service launch separately; no runner process or Terminal will be stopped.
+
+### Nautical chart cache — Go server fallback (Issue #37 draft)
+
+SailingGo's Nautical Chart layer **always** requests `/api/charts/tiles/{z}/{x}/{y}.png` from its own Go server. The Go server now checks a persistent disk cache first. If the tile is absent it makes a bounded WMS GetMap request to NOAA, validates the returned 256×256 PNG and atomically saves it to disk for future requests. Cache hits work even when NOAA is unreachable. There is no direct browser-to-NOAA chart traffic, separate tile-server process, separate offline installer, automatic bulk download, or MBTiles reader at this stage.
+
+The default chart cache directory is `<user cache directory>/sailing-go/nautical-tiles`, resolved by Go with `os.UserCacheDir()` (typically `~/Library/Caches/sailing-go/nautical-tiles` on macOS). The operator may override it with the `SAILING_NAUTICAL_TILE_DIR` environment variable; it must be a writable directory outside the GitHub working tree. Tiles are stored as `z/x/y.png`. A missing tile triggers one upstream NOAA request, limited to five seconds, with a maximum of four concurrent upstream requests; simultaneous same-tile requests are coalesced and failures suppress additional upstream requests temporarily. NOAA errors return HTTP 503 and activate the existing Street Map fallback and dismissible status panel. Disk read/write failures are reported, not hidden. **No charts are guaranteed to exist on first use:** NOAA must return valid chart imagery to populate this cache. Cache imagery is not automatically refreshed, and chart age/coverage is not yet validated. Do not use this display as a primary navigation source; users must verify chart updates independently. The separately downloaded `ncds_19c.mbtiles` SQLite package is not read by this handler and remains outside Git.
