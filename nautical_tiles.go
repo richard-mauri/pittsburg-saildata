@@ -9,6 +9,7 @@ import (
  "image/png"
  "io"
  "math"
+ "net"
  "net/http"
  "net/url"
  "os"
@@ -17,6 +18,8 @@ import (
  "strings"
  "sync"
  "time"
+
+ "pittsburg-saildata/internal/mockchart"
 )
 
 const nauticalTilePrefix = "/api/charts/tiles/"
@@ -67,6 +70,20 @@ func defaultNauticalCacheDir() string {
  return filepath.Join(base,"sailing-go","nautical-tiles")
 }
 
+// Local mock on-demand rendering must be explicitly enabled on a loopback
+// listener and backed by the exact test-only fixture marker. A public
+// Cloudflare hostname must NEVER generate fake chart tiles on demand.
+func nauticalMockLoopbackRequest(r *http.Request) bool {
+ if os.Getenv("SAILING_NAUTICAL_MOCK_ON_DEMAND")!="1" {return false}
+ host,_,err:=net.SplitHostPort(r.Host)
+ if err!=nil {host=r.Host}
+ if host!="localhost" && host!="127.0.0.1" && host!="::1" {return false}
+ remote,_,err:=net.SplitHostPort(r.RemoteAddr)
+ if err!=nil {return false}
+ ip:=net.ParseIP(remote)
+ return ip!=nil && ip.IsLoopback()
+}
+
 // nauticalTileHandler is the same-origin, disk-first chart gateway. Browser
 // code never calls NOAA. The NOAA endpoint is pinned in production.
 func nauticalTileHandler(directory string) http.Handler {
@@ -113,6 +130,24 @@ func nauticalTileHandlerWithUpstream(directory, upstream string, client *http.Cl
    http.Error(w,"nautical chart cache unreadable",http.StatusServiceUnavailable);return
   }
   if err==nil {nauticalTileDiagnostics(w,"cache","cache-hit");writeNauticalTile(w,r,data);return}
+
+  // Only explicit loopback mock testing may render new fictional tiles.
+  // Never modify the NOAA production cache or attempt a NOAA download for
+  // missing cells outside the test rectangle in this local mode.
+  if nauticalMockLoopbackRequest(r) && mockchart.HasMarker(root) {
+   if !mockchart.Covers(z,x,y) {
+    nauticalTileDiagnostics(w,"mock","outside-mock-region")
+    http.Error(w,"outside MOCK TEST DATA region",http.StatusNotFound);return
+   }
+   mock,renderErr:=mockchart.Render(z,x,y)
+   if renderErr!=nil {
+    nauticalTileDiagnostics(w,"unavailable","mock-render-error")
+    http.Error(w,"mock chart test render unavailable",http.StatusServiceUnavailable);return
+   }
+   nauticalTileDiagnostics(w,"mock","mock-generated")
+   writeNauticalTile(w,r,mock)
+   return
+  }
 
   // Deduplicate simultaneous cache misses for this same tile. Waiters never
   // launch an additional NOAA request and can abandon waiting on disconnect.
