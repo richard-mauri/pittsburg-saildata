@@ -199,8 +199,10 @@ function testMapTileFallback(){
   'a complete NOAA nautical tile failure must show a dismissible retry message');
  assert.ok(source.includes('nauticalStatusText.textContent = nauticalFailureNotice'),
   'the failure notice must be displayed through the existing nautical status UI');
- assert.ok(source.includes('transparent: true,\n      version: "1.3.0"'),
-  'NOAA WMS must be transparent outside chart coverage');
+ assert.ok(source.includes('L.tileLayer("/api/charts/tiles/{z}/{x}/{y}.png"'),
+  'NOAA tiles must always be fetched through the local SailingGo Go endpoint');
+ assert.ok(!source.includes('gis.charttools.noaa.gov'),
+  'browser must not call NOAA chart WMS directly');
  assert.ok(source.includes('ridge::USCOMP-N0Q-0/{z}/{x}/{y}.png'),
   'radar must use IEM cached NEXRAD transparency-preserving tiles');
  assert.ok(!source.includes('L.tileLayer.wms(\n    "https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q.cgi?'),
