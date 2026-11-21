@@ -58,6 +58,7 @@
   saveNote.id = "sailing-save-status";
   saveNote.setAttribute("role","status");
   saveNote.setAttribute("aria-live","polite");
+  saveNote.style.cssText = "font-size:.83rem;color:var(--muted);max-width:25rem";
   if (saveRow) saveRow.append(saveButton,saveNote);
   function updateSaveUI(message) {
     saveButton.disabled = saving || blocked || !dirty;
@@ -383,12 +384,13 @@
       // Preserve a pending draft across full-page navigation; only the
       // parameters actually changed by the user on the intervening route
       // are folded into it, never an automatic account save.
+      let navigated=false;
       if (!handedOff && !restoredNavigation && priorNavigation &&
           priorNavigation.user === user && priorNavigation.url !== pageURL) {
         const merged=mergeChangedNavigation(desired,priorNavigation);
-        if (!same(merged,desired)) desired=merged;
+        if (!same(merged,desired)) {desired=merged;navigated=true;}
       }
-      dirty = !!(held && held.user === user && held.revision === revision && valid(held.data));
+      dirty = navigated || !!(held && held.user === user && held.revision === revision && valid(held.data));
       if (!dirty && baseline && !same(desired,baseline)) dirty=true;
       if (dirty) putJSON(draftKey,{user:user,revision:revision,data:desired},false);
       initializing = false;
