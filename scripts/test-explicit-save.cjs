@@ -153,7 +153,7 @@ function testMapTileFallback(){
   map,streetLayer,nauticalLayer,satelliteLayer,hybridLayer,
   preferredMapLayerName:'nautical',activeMapLayerName:'map',
   nauticalUnavailable:false,nauticalCheckTimer:null,nauticalAdvisory:false,nauticalTileLoads:0,
-  nauticalLoading:false,setNauticalTileVisibility(){},
+  nauticalLoading:false,
   nauticalAutomaticFallback:false,nauticalFailureNotice:false,nauticalStatusMessage:'',minimumNauticalZoom:9,
   nauticalMockInspection:false,
   mapState:{cloudOverlayVisible:false,radarOverlayVisible:false},
@@ -274,7 +274,7 @@ function testNauticalResponseDiagnostics(){
  assert.ok(statusText.textContent.includes('Loading NOAA nautical chart'));
  assert.equal(cancelButton.hidden,false,'loading must offer Cancel');
  assert.equal(progress.hidden,false,'indeterminate progress bar appears while waiting');
- assert.equal(tileContainer.style.visibility,'hidden','chart pixels cannot precede the progress panel');
+ assert.equal(tileContainer.style.visibility,'','progress panel must NOT hide existing chart tiles');
  timer();
  assert.equal(context.nauticalFailureNotice,true,'stalled WMS must record visible warning');
  assert.equal(fallbackEvents,0,'timeout must never force a Street radio change');
@@ -284,7 +284,7 @@ function testNauticalResponseDiagnostics(){
  assert.equal(note.hidden,false,'the original progress panel must transition to a dismissible warning');
  assert.equal(cancelButton.hidden,true,'Cancel hidden after timeout');
  assert.equal(progress.hidden,true,'progress bar hidden after timeout');
- assert.equal(tileContainer.style.visibility,'','failed chart container is not kept permanently hidden');
+ assert.equal(tileContainer.style.visibility,'','failure must leave chart layer visible');
  assert.equal(closeButton.hidden,false,'same status panel offers Close after failure');
  assert.ok(statusText.textContent.includes('Try changing zoom levels'),
   'failure must suggest changing zoom levels instead of switching to Street');
@@ -322,9 +322,9 @@ function testNauticalResponseDiagnostics(){
  context.preferredMapLayerName='nautical';
  callbacks.loading();
  callbacks.tileload();
- assert.equal(tileContainer.style.visibility,'hidden','a cached image stays hidden until settled');
+ assert.equal(tileContainer.style.visibility,'','cached tiles must remain visible during progress');
  callbacks.load();
- assert.equal(tileContainer.style.visibility,'','tiles are revealed only when progress closes');
+ assert.equal(tileContainer.style.visibility,'','load completion must not toggle tile container visibility');
  assert.equal(context.nauticalFailureNotice,false,'successful image is not proof of outage');
  assert.equal(context.nauticalAdvisory,false,'successful tile must not leave an advisory');
  assert.equal(note.hidden,true,'a successful tile must clear the status panel');
@@ -339,11 +339,11 @@ function testNauticalResponseDiagnostics(){
  callbacks.loading();
  assert.equal(note.hidden,false,'mock mode uses the SAME progress panel');
  assert.equal(progress.hidden,false,'mock inspection shows progress before tiles');
- assert.equal(tileContainer.style.visibility,'hidden','mock tiles stay hidden until load settles');
+ assert.equal(tileContainer.style.visibility,'','mock images never disappear during zoom');
  assert.ok([...timers.values()].some(t=>t.ms===2500),'mock progress is bounded without NOAA fallback');
  callbacks.tileerror();
  callbacks.load();
- assert.equal(tileContainer.style.visibility,'','mock missing tiles reveal Street underlay after load');
+ assert.equal(tileContainer.style.visibility,'','mock missing tiles preserve the Street underlay and any loaded tiles');
  assert.equal(progress.hidden,true,'mock progress closes on settled tile errors');
  assert.equal(fallbackEvents,fallbackBeforeMock,'missing mock tile must not force Street');
  assert.equal(context.preferredMapLayerName,'nautical','mock inspection retains Nautical choice');
@@ -371,6 +371,29 @@ function testNauticalResponseDiagnostics(){
  callbacks.load();
  assert.equal(context.preferredMapLayerName,'nautical');
  assert.equal(note.hidden,true,'success after failed zoom clears the panel');
+ // An additional failed batch at the same zoom must NOT claim that all chart
+ // tiles are unavailable if some mock or NOAA tiles already succeeded there.
+ const zoomTen=10;
+ context.map.getZoom=()=>zoomTen;
+ const beforePartial=fallbackEvents;
+ callbacks.loading();
+ callbacks.tileerror();
+ callbacks.load();
+ assert.equal(context.nauticalFailureNotice,false,
+  'later peripheral tile failures are partial coverage, not total outage');
+ assert.equal(note.hidden,true,'partial coverage has no incorrect error popup');
+ assert.equal(context.preferredMapLayerName,'nautical');
+ assert.equal(fallbackEvents,beforePartial,'partial failure never selects Street');
+ // At a genuinely different zoom with no prior successful tiles, the
+ // existing single error panel should still suggest a zoom adjustment.
+ context.map.getZoom=()=>9;
+ callbacks.loading();
+ callbacks.tileerror();
+ callbacks.load();
+ assert.equal(context.nauticalFailureNotice,true,'missing z9 has its own error');
+ assert.ok(statusText.textContent.includes('Try changing zoom levels'));
+ context.map.getZoom=()=>10;
+ closeButton.click();
  assert.ok(source.includes('window.location.hostname === "localhost"') &&
   source.includes('window.location.hostname === "127.0.0.1"') &&
   source.includes('get("nautical_mock_test") === "1"'),
@@ -380,6 +403,10 @@ function testNauticalResponseDiagnostics(){
  assert.ok(source.indexOf('startNauticalResponseCheck();',source.indexOf('function applyPreferredBaseMap()')) <
   source.indexOf('streetLayer.addTo(map)',source.indexOf('function applyPreferredBaseMap()')),
   'progress must be initiated before Leaflet adds any chart tiles');
+ assert.ok(!source.includes('setNauticalTileVisibility'),
+  'chart status must never hide the entire Leaflet tile container');
+ assert.ok(source.includes('maxNativeZoom: ((window.location.hostname === "localhost"'),
+  'loopback fixture mode must render native z17 and z18 PNGs');
  assert.ok(source.includes('white-space:normal;max-width:min(520px'),
   'long notice must wrap rather than be clipped');
 }
