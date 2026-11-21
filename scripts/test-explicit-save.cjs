@@ -197,8 +197,9 @@ function testMapTileFallback(){
  assert.equal(timeoutStarts,2,'manual Nautical selection must arm timeout without loading event');
  assert.ok(map.hasLayer(nauticalLayer),'manual Nautical retry should attempt chart display');
  assert.equal(context.preferredMapLayerName,'nautical','retry retains Nautical preference');
- assert.ok(source.includes('showNauticalFailureNotice("Nautical chart tiles are unavailable at this zoom. Try changing zoom levels or moving the map.");'),
-  'a failed chart request must recommend changing zoom without forcing Street');
+ assert.ok(source.includes('No nautical chart tiles are available in this area at the current zoom.') &&
+  source.includes('showNauticalFailureNotice(nauticalNoCoverageMessage());'),
+  'a failed viewport must recommend panning or changing zoom without forcing Street');
  assert.ok(!source.includes('returnToStreetFromNautical();\n    // A final result'),
   'automatic chart failure must never call the Street transition');
  assert.ok(source.includes('nauticalStatusText.textContent = nauticalFailureNotice'),
