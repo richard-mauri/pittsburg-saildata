@@ -446,15 +446,28 @@ function testNauticalResponseDiagnostics(){
  viewX=220; viewY=410;
  assert.equal(context.nauticalViewportHasTiles(),false,
   'historical success elsewhere at the same zoom is not visible coverage');
- context.showNauticalFailureNotice(context.nauticalNoCoverageMessage());
- assert.equal(note.hidden,false,'uncovered pan shows one status notice');
+ context.checkNauticalViewportAfterMove();
+ assert.equal(note.hidden,false,'uncovered same-zoom pan shows one status notice');
  assert.ok(statusText.textContent.includes('this area at the current zoom'));
  assert.equal(context.preferredMapLayerName,'nautical');
  assert.equal(fallbackEvents,beforePartial);
  closeButton.click();
  viewX=165; viewY=394;
+ context.checkNauticalViewportAfterMove();
  assert.equal(context.nauticalViewportHasTiles(),true,
   'panning back into fixture coverage restores status');
+ assert.equal(note.hidden,true,'covered viewport has no popup');
+ // An all-failure tile batch in a NEW viewport must show the warning,
+ // even if the old viewport had successes at the same zoom.
+ viewX=220; viewY=410;
+ callbacks.loading();
+ failure();
+ callbacks.load();
+ assert.equal(context.nauticalFailureNotice,true,
+  'all missing tiles after same-zoom pan show a warning');
+ assert.equal(context.preferredMapLayerName,'nautical',
+  'missing chart viewport does not switch map type');
+ closeButton.click();
  assert.ok(source.includes('window.location.hostname === "localhost"') &&
   source.includes('window.location.hostname === "127.0.0.1"') &&
   source.includes('get("nautical_mock_test") === "1"'),
