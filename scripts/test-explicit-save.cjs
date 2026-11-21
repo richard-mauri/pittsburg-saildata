@@ -160,6 +160,7 @@ function testMapTileFallback(){
   updateNauticalZoomUI(){},updateSmokeLegendForBaseMap(){},
   startNauticalResponseCheck(){timeoutStarts++;context.nauticalCheckTimer=1;},
   stopNauticalWaiting(){context.nauticalCheckTimer=null;},
+  dismissNauticalFailureNotice(){context.nauticalFailureNotice=false;context.nauticalStatusMessage='';},
   clearTimeout(){context.nauticalCheckTimer=null;},
   persistPreferredMapLayer(){},
   document:{querySelectorAll(){return radio}},
