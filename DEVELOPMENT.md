@@ -131,3 +131,17 @@ The CI Go tests use an `httptest` NOAA server, including WMS XYZ bbox, image val
 ### Owner Safari NOAA tile diagnostics — Issue #37
 
 After an authorized launch of the updated binary, open Safari Web Inspector → Network, select Nautical at zoom 9+, and inspect an individual `/api/charts/tiles/{z}/{x}/{y}.png` response. The **Response Headers** should show `X-Sailing-Chart-Source: noaa` and `X-Sailing-Chart-Result: noaa-fetched` on a successful Go fetch, or `cache/cache-hit` when served from disk. An upstream failure may say `unavailable/noaa-timeout`, `unavailable/noaa-http-error` with `X-Sailing-Chart-Upstream-Status`, or `unavailable/cooldown`; cooldown means **Go did not call NOAA for that particular request**. In the owner Go server logs, a real attempt has `NAUTICAL tile=z/x/y upstream=noaa result=... status=... duration_ms=...`. No direct NOAA chart host should appear in Safari's requests. A plain HTTP 503 is not enough to tell which component failed, and no diagnostic header proves NOAA's real chart detail/coverage until the response image is visually checked. The existing loading/Close/Street fallback remains. Existing per-user settings, credentials and unrelated activity API 503s are separate and unchanged; owner Mac/Safari live test remains required.
+
+## Issue #37 Stage A — offline chart-cache positioning fixture
+
+For owner-controlled Safari testing, after the clean-tree checkout and ordinary `./devbuild.sh`, generate deliberately fake tiles into **one new directory outside Git and the real NOAA cache**. This command is a test fixture generator, **not** an installer or a downloader:
+
+```sh
+cd ~/projects/sailing-go
+MOCK_DIR="$HOME/Downloads/sailing-nautical-mock-$(date +%Y%m%d-%H%M%S)"
+go run ./cmd/mocknauticaltiles -dir "$MOCK_DIR"
+```
+
+The generator creates labeled **MOCK TEST DATA / NOT FOR NAVIGATION** PNGs at exact XYZ `z/x/y.png` coordinates around Pittsburg and the Delta (3×3 neighborhoods at zoom 10, 11, 12). It rejects existing destination directories. It does not touch NOAA, the service, authentication, account data, the default cache or any local browser settings. **Do not use `SAILING_NAUTICAL_TILE_DIR` in the production launcher to point at this directory.** A separate owner-authorized test instance using that variable is necessary for live Safari placement checks; do not start/restart a server or tunnel without explicit authorization. Fixture cache hits require no NOAA; missing fixture tiles may still trigger the existing bounded NOAA fallback, so use an isolated/mock upstream in automated tests. All tiles are fictional, never nautical chart evidence. Remove the directory manually when finished. Historical NCDS MBTiles evaluation is a separate Stage B.
+
+CI's root Go test invokes this same Go generator in a disposable directory and verifies real `/api/charts/tiles/z/x/y.png` GET/HEAD cache-hit behavior, 256×256 fully decoded opaque PNGs, response bytes, and zero calls to a local upstream sentinel. It tests API plumbing, **not** real Safari appearance, NOAA coverage or navigation quality.
