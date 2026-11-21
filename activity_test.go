@@ -119,7 +119,7 @@ func TestSailingVerifiedPresenceAndGuestSession(t *testing.T) {
  }
  // Private storage remains browser-local; removing a redundant label must
  // never change Guest persistence or accidentally enable Homepage PUTs.
- for _,part:=range []string{`getJSON(localKey,true)`,`saveLocal(data)`,`if (signedIn) stage(next);`,`else saveLocal(next);`,`if(info.role === "guest")`} {
+ for _,part:=range []string{`getJSON(localKey,true)`,`saveLocal(data)`,`if (signedIn) stage(next);`,`else stageGuest(next);`,`if(info.role === "guest")`} {
   if !strings.Contains(string(account),part) {t.Errorf("Guest local preference isolation changed: %q",part)}
  }
 
