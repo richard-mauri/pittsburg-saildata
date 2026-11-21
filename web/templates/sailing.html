@@ -8080,6 +8080,9 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
         if (oldEl && newEl) oldEl.replaceWith(newEl);
       });
       if (pushHistory) history.pushState({}, "", target.pathname + target.search);
+      // The chart subtree (including its tide-range checkbox) was replaced.
+      // Ask the preference owner to restore its last saved/pending UI state.
+      document.dispatchEvent(new Event("sailing-current-chart-updated"));
     } catch (err) {
       // Preserve the reliable server-rendered fallback if partial refresh fails.
       window.location.assign(target.pathname + target.search);

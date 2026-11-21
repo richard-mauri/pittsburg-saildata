@@ -70,7 +70,7 @@ func TestSailingReporterHomepageWireProtocol(t *testing.T){
 
 func TestSailingReporterDoesNotMutateWeatherContracts(t *testing.T){
  if appVersion!="1.16.0"{t.Fatal("semantic app version changed")}
- if buildVersion!="v427"{t.Fatal("expected next development build lineage")}
+ if buildVersion!="v436"{t.Fatal("expected next development build lineage")}
  if os.Getenv("SAILING_ACTIVITY_URL")=="" && sailingActivityConfigured(){t.Fatal("unexpected reporter configuration")}
 }
 
@@ -105,10 +105,22 @@ func TestSailingVerifiedPresenceAndGuestSession(t *testing.T) {
  }
  account,err:=sailingUIFiles.ReadFile("web/static/account.js")
  if err!=nil{t.Fatal(err)}
- for _,part:=range []string{"info.role === \"guest\"","Guest (browser-only preferences)","event.preventDefault()","Go to Homepage"} {
+ for _,part:=range []string{"info.role === \"guest\"","event.preventDefault()","Go to Homepage"} {
   if !strings.Contains(string(account),part){t.Errorf("missing guest/session UI contract %q",part)}
  }
- for _,part:=range []string{"guestIdentity = user","await browserOnly(user)","Local preference restoration", "signedInStatus(user,\"Guest (browser-only preferences)\")"} {
+ for _,part:=range []string{"guestIdentity = user","await browserOnly(user)","Local preference restoration", "signedInStatus(user,\"\")"} {
   if !strings.Contains(string(account),part){t.Errorf("verified guest must survive local preference failure: %q",part)}
  }
+ if strings.Contains(string(account),"Guest (browser-only preferences)") {
+  t.Fatal("verified Guest status must not repeat browser storage implementation details")
+ }
+ for _,part:=range []string{`if (localIdentity) signedInStatus(localIdentity,"");`,`signedInStatus(user,"");`,`status(/HTTP (401|403)|Invalid session/.test(String(err.message))`} {
+  if !strings.Contains(string(account),part) {t.Errorf("Guest status or authentication error contract missing %q",part)}
+ }
+ // Private storage remains browser-local; removing a redundant label must
+ // never change Guest persistence or accidentally enable Homepage PUTs.
+ for _,part:=range []string{`getJSON(localKey,true)`,`saveLocal(data)`,`if (signedIn) stage(next);`,`else stageGuest(next);`,`if(info.role === "guest")`} {
+  if !strings.Contains(string(account),part) {t.Errorf("Guest local preference isolation changed: %q",part)}
+ }
+
 }
