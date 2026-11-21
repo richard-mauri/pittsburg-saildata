@@ -144,7 +144,11 @@ func validNauticalPNG(data []byte) bool {
  if len(data)<8 || len(data)>nauticalMaxTileBytes ||
   !bytes.Equal(data[:8],[]byte{137,80,78,71,13,10,26,10}) {return false}
  config,err:=png.DecodeConfig(bytes.NewReader(data))
- return err==nil && config.Width==256 && config.Height==256
+ if err!=nil || config.Width!=256 || config.Height!=256 {return false}
+ // Decode the complete image, not just PNG header/IHDR: a broken or
+ // truncated 256x256 file must never be persisted as a successful chart.
+ _,err=png.Decode(bytes.NewReader(data))
+ return err==nil
 }
 
 func saveNauticalTile(filename string,data []byte) error {
