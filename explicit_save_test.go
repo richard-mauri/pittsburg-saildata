@@ -37,6 +37,14 @@ func TestSailingExplicitSaveReplacesAutosync(t *testing.T){
   `if (target.value === "map") delete next.params.map_layer`,
   `else next.params.map_layer = target.value`,
   `next.mapType = target.value`,
+  `"map-swell-playback-speed":"swell_playback_speed"`,
+  `"map-swell-playback-step":"swell_playback_step"`,
+  `"map-alertcalifornia-mode":"alertcalifornia_mode"`,
+  `"map-show-alertcalifornia"`,
+  `"show-tide-range-overlay"`,
+  `document.addEventListener("sailing-current-chart-updated"`,
+  `function restoreControlPreferences(data,chartOnly)`,
+  `if (Object.prototype.hasOwnProperty.call(controlIDs,target.id))`,
  }{
   if !strings.Contains(s,fragment){t.Errorf("explicit-save contract missing %q",fragment)}
  }
