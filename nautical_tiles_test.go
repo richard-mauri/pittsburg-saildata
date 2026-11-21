@@ -154,3 +154,88 @@ func TestNauticalParallelMissDeduplication(t *testing.T){
  for code:=range results {if code!=200 {t.Fatalf("concurrent tile error %d",code)}}
  if hits.Load()!=1 {t.Fatalf("same tile generated %d NOAA fetches",hits.Load())}
 }
+
+func TestNauticalUpstreamFailureCooldownAndCachedHit(t *testing.T){
+ root:=t.TempDir()
+ var hits atomic.Int32
+ svc:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
+  hits.Add(1)
+  time.Sleep(150*time.Millisecond)
+  w.WriteHeader(http.StatusBadGateway)
+ }))
+ defer svc.Close()
+ client:=&http.Client{Timeout:40*time.Millisecond}
+ h:=nauticalTileHandlerWithUpstream(root,svc.URL,client)
+ path:="/api/charts/tiles/10/123/456.png"
+ first:=httptest.NewRecorder()
+ h.ServeHTTP(first,httptest.NewRequest("GET",path,nil))
+ if first.Code!=503 {t.Fatalf("timeout should be unavailable: %d",first.Code)}
+ second:=httptest.NewRecorder()
+ h.ServeHTTP(second,httptest.NewRequest("GET",path,nil))
+ if second.Code!=503 || hits.Load()!=1 {t.Fatalf("circuit breaker did not suppress retried request: %d hits=%d",second.Code,hits.Load())}
+ // The upstream cooldown should not block already cached valid tiles.
+ pngData:=testNauticalPNG(t)
+ dir:=filepath.Join(root,"10","124")
+ if err:=os.MkdirAll(dir,0700);err!=nil{t.Fatal(err)}
+ if err:=os.WriteFile(filepath.Join(dir,"456.png"),pngData,0600);err!=nil{t.Fatal(err)}
+ w:=httptest.NewRecorder()
+ h.ServeHTTP(w,httptest.NewRequest("GET","/api/charts/tiles/10/124/456.png",nil))
+ if w.Code!=200 || hits.Load()!=1 {t.Fatal("cache must work during upstream outage")}
+}
+
+func TestNauticalUpstreamConcurrencyLimit(t *testing.T){
+ root:=t.TempDir()
+ pngData:=testNauticalPNG(t)
+ var active atomic.Int32
+ var highest atomic.Int32
+ var hits atomic.Int32
+ release:=make(chan struct{})
+ started:=make(chan struct{},4)
+ srv:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
+  hits.Add(1)
+  current:=active.Add(1)
+  defer active.Add(-1)
+  for {
+   top:=highest.Load()
+   if top>=current || highest.CompareAndSwap(top,current){break}
+  }
+  started<-struct{}{}
+  <-release
+  _,_=w.Write(pngData)
+ }))
+ defer srv.Close()
+ h:=nauticalTileHandlerWithUpstream(root,srv.URL,srv.Client())
+ const count=8
+ results:=make(chan int,count)
+ var wg sync.WaitGroup
+ for i:=0;i<count;i++{
+  wg.Add(1)
+  go func(i int){
+   defer wg.Done()
+   path:=fmt.Sprintf("/api/charts/tiles/11/%d/792.png",200+i)
+   w:=httptest.NewRecorder()
+   h.ServeHTTP(w,httptest.NewRequest("GET",path,nil))
+   results<-w.Code
+  }(i)
+ }
+ for i:=0;i<4;i++{
+  select{
+  case <-started:
+  case <-time.After(2*time.Second):
+   close(release)
+   t.Fatal("upstream did not reach four concurrent requests")
+  }
+ }
+ time.Sleep(50*time.Millisecond)
+ if got:=hits.Load();got>4 {
+  close(release)
+  t.Fatalf("unexpected %d concurrent upstream requests before release",got)
+ }
+ close(release)
+ wg.Wait()
+ close(results)
+ for code:=range results{
+  if code!=200 {t.Errorf("limited fetch resulted in %d",code)}
+ }
+ if highest.Load()>4 {t.Fatalf("more than four upstream calls concurrent: %d",highest.Load())}
+}
