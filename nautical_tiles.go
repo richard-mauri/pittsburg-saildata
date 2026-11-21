@@ -22,6 +22,16 @@ const nauticalWMSURL = "https://gis.charttools.noaa.gov/arcgis/rest/services/MCS
 
 const nauticalMaxTileBytes = 4 << 20
 
+// defaultNauticalCacheDir keeps downloaded tiles outside the git working tree.
+// If the user's cache directory is unavailable, the handler remains explicitly
+// unavailable rather than creating files in an unexpected location.
+func defaultNauticalCacheDir() string {
+ if custom:=strings.TrimSpace(os.Getenv("SAILING_NAUTICAL_TILE_DIR"));custom!="" {return custom}
+ base,err:=os.UserCacheDir()
+ if err!=nil {return ""}
+ return filepath.Join(base,"sailing-go","nautical-tiles")
+}
+
 // nauticalTileHandler is the same-origin, disk-first chart gateway. Browser
 // code never calls NOAA. The NOAA endpoint is pinned in production.
 func nauticalTileHandler(directory string) http.Handler {
