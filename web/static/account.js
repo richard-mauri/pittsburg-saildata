@@ -138,6 +138,12 @@
     Object.keys(state.marineCategories).forEach(function (cat) {
       state.marineCategories[cat] = !!state.marineCategories[cat];
     });
+    // Empty mapType in older account records means the default Street map,
+    // unless the record explicitly selected another layer through its URL.
+    if (!state.mapType) {
+      state.mapType = ["nautical","satellite","hybrid"].includes(state.params.map_layer)
+        ? state.params.map_layer : "map";
+    }
     // A radio selection is authoritative; the map controller updates the URL
     // after our capturing change listener runs.
     if (state.mapType === "map") delete state.params.map_layer;
@@ -503,14 +509,15 @@
       target.matches(".map-marine-place-toggle") || overlays.includes(target.id);
     if (!preference) return;
     const pending = signedIn ? getJSON(draftKey,false) : getJSON(guestDraftKey,false);
-    const fallback = pending && valid(pending.data) && 
+    const previous = pending && valid(pending.data) &&
       (signedIn ? pending.user===user : pending.user===(guestIdentity || "local"))
-      ? pending.data : signedIn ? baseline : getJSON(localKey,true);
-    const next = settingsFromPage(fallback);
+      ? pending.data : savedSnapshot;
+    if (!valid(previous)) return;
+    // Change a single field in the current preference state. Reading all
+    // controls and URL values on every event pulls in unrelated map defaults,
+    // and can make a reversible map-type change look permanently dirty.
+    const next = JSON.parse(JSON.stringify(previous));
     if (target.matches("input[name='map-type']")) {
-      // This capture listener executes before the map controller updates the
-      // URL via history.replaceState. Never compare the newly selected radio
-      // against the previous map_layer query parameter.
       if (target.value === "map") delete next.params.map_layer;
       else next.params.map_layer = target.value;
       next.mapType = target.value;
@@ -518,6 +525,12 @@
     if (target.id === "wind-unit-select") next.params.wind_unit = target.value === "mph" ? "mph" : "kts";
     if (target.id === "distance-unit-select") next.params.distance_unit = target.value === "mi" ? "mi" : "nmi";
     if (target.id === "wind-reading-hours") next.params.wind_hours = String(target.value);
+    if (overlays.includes(target.id)) next.overlays[target.id] = !!target.checked;
+    if (target.matches(".map-marine-place-toggle")) {
+      const cat = target.getAttribute("data-marine-category");
+      if (cat && /^[a-z_]+$/.test(cat) && cat.length <= 48)
+        next.marineCategories[cat] = !!target.checked;
+    }
     if (signedIn) stage(next);
     else stageGuest(next);
   },true);

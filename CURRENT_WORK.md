@@ -14,6 +14,8 @@
 
 **NEXT — canonical preference equality (Build v431):** Owner again reproduced Street → Nautical → Street leaving Save enabled after v430 and requested a comparable state object. The account client's `canonicalState()` now compares saved/current preferences with missing overlay and marine-category flags treated as `false`, and derives `map_layer` from map type. The existing real capture-listener regression now exercises populated controls and an overlay toggle/reversal for both personal and Guest sessions. Only `web/static/account.js`, its JS test, development build lineage and affected docs are changed. No Homepage PUT, schema migration, owner-local settings/data/tokens, NOAA, listener, tunnel or deployment touched. Node regression passed locally; exact-head CI and owner Safari acceptance remain pending.
 
+**NEXT — state-delta capture (Build v432):** Owner reported v431 still left Save enabled. A new regression with legacy `mapType:""` reproduced false dirty state. Canonical comparison now treats the legacy empty type as Street (unless an explicit URL layer says otherwise), and the actual capture event modifies one field in the pending/saved state rather than rebuilding it from all current DOM/URL values. Expanded CI-only tests include unrelated map-center URL state, checked/unchecked overlays and marine categories, personal/Guest, and reversals. No schema, account, NOAA, listener, tunnel, local data or deployment changes. Exact-head CI and Safari verification pending.
+
 ---
 
 ## Historical UI and NOAA work (previous CURRENT_WORK snapshot)

@@ -63,3 +63,7 @@ On the owner Mac with the current PR candidate, in Safari's Planning and Details
 ### Canonical saved-state regression (Build v431)
 
 Repeat Street → Nautical → Street with an older saved account/Guest record that has no keys for currently unchecked overlays or marine-place categories. Save and Discard must both disable after the reversal. Turn an overlay on and verify both activate; turn it off and verify both disable again. Test both report views and both account types. The CI-only real capture-handler fixture now includes these controls instead of an empty map, but Safari acceptance remains required.
+
+### Incremental preference-state acceptance (Build v432)
+
+Repeat the above while the map URL contains viewport parameters such as `map_center_lat`, and with a saved preference record whose `mapType` was empty (legacy default). A Map Type radio event must only change map type/layer in its staged state; switching back to Street must clear Save/Discard. Change and reverse one marine-place category as well. Verify a genuinely changed map center, selected location or station still persists through the existing URL navigation flow; the new event handler must not drop independently staged navigation edits. Safari remains authoritative for UI behavior.

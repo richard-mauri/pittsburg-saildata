@@ -163,9 +163,14 @@ async function run(){
  // stage() payloads. The map controller writes the map_layer URL AFTER this
  // capture handler. On the return to Street the URL still says nautical.
  for(const guestMode of [false,true]){
+ for(const legacyMapType of ['map','']){
   const ui=makeFixture({guest:guestMode});
+  // Older records saved before a map control was visited may use an empty
+  // mapType, despite the displayed default radio being Street.
+  ui.ctx.savedSnapshot.mapType=legacyMapType;
+  ui.ctx.baseline.mapType=legacyMapType;
   let radio={value:'map',matches(selector){return selector==="input[name='map-type']";}};
-  ui.ctx.params=['wind_unit','map_layer'];
+  ui.ctx.params=['wind_unit','map_layer','map_center_lat'];
   ui.ctx.overlays=['map-show-radar','map-show-smoke'];
   // Saved records may predate an overlay/category and omit their false keys.
   // The real page still supplies those unchecked DOM controls on every edit.
@@ -177,7 +182,8 @@ async function run(){
    'map-show-smoke':{checked:false},
   };
   const category={checked:false,getAttribute(name){return name==='data-marine-category'?'harbors':null}};
-  ui.ctx.location={href:'https://weather.themauris.org/planning?wind_unit=kts'};
+  // Map viewport URL state is present but was not changed by the radio event.
+  ui.ctx.location={href:'https://weather.themauris.org/planning?wind_unit=kts&map_center_lat=38.01'};
   ui.ctx.URL=URL;
   ui.ctx.document={
    querySelector(selector){return selector==='input[name="map-type"]:checked'?radio:null},
@@ -191,7 +197,7 @@ async function run(){
   ui.ctx.document.changeHandler({target:radio});
   assert.equal(ui.ctx.dirty,true,'real DOM Street -> Nautical must be dirty');
   // Emulate the later map-controller history.replaceState.
-  ui.ctx.location.href='https://weather.themauris.org/planning?wind_unit=kts&map_layer=nautical';
+  ui.ctx.location.href='https://weather.themauris.org/planning?wind_unit=kts&map_center_lat=38.01&map_layer=nautical';
   radio.value='map';
   ui.ctx.document.changeHandler({target:radio});
   assert.equal(ui.ctx.dirty,false,'real DOM Nautical -> Street must clear dirty');
@@ -201,12 +207,20 @@ async function run(){
   assert.equal(ui.requests.length,0,'real map undo must not save');
   // An actual overlay edit must still be detected, then clear when undone.
   controls['map-show-smoke'].checked=true;
-  const smoke={id:'map-show-smoke',matches(){return false}};
+  const smoke={id:'map-show-smoke',get checked(){return controls['map-show-smoke'].checked},matches(){return false}};
   ui.ctx.document.changeHandler({target:smoke});
   assert.equal(ui.ctx.dirty,true,'enabling an overlay must remain a real change');
   controls['map-show-smoke'].checked=false;
   ui.ctx.document.changeHandler({target:smoke});
   assert.equal(ui.ctx.dirty,false,'overlay reversal must return to saved state');
+  category.checked=true;
+  category.matches=selector=>selector==='.map-marine-place-toggle';
+  ui.ctx.document.changeHandler({target:category});
+  assert.equal(ui.ctx.dirty,true,'marine category toggle must stage its own value');
+  category.checked=false;
+  ui.ctx.document.changeHandler({target:category});
+  assert.equal(ui.ctx.dirty,false,'marine category reversal must clear dirty');
+ }
  }
  console.log('SailingGo explicit Save/Discard: personal, Guest, net-zero edits, 409, failure and unload checks passed.');
 }
