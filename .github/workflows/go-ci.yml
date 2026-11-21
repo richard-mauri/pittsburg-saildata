@@ -29,8 +29,8 @@ jobs:
           gofmt -l main.go wind.go currents.go
       - name: Validate explicit Save Changes browser behavior (CI only)
         run: node scripts/test-explicit-save.cjs
-      - name: Validate NOAA MBTiles audit fixture (stdlib Python)
-        run: python3 -m unittest discover -s scripts -p 'test_noaa_mbtiles_audit.py' -v
+      - name: Test standalone NOAA Go auditor helpers
+        run: go test scripts/noaa_mbtiles_audit.go scripts/noaa_mbtiles_audit_test.go
       - name: Test root application package
         run: go test -count=1 .
       - name: Build root application
