@@ -16,7 +16,7 @@ import (
 )
 
 const MarkerName = ".sailing-mock-sfbay-monterey"
-const MarkerText = "SAILING_MOCK_TEST_ONLY_SF_BAY_MONTEREY_Z9_18\n"
+const MarkerText = "SAILING_MOCK_TEST_ONLY_SF_BAY_MONTEREY_Z9_16\n"
 const West, East = -123.0, -121.45
 const North, South = 38.45, 36.50
 
@@ -31,7 +31,7 @@ func xy(lon,lat float64,z int)(int,int){
 // Covers includes any XYZ tile intersecting the bounded Bay-to-Monterey
 // rectangle. Only z9..18 is approved for generated mock output.
 func Covers(z,x,y int)bool{
- if z<9||z>18||x<0||y<0||x>=1<<uint(z)||y>=1<<uint(z){return false}
+ if z<9||z>16||x<0||y<0||x>=1<<uint(z)||y>=1<<uint(z){return false}
  x0,y0:=xy(West,North,z)
  x1,y1:=xy(East,South,z)
  return x>=x0&&x<=x1&&y>=y0&&y<=y1
