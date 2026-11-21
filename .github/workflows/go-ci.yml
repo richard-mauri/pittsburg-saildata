@@ -27,6 +27,8 @@ jobs:
       - name: Report root Go formatting (non-blocking)
         run: |
           gofmt -l main.go wind.go currents.go
+      - name: Validate explicit Save Changes browser behavior (CI only)
+        run: node scripts/test-explicit-save.cjs
       - name: Test root application package
         run: go test -count=1 .
       - name: Build root application
