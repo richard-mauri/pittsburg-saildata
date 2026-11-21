@@ -98,13 +98,12 @@
   function requireSignIn(){if(onPublicHost && !signInDialog.open)signInDialog.showModal();}
   function clearSignIn(){if(signInDialog.open)signInDialog.close();}
   window.addEventListener("sailing-session-invalid",function(){signedIn=false;bearer="";clearSession(handoffKey);SuiteBannerStatus.setText("Browser-only mode");status("Session expired or revoked — Sign in again");requireSignIn();});
-  function urlParamsList() { return urlParams; }
   function settingsFromPage(fallback) {
     const source = new URL(location.href).searchParams;
     const urlParams = {};
     // Retain preferences not represented on this view (such as map controls).
     if (fallback && fallback.params) Object.assign(urlParams, fallback.params);
-    urlParamsList().forEach(function (key) {
+    urlParams.forEach(function (key) {
       if (source.has(key)) urlParams[key] = source.get(key).slice(0,256);
     });
     Object.entries(controlIDs).forEach(function (entry) {
