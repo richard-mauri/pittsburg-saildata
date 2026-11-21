@@ -127,13 +127,40 @@ func auditMBTiles(path string)(map[string]any,error){
  return result,nil
 }
 
-func main(){
- catalog:=flag.Bool("catalog",false,"query official NOAA regional polygons for four sites")
- audit:=flag.String("audit","","read-only audit of an existing local MBTiles file")
- flag.Parse()
- if *catalog==(*audit!=""){fmt.Fprintln(os.Stderr,"specify exactly one of -catalog or -audit /path/chart.mbtiles");os.Exit(2)}
- var out map[string]any;var err error
- if *catalog{out,err=queryCatalog()}else{out,err=auditMBTiles(*audit)}
- if err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)}
- enc:=json.NewEncoder(os.Stdout);enc.SetIndent("","  ");if err:=enc.Encode(out);err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)}
+// runCLI is intentionally interactive and diagnostic: network outages, missing files,
+// and invalid arguments are reported without returning a nonzero process exit code.
+// In an owner's shell configured with errexit, a failure must not close Terminal.
+func runCLI(args []string, fetchCatalog func() (map[string]any, error), auditFile func(string) (map[string]any, error), stdout, stderr io.Writer) {
+ flags := flag.NewFlagSet("noaa_mbtiles_audit", flag.ContinueOnError)
+ flags.SetOutput(stderr)
+ catalog := flags.Bool("catalog", false, "query official NOAA regional polygons for four sites")
+ audit := flags.String("audit", "", "read-only audit of an existing local MBTiles file")
+ if err := flags.Parse(args); err != nil {
+  fmt.Fprintf(stderr, "Invalid arguments: %v. No chart data changed.\\n", err)
+  return
+ }
+ if *catalog == (*audit != "") || flags.NArg() != 0 {
+  fmt.Fprintln(stderr, "Specify exactly one of -catalog or -audit /path/chart.mbtiles. No chart data changed.")
+  return
+ }
+ var result map[string]any
+ var err error
+ if *catalog {
+  result, err = fetchCatalog()
+ } else {
+  result, err = auditFile(*audit)
+ }
+ if err != nil {
+  fmt.Fprintf(stderr, "NOAA chart evaluation unavailable: %v\\nNo result verified; this diagnostic is non-fatal. Your terminal session should remain open.\\n", err)
+  return
+ }
+ encoder := json.NewEncoder(stdout)
+ encoder.SetIndent("", "  ")
+ if err := encoder.Encode(result); err != nil {
+  fmt.Fprintf(stderr, "Could not display audit result: %v\\n", err)
+ }
+}
+
+func main() {
+ runCLI(os.Args[1:], queryCatalog, auditMBTiles, os.Stdout, os.Stderr)
 }
