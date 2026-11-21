@@ -1,28 +1,31 @@
 # Current work — SailingGo
 
-**Active:** [Issue #37](https://github.com/richard-mauri/pittsburg-saildata/issues/37), [draft PR #38](https://github.com/richard-mauri/pittsburg-saildata/pull/38), branch `charts/37-ncds-mbtiles-evaluation` targeting `main`. Baseline is merged `main` `01b5fab6c3e2d8c67dbd07bd9419ab5c14c99c47` (PR #36). Only this PR is active for downloaded-chart evaluation.
+**Active:** [Issue #37](https://github.com/richard-mauri/pittsburg-saildata/issues/37), [draft PR #38](https://github.com/richard-mauri/pittsburg-saildata/pull/38), branch `charts/37-ncds-mbtiles-evaluation` targeting `main`. The verified merged `main` baseline is `01b5fab6c3e2d8c67dbd07bd9419ab5c14c99c47` (PR #36). All chart evaluation changes stay in PR #38.
 
-**NEXT 2026-11-21:** Identified NOAA's official NCDS ArcGIS regional polygon metadata service, exposing `name`, `date_creat`, `size` (MB), `baseline` and polygon extent. Actual results were blocked by external DNS/network access, so **region identity, current size, file timestamps, SQLite zooms, binary format, package coverage, visual parity and NCDS hosting terms remain unverified**. The existing [evaluation](docs/NOAA_MBTILES_EVALUATION.md) documents the source and blockers. Added `scripts/noaa_mbtiles_audit.py` standard-library Python read-only NOAA catalog / downloaded SQLite inspector, `scripts/test_noaa_mbtiles_audit.py` synthetic offline regression, and a GitHub CI step to run the fixture. No NOAA binary was downloaded; the server-hosted **Go tile endpoint is still a future prototype**, not implemented or validated in this NEXT.
+**Owner constraint:** **No Python allowed.** Deleted both previous Python auditor files; replaced their functionality with [scripts/noaa_mbtiles_audit.go](scripts/noaa_mbtiles_audit.go) plus [scripts/noaa_mbtiles_audit_test.go](scripts/noaa_mbtiles_audit_test.go), and changed CI to test Go instead. The Go audit uses the pre-existing system `sqlite3` CLI in **read-only** mode for MBTiles file inspection and makes HTTP catalog queries to NOAA using Go standard library. The Go utility is standalone and not imported by the SailingGo server.
 
-**Data safety:** No modifications to authentication, user/Guest Save Changes/Discard Changes, private preference records, embedded map/overlays, NOAA environmental routes, production listeners, tunnels, deployment, tags, versions or Git-private build counters. Owner Mac local checkout/state, tokens, browser history and persistent server storage could not be inspected and were not changed. `*.mbtiles` remains gitignored; audit is read-only.
+**Current evaluation:** NOAA NCDS polygon catalog exposes region ID, creation string, estimated MB size, baseline locator and extents. Actual regional responses remain blocked by NOAA network access. Exact California package IDs, true bytes, data timestamps, tile zooms, binary formats, coverage/seams, visual parity and NCDS-specific hosting terms remain **unverified**. Read [docs/NOAA_MBTILES_EVALUATION.md](docs/NOAA_MBTILES_EVALUATION.md). No NOAA chart database downloaded or served and no live Go HTTP XYZ tile prototype yet implemented.
 
-**Documentation / policy:** Full current Homepage merged-main SUITE_DEVELOPMENT_POLICY.md v1.1.0 and SailingGo AGENTS, README, ARCHITECTURE, DEVELOPMENT, CURRENT_WORK reviewed. Only evaluation and CURRENT_WORK were updated this iteration; README/ARCHITECTURE/DEVELOPMENT/AGENTS unchanged because runtime contracts are unchanged.
+**Safety:** No authentication changes, no preferences/account/Guest changes, no map or weather route modifications, no private data or server persistence changes, no production launcher, services, listeners, tunnels, restart, deployment, tag, release, or version/build-counter changes. Owner Mac uncommitted files, browser state and private configuration remain inaccessible/uninspected. `*.mbtiles` stays excluded by Git.
 
-**Verification:** Standalone inspector's equivalent fixture ran locally (three unit tests passed) against synthetic SQLite bytes; source committed to PR, and latest-head GitHub CI must be verified after push. Live NOAA, owner Mac/Safari, chart images, zoom/coverage, persistence and actual tile-serving remain **unverified**.
+**Docs / policy:** The complete Homepage merged-main policy v1.1.0 and SailingGo AGENTS, README, ARCHITECTURE, DEVELOPMENT and CURRENT_WORK reviewed; evaluation and CURRENT_WORK updated. No changed runtime contracts or source selector.
 
-**Approval boundary:** Follow-up dataset verification and isolated Go/SQLite prototype belong in Issue #37/PR #38 after `NEXT` and source access. No automatic integration, merge, Issue closure, branch cleanup, production restart/deploy, tag or release. `FINISH` alone authorizes accepted PR closeout.
+**Checks:** Isolated Go helper tests and exact-head CI must be verified. Live NOAA, downloaded binary, owner Mac/Safari, actual server tile endpoint, and deployment storage **unverified**.
 
-**Owner Mac inspection (without restarting or launching any service):**
+**Approval:** Existing draft PR only; further scope uses owner `NEXT`, closeout requires `FINISH`. No merge, Issue closure, remote branch deletion, deployment, tag or release authorized.
+
+**Mac review (do not restart anything):**
 ```sh
 cd ~/projects/sailing-go
 git status --short --branch
-# Stop if any uncommitted changes; never overwrite owner-local work.
+# STOP if uncommitted changes are shown; do not discard work.
 git fetch origin
 git checkout charts/37-ncds-mbtiles-evaluation
 git pull --ff-only origin charts/37-ncds-mbtiles-evaluation
 git status --short --branch
-python3 -m unittest discover -s scripts -p 'test_noaa_mbtiles_audit.py' -v
-python3 scripts/noaa_mbtiles_audit.py --catalog
-# Once a NOAA-selected file has been downloaded OUTSIDE the repository:
-# python3 scripts/noaa_mbtiles_audit.py --audit ~/Downloads/sailing-noaa-evaluation/candidate.mbtiles
+
+go test scripts/noaa_mbtiles_audit.go scripts/noaa_mbtiles_audit_test.go
+go run scripts/noaa_mbtiles_audit.go -catalog
+# After obtaining a verified NOAA MBTiles database OUTSIDE this repo:
+# go run scripts/noaa_mbtiles_audit.go -audit ~/Downloads/sailing-noaa-evaluation/candidate.mbtiles
 ```
