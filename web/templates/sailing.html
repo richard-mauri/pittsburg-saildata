@@ -789,6 +789,12 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   var nauticalTypeInput = document.getElementById("map-type-nautical");
   var nauticalTypeLabel = document.getElementById("map-type-nautical-label");
 
+  // Mock inspection is a browser-only diagnostic, never enabled on the public
+  // origin even when someone adds the query flag. It requires an isolated
+  // loopback test listener and explicit URL opt-in.
+  var nauticalMockInspection = (window.location.hostname === "localhost" ||
+    window.location.hostname === "127.0.0.1") &&
+    new URL(window.location.href).searchParams.get("nautical_mock_test") === "1";
   var mapLayerParam = new URL(window.location.href).searchParams.get("map_layer");
   var preferredMapLayerName = "map";
   if (mapLayerParam === "nautical") preferredMapLayerName = "nautical";
@@ -819,6 +825,13 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   }
 
   function showNauticalFailureNotice(message) {
+    if (nauticalMockInspection) {
+      stopNauticalWaiting();
+      nauticalFailureNotice = false;
+      nauticalStatusMessage = "";
+      updateNauticalZoomUI();
+      return;
+    }
     if (nauticalFailureTimer !== null) clearTimeout(nauticalFailureTimer);
     nauticalStatusMessage = message;
     nauticalFailureNotice = true;
@@ -871,6 +884,11 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   // access, so show a conditional advisory instead of asserting an outage.
   function checkNauticalResponse() {
     nauticalCheckTimer = null;
+    if (nauticalMockInspection) {
+      nauticalLoading = false;
+      updateNauticalZoomUI();
+      return;
+    }
     if (preferredMapLayerName !== "nautical" || !map.hasLayer(nauticalLayer)) return;
     nauticalLoading = false;
     if (nauticalTileLoads === 0) {
@@ -878,10 +896,15 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 
       return;
     }
-    nauticalAdvisory = true;
+    nauticalAdvisory = false;
     updateNauticalZoomUI();
   }
   function startNauticalResponseCheck() {
+    if (nauticalMockInspection) {
+      stopNauticalWaiting();
+      updateNauticalZoomUI();
+      return;
+    }
     if (nauticalCheckTimer !== null) clearTimeout(nauticalCheckTimer);
     nauticalLoading = true;
     nauticalCheckTimer = setTimeout(checkNauticalResponse, 12000);
@@ -889,6 +912,14 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   }
   nauticalLayer.on("loading", function() {
     if (preferredMapLayerName !== "nautical") return;
+    if (nauticalMockInspection) {
+      stopNauticalWaiting();
+      nauticalTileLoads = 0;
+      nauticalTileErrors = 0;
+      nauticalAdvisory = false;
+      updateNauticalZoomUI();
+      return;
+    }
     nauticalTileLoads = 0;
     nauticalTileErrors = 0;
     nauticalAdvisory = false;
@@ -899,13 +930,13 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   nauticalLayer.on("tileerror", function() { nauticalTileErrors++; });
   nauticalLayer.on("load", function() {
     if (preferredMapLayerName !== "nautical" || !map.hasLayer(nauticalLayer)) return;
-    if (nauticalTileLoads === 0 && nauticalTileErrors > 0) {
+    if (nauticalTileLoads === 0 && nauticalTileErrors > 0 && !nauticalMockInspection) {
       showNauticalFailureNotice("NOAA nautical charts are temporarily unavailable. Showing Street Map instead; please try again later.");
     } else if (nauticalTileLoads > 0) {
       nauticalUnavailable = false;
       if (nauticalCheckTimer !== null) stopNauticalWaiting();
       nauticalStatusMessage = "";
-      nauticalAdvisory = true;
+      nauticalAdvisory = false;
       updateNauticalZoomUI();
     }
   });
@@ -940,9 +971,9 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       nauticalTypeLabel.classList.toggle("is-unavailable", belowMinimum);
     }
     if (nauticalZoomNote) {
-      var showNotice = nauticalFailureNotice ||
+      var showNotice = !nauticalMockInspection && (nauticalFailureNotice ||
         (preferredMapLayerName === "nautical" &&
-        (belowMinimum || nauticalUnavailable || nauticalAdvisory || nauticalLoading));
+        (belowMinimum || nauticalUnavailable || nauticalAdvisory || nauticalLoading)));
       nauticalZoomNote.hidden = !showNotice;
       if (showNotice && nauticalStatusText) nauticalStatusText.textContent = nauticalFailureNotice
         ? nauticalStatusMessage
@@ -987,7 +1018,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     // Start the bounded response check from the selected map state itself.
     // A stalled chart tile request may never deliver a Leaflet "loading" event.
     // Also covers Nautical restored from a saved URL at initial page load.
-    if (showNautical && nauticalCheckTimer === null &&
+    if (showNautical && !nauticalMockInspection && nauticalCheckTimer === null &&
         !nauticalAdvisory && nauticalTileLoads === 0) {
       startNauticalResponseCheck();
     }
