@@ -195,8 +195,8 @@ function testMapTileFallback(){
  assert.equal(timeoutStarts,2,'manual Nautical selection must arm timeout without loading event');
  assert.ok(map.hasLayer(nauticalLayer),'manual Nautical retry should attempt chart display');
  assert.equal(context.preferredMapLayerName,'nautical','retry retains Nautical preference');
- assert.ok(source.includes('nauticalStatusMessage = "NOAA nautical charts are temporarily unavailable. Showing Street Map instead; please try again later.";'),
-  'a complete NOAA nautical tile failure must tell users to retry later');
+ assert.ok(source.includes('showNauticalFailureNotice("NOAA nautical charts are temporarily unavailable. Showing Street Map instead; please try again later.");'),
+  'a complete NOAA nautical tile failure must show a dismissible retry message');
  assert.ok(source.includes('nauticalStatusText.textContent = nauticalFailureNotice'),
   'the failure notice must be displayed through the existing nautical status UI');
  assert.ok(source.includes('transparent: true,\n      version: "1.3.0"'),
