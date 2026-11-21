@@ -105,7 +105,7 @@ func sailingPublicRoute(path string) bool {
 // handles Homepage's fragment handoff before any protected report is served.
 // Existing account.js subsequently reads the same tab-scoped bearer for the
 // personal/Guest preference flow. No token is placed in a URL or log.
-const sailingEntryHTML = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SailingGo · Sign in</title></head><body style="font:16px system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:1rem"><h1>Mauri's Weather &amp; Water Conditions</h1><p id="message" role="status">Checking Homepage access…</p><p><a href="https://home.themauris.org/">Sign in or continue as Guest at Homepage</a></p><script>
+const sailingEntryHTML = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>SailingGo · Sign in</title><style>:root{color-scheme:light dark;--bg:light-dark(#f5f5f0,#0e141a);--panel:light-dark(#ffffff,#19232b);--ink:light-dark(#182631,#eef2f4);--muted:light-dark(#60707b,#a5b3bb);--accent:light-dark(#126877,#69c6d3)}html{min-height:100%;background:var(--bg)}body{box-sizing:border-box;min-height:100vh;margin:0;padding:clamp(28px,9vh,96px) 20px;background:var(--bg);color:var(--ink);font:16px system-ui,sans-serif}.entry{max-width:38rem;margin:0 auto;padding:28px;border:1px solid var(--muted);border-radius:16px;background:var(--panel)}h1{font-size:1.5rem;line-height:1.3}p{line-height:1.55}a{color:var(--accent)}a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}</style></head><body><main class="entry"><h1>Mauri's Weather &amp; Water Conditions</h1><p id="message" role="status">Checking Homepage access…</p><p><a href="https://home.themauris.org/">Sign in or continue as Guest at Homepage</a></p><script>
 (async function(){
  "use strict";
  const handoffKey="sailing.homepage.handoff.v1";
@@ -134,7 +134,7 @@ const sailingEntryHTML = `<!doctype html><html lang="en"><head><meta charset="ut
   message.textContent="Homepage access was not verified. Return to Homepage to sign in again.";
  }
 })();
-</script></body></html>`
+</script></main></body></html>`
 
 func sailingEntry(w http.ResponseWriter) {
  w.Header().Set("Cache-Control","no-store")
