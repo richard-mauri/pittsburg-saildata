@@ -272,6 +272,59 @@ async function run(){
   range.value='3';
   ui.ctx.document.changeHandler({target:range});
   assert.equal(ui.ctx.dirty,false,'restoring saved 3-day range clears dirty');
+  // Wind History defaults to 4 hours; sparse legacy records and an explicit
+  // wind_hours=4 must compare equal even after 4 -> 8 -> 4 transitions.
+  const history={id:'wind-reading-hours',value:'8',matches(){return false}};
+  ui.ctx.document.changeHandler({target:history});
+  assert.equal(ui.ctx.dirty,true,'History 4h -> 8h enables Save');
+  history.value='4';
+  ui.ctx.document.changeHandler({target:history});
+  assert.equal(ui.ctx.dirty,false,'History 8h -> 4h clears Save');
+  assert.equal(ui.saveButton.disabled,true);
+  ui.ctx.savedSnapshot.params.wind_hours='4'; // Historical explicit default.
+  history.value='12';
+  ui.ctx.document.changeHandler({target:history});
+  assert.equal(ui.ctx.dirty,true,'explicit default to 12h marks dirty');
+  history.value='4';
+  ui.ctx.document.changeHandler({target:history});
+  assert.equal(ui.ctx.dirty,false,'explicit 4h default restores saved state');
+  delete ui.ctx.savedSnapshot.params.wind_hours;
+
+  // All eight planning inputs use one-field state deltas. Their live chart
+  // controller refreshes via AJAX after this capture handler runs.
+  const planningCases=[
+   ['planning-start','12:00','13:30','planning_start'],
+   ['planning-end','17:00','18:15','planning_end'],
+   ['planning-caution-ebb','2.0','2.5','caution_ebb'],
+   ['planning-caution-flood','2.0','1.9','caution_flood'],
+   ['planning-max-ebb','3.0','3.5','max_ebb'],
+   ['planning-max-flood','3.0','3.7','max_flood'],
+   ['planning-buffer','60','75','planning_buffer'],
+   ['planning-current-distance-warning','15.0','12.5','current_distance_warning'],
+  ];
+  for(const [id,original,changed,key] of planningCases){
+   const input={id,value:changed,matches(){return false}};
+   ui.ctx.document.changeHandler({target:input});
+   assert.equal(ui.ctx.dirty,true,id+' must enable Save');
+   const staged=ui.ctx.getJSON(guestMode?ui.ctx.guestDraftKey:ui.ctx.draftKey,false);
+   assert.equal(staged.data.params[key],changed,id+' stages normalized selected value');
+   assert.equal(ui.requests.length,0,id+' must never auto-save');
+   input.value=original;
+   ui.ctx.document.changeHandler({target:input});
+   assert.equal(ui.ctx.dirty,false,id+' reversal clears pending changes');
+   assert.equal(ui.saveButton.disabled,true,id+' reversal disables Save');
+   assert.equal(ui.discardButton.disabled,true,id+' reversal disables Discard');
+  }
+  // A preexisting saved threshold must be restored, not the global default.
+  ui.ctx.savedSnapshot.params.caution_flood='1.9';
+  const flood={id:'planning-caution-flood',value:'2.5',matches(){return false}};
+  ui.ctx.document.changeHandler({target:flood});
+  assert.equal(ui.ctx.dirty,true);
+  flood.value='1.9';
+  ui.ctx.document.changeHandler({target:flood});
+  assert.equal(ui.ctx.dirty,false,'saved nondefault planning threshold restores clean state');
+  delete ui.ctx.savedSnapshot.params.caution_flood;
+
   // Exercise the remaining three report dropdowns using the real handler.
   for(const [id,nonDefault,baselineKey] of [
     ['map-swell-playback-speed','2','swell_playback_speed'],
@@ -320,6 +373,19 @@ async function run(){
   assert.equal(controlValues['map-alertcalifornia-mode'].value,'all');
   assert.equal(controlValues['show-tide-range-overlay'].checked,false);
   assert.equal(restoreEvents.length,4,'restoration dispatches controller change events');
+  // AJAX redraw reintroduces server-rendered planning defaults. Restore
+  // every saved/pending planning field without dispatching a second fetch.
+  const planningEls=Object.fromEntries(planningCases.map(([id])=>[id,{value:''}]));
+  ui.ctx.document.getElementById=id=>planningEls[id]||controlValues[id]||controls[id]||null;
+  const savedWithPlanning=JSON.parse(JSON.stringify(ui.ctx.savedSnapshot));
+  savedWithPlanning.params.planning_start='13:30';
+  savedWithPlanning.params.caution_flood='1.9';
+  ui.ctx.restoreControlPreferences(savedWithPlanning,true);
+  assert.equal(planningEls['planning-start'].value,'13:30');
+  assert.equal(planningEls['planning-caution-flood'].value,'1.9');
+  assert.equal(planningEls['planning-buffer'].value,'60');
+  assert.equal(restoreEvents.length,4,'planning reapply must not dispatch new requests');
+
   // The chart redraw does not reset the saved/pending selection.
   const changedTide={id:'show-tide-range-overlay',checked:false,matches(){return false}};
   ui.ctx.document.changeHandler({target:changedTide});
