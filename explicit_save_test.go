@@ -19,7 +19,7 @@ func TestSailingExplicitSaveReplacesAutosync(t *testing.T){
   `discardButton.addEventListener("click"`,
   `function refreshDirty(next,guest)`,
   `if (saved && same(next,saved))`,
-  `savedSnapshot=JSON.parse(JSON.stringify(saved))`,
+  `savedSnapshot = JSON.parse(JSON.stringify(saved))`,
   `window.addEventListener("beforeunload"`,
   `if (!suppressUnload && dirty)`,
   `const guestDraftKey = "sailing.preferences.pending-guest.v1"`,
