@@ -1,5 +1,5 @@
-// Homepage is the only sign-in authority. Preferences sync automatically for a
-// verified Homepage bearer; without one, SailingGo uses browser-local settings.
+// Homepage is the only sign-in authority. Preferences are committed only by
+// clicking Save Changes; verified guests save to browser-local storage.
 // No approved credentials, cookies or bearer tokens are written to localStorage.
 (function () {
   "use strict";
@@ -9,6 +9,7 @@
   const draftKey = "sailing.preferences.pending-account.v2";
   const restoreKey = "sailing.preferences.restoring.v2";
   const localKey = "sailing.preferences.browser.v2";
+  const guestDraftKey = "sailing.preferences.pending-guest.v1";
   const params = ["lat","lon","station","current_station","bin","wind_unit","distance_unit","wind_hours","map_center_lat","map_center_lon","map_zoom","map_layer","planning_start","planning_end","caution_ebb","caution_flood","max_ebb","max_flood","planning_buffer","current_distance_warning","current_days"];
   const overlays = ["map-show-marine-zone","map-show-smoke","map-show-fire-perimeters","map-show-fire-detections","map-show-air-temperature","map-show-clouds","map-show-radar","map-show-wind-barbs","map-show-inland-wind-barbs","map-show-pressure","map-show-swell","map-show-structure","map-show-saildrone"];
   const onPublicHost = location.protocol === "https:" && location.hostname === "weather.themauris.org";
@@ -18,7 +19,7 @@
   const explicitlyLocal = fragment.get("suite_mode") === "local";
   let bearer = "", user = "", guestIdentity = "", revision = null, baseline = null;
   let signedIn = false, initializing = true, applying = false;
-  let saving = false, dirty = false, pendingSave = null, blocked = false;
+  let saving = false, dirty = false, blocked = false, suppressUnload = false;
   let priorNavigation = null, restoredNavigation = false;
   function getSession(key) { try { return sessionStorage.getItem(key); } catch (_) { return null; } }
   function putSession(key, value) { try { sessionStorage.setItem(key, value); return true; } catch (_) { return false; } }
@@ -44,6 +45,27 @@
   const label = makeLabel();
   function status(value) { if (label) {label.textContent = value;label.hidden=!value;} }
   function signedInStatus(name, note) {SuiteBannerStatus.signedIn(name);status(note || "");}
+  // The same explicit-save control is present on Conditions Now and Planning.
+  // It lives in the existing preference toolbar alongside Wind/Distance units.
+  const saveRow = document.querySelector(".page-preferences");
+  const saveButton = document.createElement("button");
+  saveButton.id = "sailing-save-changes";
+  saveButton.className = "ui-button";
+  saveButton.type = "button";
+  saveButton.textContent = "Save Changes";
+  saveButton.disabled = true;
+  const saveNote = document.createElement("span");
+  saveNote.id = "sailing-save-status";
+  saveNote.setAttribute("role","status");
+  saveNote.setAttribute("aria-live","polite");
+  if (saveRow) saveRow.append(saveButton,saveNote);
+  function updateSaveUI(message) {
+    saveButton.disabled = saving || blocked || !dirty;
+    saveNote.textContent = message === undefined
+      ? (blocked ? "Preference conflict · Changes retained." :
+         dirty ? "Unsaved changes · Click Save Changes." : "")
+      : message;
+  }
   const signInDialog = document.createElement("dialog");
   signInDialog.className = "sailing-suite-signin";
   signInDialog.setAttribute("aria-labelledby","sailing-suite-signin-title");
@@ -159,6 +181,7 @@
         // Location/station/planning changes may require server recomputation;
         // preserve the current route and the user's account on navigation.
         putSession(restoreKey, JSON.stringify({user:identity,url:next.pathname+next.search}));
+        suppressUnload=true; // Internal account restoration keeps staged drafts.
         location.replace(next.toString());
         return;
       }
@@ -170,7 +193,17 @@
     putJSON(navKey,{user:identity,url:pageURL},false);
   }
   function saveLocal(data) {
-    if (valid(data)) putJSON(localKey,data,true);
+    return valid(data) && putJSON(localKey,data,true);
+  }
+  // Guest changes remain tab-scoped until the visitor explicitly saves.
+  function stageGuest(data) {
+    if (initializing || applying || !valid(data)) return;
+    if (!putJSON(guestDraftKey,{user:guestIdentity || "local",data:data},false)) {
+      updateSaveUI("Could not stage preferences in this tab.");
+      return;
+    }
+    dirty = true;
+    updateSaveUI();
   }
   async function browserOnly(guestName) {
     signedIn = false;
@@ -178,14 +211,21 @@
     if (localIdentity) signedInStatus(localIdentity,"");
     else {SuiteBannerStatus.setText("Browser-only mode");status("Not signed in");}
     const old = getJSON(localKey,true);
-    let data = valid(old) ? old : settingsFromPage(null);
+    const saved = valid(old) ? old : settingsFromPage(null);
+    const pending = getJSON(guestDraftKey,false);
+    let data = pending && pending.user === (localIdentity || "local") && valid(pending.data)
+      ? pending.data : saved;
+    dirty = !!(pending && pending.user === (localIdentity || "local") && valid(pending.data));
     if (priorNavigation && priorNavigation.user === "local" && priorNavigation.url !== pageURL) {
-      data = mergeChangedNavigation(data, priorNavigation);
-      saveLocal(data);
-      keepNavigation("local");
-    } else if (!valid(old)) saveLocal(data);
+      const changed = mergeChangedNavigation(data,priorNavigation);
+      if (!same(changed,data)) {
+        data=changed;
+        if (putJSON(guestDraftKey,{user:localIdentity || "local",data:data},false)) dirty=true;
+      }
+    }
     await applySettings(data,"local");
     keepNavigation("local");
+    updateSaveUI();
   }
   // A handoff is transferred only through the fragment. Clear it immediately.
   if (handedOff) {
@@ -220,50 +260,86 @@
     if (!response.ok) throw Error("Preference read failed (HTTP "+response.status+")");
     return response.json();
   }
+  // Staging is separate from persistence: no timer or passive account PUT.
   function stage(data) {
-    if (!signedIn || initializing || applying || blocked || !valid(data)) return;
-    putJSON(draftKey,{user:user,revision:revision,data:data},false);
+    if (!signedIn || initializing || applying || !valid(data)) return;
+    if (!putJSON(draftKey,{user:user,revision:revision,data:data},false)) {
+      updateSaveUI("Could not stage preferences in this tab.");
+      return;
+    }
     dirty = true;
-    if (pendingSave !== null) clearTimeout(pendingSave);
-    pendingSave = setTimeout(function () { pendingSave=null;void flush(); },250);
+    updateSaveUI();
   }
+  // This function is called exclusively by the explicit Save Changes button.
   async function flush() {
-    if (!signedIn || blocked || saving || !dirty || revision === null) return;
-    saving = true;
+    if (saving || !dirty || blocked) return;
+    if (!signedIn) {
+      const guest = getJSON(guestDraftKey,false);
+      if (!guest || guest.user !== (guestIdentity || "local") || !valid(guest.data)) {
+        updateSaveUI("Pending Guest preferences unavailable; retry the edit.");
+        return;
+      }
+      saving=true;updateSaveUI("Saving…");
+      if (saveLocal(guest.data)) {
+        clearSession(guestDraftKey);
+        dirty=false;updateSaveUI("Settings saved in this browser.");
+      } else updateSaveUI("Save failed · Click Save Changes to retry.");
+      saving=false;saveButton.disabled=!dirty;
+      return;
+    }
+    if (revision === null) return;
     const draft = getJSON(draftKey,false);
-    if (!draft || draft.user !== user || !valid(draft.data)) { dirty=false;saving=false;return; }
-    const desired = draft.data;
-    dirty = false;
+    if (!draft || draft.user !== user || draft.revision !== revision || !valid(draft.data)) {
+      updateSaveUI("Pending account preferences unavailable; retry the edit.");
+      return;
+    }
+    const desired=draft.data;
+    if (same(desired,baseline)) {
+      clearSession(draftKey);dirty=false;updateSaveUI("");
+      return;
+    }
+    saving=true;updateSaveUI("Saving…");
     try {
-      if (same(desired,baseline)) {clearSession(draftKey);return;}
       const response = await request("/api/storage/sailing",{
         method:"PUT",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({revision:revision,data:desired})
       });
       if (response.status === 409) {
-        blocked = true;
+        blocked=true;
         signedInStatus(user,"Preference conflict; browser changes retained");
+        updateSaveUI("Preference conflict · Changes retained.");
         return;
       }
       if (!response.ok) throw Error("Preference save failed (HTTP "+response.status+")");
-      const result = await response.json();
-      revision = result.revision;
-      baseline = desired;
-      const newest = getJSON(draftKey,false);
-      if (newest && newest.user === user && same(newest.data,desired)) clearSession(draftKey);
-      else dirty = true;
-    } catch (_) {
-      // Keep the draft for a later validated attempt; never discard changes.
-      dirty = true;
-      signedInStatus(user,"Preferences not yet saved");
-    } finally {
-      saving = false;
-      if (dirty && signedIn && !blocked) {
-        if (pendingSave !== null) clearTimeout(pendingSave);
-        pendingSave = setTimeout(function(){pendingSave=null;void flush();},1200);
+      const result=await response.json();
+      if (!Number.isSafeInteger(result.revision) || result.revision<=revision)
+        throw Error("Invalid account save revision");
+      revision=result.revision;
+      baseline=desired;
+      const newest=getJSON(draftKey,false);
+      if (newest && newest.user===user && newest.revision===draft.revision && same(newest.data,desired)){
+        clearSession(draftKey);
+        dirty=false;
+        updateSaveUI("Settings saved.");
+      } else {
+        // Do not discard edits made during a pending network request.
+        if (newest && newest.user===user && valid(newest.data))
+          putJSON(draftKey,{user:user,revision:revision,data:newest.data},false);
+        dirty=true;
+        updateSaveUI("Saved; newer changes remain unsaved.");
       }
+    } catch (_) {
+      dirty=true;
+      updateSaveUI("Save failed · Click Save Changes to retry.");
+    } finally {
+      saving=false;
+      saveButton.disabled=blocked||!dirty;
     }
   }
+  saveButton.addEventListener("click",function(){void flush();});
+  window.addEventListener("beforeunload",function(event){
+    if (!suppressUnload && dirty){event.preventDefault();event.returnValue="";}
+  });
   async function hydrate() {
     if (!onPublicHost || !bearer || explicitlyLocal) {initializing=false;await browserOnly();return;}
     try {
@@ -304,22 +380,21 @@
       } else if (held) {
         clearSession(draftKey);
       }
-      if (!held || held.user !== user || held.revision !== revision) {
-        if (baseline && !handedOff && !restoredNavigation &&
-            priorNavigation && priorNavigation.user === user && priorNavigation.url !== pageURL) {
-          desired = mergeChangedNavigation(desired,priorNavigation);
-        }
+      // Preserve a pending draft across full-page navigation; only the
+      // parameters actually changed by the user on the intervening route
+      // are folded into it, never an automatic account save.
+      if (!handedOff && !restoredNavigation && priorNavigation &&
+          priorNavigation.user === user && priorNavigation.url !== pageURL) {
+        const merged=mergeChangedNavigation(desired,priorNavigation);
+        if (!same(merged,desired)) desired=merged;
       }
-      // Initialize the user's account once; thereafter the account, not the
-      // launch URL or the previous browser user, is authoritative.
+      dirty = !!(held && held.user === user && held.revision === revision && valid(held.data));
+      if (!dirty && baseline && !same(desired,baseline)) dirty=true;
+      if (dirty) putJSON(draftKey,{user:user,revision:revision,data:desired},false);
       initializing = false;
       keepNavigation(user);
-      if (!same(desired,baseline)) {
-        putJSON(draftKey,{user:user,revision:revision,data:desired},false);
-        dirty = true;
-        await flush();
-      }
       await applySettings(desired,user);
+      updateSaveUI();
     } catch (err) {
       initializing = false;
       // A network fault is not an identity: preserve current browser settings,
@@ -341,15 +416,19 @@
       target.id === "wind-reading-hours" || target.matches("input[name='map-type']") ||
       target.matches(".map-marine-place-toggle") || overlays.includes(target.id);
     if (!preference) return;
-    const next = settingsFromPage(baseline);
+    const pending = signedIn ? getJSON(draftKey,false) : getJSON(guestDraftKey,false);
+    const fallback = pending && valid(pending.data) && 
+      (signedIn ? pending.user===user : pending.user===(guestIdentity || "local"))
+      ? pending.data : signedIn ? baseline : getJSON(localKey,true);
+    const next = settingsFromPage(fallback);
     if (target.id === "wind-unit-select") next.params.wind_unit = target.value === "mph" ? "mph" : "kts";
     if (target.id === "distance-unit-select") next.params.distance_unit = target.value === "mi" ? "mi" : "nmi";
     if (target.id === "wind-reading-hours") next.params.wind_hours = String(target.value);
     if (signedIn) stage(next);
-    else saveLocal(next);
+    else stageGuest(next);
   },true);
-  // A page-navigation change is recovered on the next view even if the
-  // asynchronous save on the departing page could not complete.
+  // A page-navigation change is recovered on the next view as pending,
+  // not silently committed to the Homepage account or Guest storage.
   window.addEventListener("pagehide",function () {
     if (!initializing) keepNavigation(signedIn ? user : "local");
   });
