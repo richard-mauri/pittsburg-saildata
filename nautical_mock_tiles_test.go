@@ -12,78 +12,91 @@ import (
  "strings"
  "sync/atomic"
  "testing"
+
+ "pittsburg-saildata/internal/mockchart"
 )
 
-// Stage A exercises the actual chart handler with Go-generated PNG files.
-// All NOAA traffic is redirected to a local sentinel server that must never
-// be called for cache hits. The isolated fixture directory is deleted by Go.
+// All real NOAA calls use a local sentinel. No network or external NOAA data
+// is required. The generated region is fake and explicitly non-navigational.
 func TestMockNauticalXYZCacheToBrowser(t *testing.T) {
  root:=filepath.Join(t.TempDir(),"mock-test-only")
  cmd:=exec.Command("go","run","./cmd/mocknauticaltiles","-dir",root)
  output,err:=cmd.CombinedOutput()
- if err!=nil{t.Fatalf("generate mock XYZ fixtures: %v: %s",err,output)}
- if !bytes.Contains(output,[]byte("MOCK TEST DATA")){t.Fatalf("fixture not labeled: %s",output)}
- // The intentionally bounded high-zoom fixtures cover all supported z9–18,
- // not the full Bay/Delta at z18 (which would require enormous downloads).
- if !strings.Contains(string(output),"Created 954 MOCK TEST DATA XYZ PNG tiles"){
-  t.Fatalf("unexpected bounded mock tile count: %s",output)
+ if err!=nil{t.Fatalf("generate Bay-to-Monterey fixtures: %v: %s",err,output)}
+ if !strings.Contains(string(output),"Created 756 MOCK TEST DATA XYZ PNG tiles"){
+  t.Fatalf("unexpected bounded lower-zoom tile count: %s",output)
  }
+ if !mockchart.HasMarker(root){t.Fatal("missing safe test-only region marker")}
 
  var upstreamCalls atomic.Int32
  upstream:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
   upstreamCalls.Add(1)
-  http.Error(w,"offline sentinel: NOAA must not be contacted on cache hit",http.StatusBadGateway)
+  http.Error(w,"NOAA sentinel must not be queried in local mock mode",http.StatusBadGateway)
  }))
  defer upstream.Close()
  handler:=nauticalTileHandlerWithUpstream(root,upstream.URL,upstream.Client())
+ t.Setenv("SAILING_NAUTICAL_MOCK_ON_DEMAND","1")
 
- // Independently known Leaflet/Web Mercator tile coordinates, not an MBTiles
- // TMS row. z10 Pittsburgh around x165/y394, z12 Delta around x664/y1578.
- centers:=[]struct{site string;z,x,y int}{
-  {"Pittsburg-z9",9,82,197},
-  {"Pittsburg-z10",10,165,394},
-  {"Pittsburg-z11",11,330,789},
-  {"Delta-z12",12,664,1578},
-  {"Pittsburg-z13",13,1322,3159},
-  {"Delta-z14",14,2658,6314},
-  {"Pittsburg-z15",15,5289,12636},
-  {"Selected-z16",16,10579,25269},
-  {"Delta-z17",17,21266,50514},
-  {"Selected-z18",18,42316,101079},
+ // Two distinct coastal endpoints at EVERY displayed nautical zoom level.
+ // z9..12 must exist on disk; z13..18 are bounded and rendered on demand.
+ sites:=[]struct{site string;coords [10][2]int}{
+  {"SanFrancisco",[10][2]int{{81,197},{163,395},{327,791},{655,1583},{1310,3167},{2620,6334},{5241,12668},{10482,25336},{20964,50673},{41928,101347}}},
+  {"Monterey",[10][2]int{{82,199},{165,399},{330,799},{661,1599},{1322,3199},{2644,6399},{5289,12799},{10578,25599},{21157,51199},{42314,102398}}},
  }
- for _,center:=range centers {
-  t.Run(center.site,func(t *testing.T){
-   path:=nauticalTilePrefix+strconv.Itoa(center.z)+"/"+strconv.Itoa(center.x)+"/"+strconv.Itoa(center.y)+".png"
-   disk:=filepath.Join(root,strconv.Itoa(center.z),strconv.Itoa(center.x),strconv.Itoa(center.y)+".png")
-   expected,err:=os.ReadFile(disk);if err!=nil{t.Fatalf("fixture absent at %s: %v",disk,err)}
-   if !validNauticalPNG(expected){t.Fatal("fixture is not a complete 256x256 PNG")}
-   img,err:=png.Decode(bytes.NewReader(expected));if err!=nil{t.Fatal(err)}
-   if img.Bounds().Dx()!=256||img.Bounds().Dy()!=256{t.Fatal("wrong fixture dimensions")}
-   // Opaque visible mock image, not a transparent NOAA-looking placeholder.
-   _,_,_,a:=img.At(30,30).RGBA()
-   if a!=0xffff {t.Fatal("mock fixture pixel is transparent")}
-   for i:=0;i<2;i++{
+ for _,site:=range sites {
+  for idx,coords:=range site.coords {
+   z,x,y:=idx+9,coords[0],coords[1]
+   t.Run(site.site+"-z"+strconv.Itoa(z),func(t *testing.T){
+    if !mockchart.Covers(z,x,y){t.Fatalf("tile %d/%d/%d outside coverage",z,x,y)}
+    uri:=nauticalTilePrefix+strconv.Itoa(z)+"/"+strconv.Itoa(x)+"/"+strconv.Itoa(y)+".png"
+    req:=httptest.NewRequest("GET",uri,nil)
+    req.Host="127.0.0.1:8765"
+    req.RemoteAddr="127.0.0.1:54321"
     w:=httptest.NewRecorder()
-    handler.ServeHTTP(w,httptest.NewRequest("GET",path,nil))
-    if w.Code!=http.StatusOK{t.Fatalf("GET HTTP %d: %s",w.Code,w.Body.String())}
-    if got:=w.Header().Get("X-Sailing-Chart-Source");got!="cache"{t.Fatalf("source=%q",got)}
-    if got:=w.Header().Get("X-Sailing-Chart-Result");got!="cache-hit"{t.Fatalf("result=%q",got)}
-    if got:=w.Header().Get("Content-Type");got!="image/png"{t.Fatalf("mime=%q",got)}
-    if !bytes.Equal(w.Body.Bytes(),expected){t.Fatal("browser response differs from disk PNG")}
-   }
-   head:=httptest.NewRecorder()
-   handler.ServeHTTP(head,httptest.NewRequest("HEAD",path,nil))
-   if head.Code!=http.StatusOK||head.Body.Len()!=0||head.Header().Get("X-Sailing-Chart-Result")!="cache-hit"{
-    t.Fatalf("HEAD did not use cache: status=%d bytes=%d",head.Code,head.Body.Len())
-   }
-  })
+    handler.ServeHTTP(w,req)
+    if w.Code!=http.StatusOK{t.Fatalf("GET %d: %s",w.Code,w.Body.String())}
+    if !validNauticalPNG(w.Body.Bytes()){t.Fatal("not a complete 256x256 PNG")}
+    if _,err:=png.Decode(bytes.NewReader(w.Body.Bytes()));err!=nil{t.Fatal(err)}
+    disk:=filepath.Join(root,strconv.Itoa(z),strconv.Itoa(x),strconv.Itoa(y)+".png")
+    if z<=12 {
+     data,err:=os.ReadFile(disk);if err!=nil{t.Fatal(err)}
+     if !bytes.Equal(data,w.Body.Bytes()){t.Fatal("disk fixture bytes mismatch")}
+     if w.Header().Get("X-Sailing-Chart-Result")!="cache-hit"{t.Fatal("lower zoom must be a cache hit")}
+    } else {
+     if _,err:=os.Stat(disk);!os.IsNotExist(err){t.Fatal("high zoom must be lazy, not on disk")}
+     if w.Header().Get("X-Sailing-Chart-Result")!="mock-generated"{t.Fatal("high zoom must be lazily generated")}
+    }
+    head:=httptest.NewRecorder()
+    req.Method="HEAD"
+    handler.ServeHTTP(head,req)
+    if head.Code!=http.StatusOK || head.Body.Len()!=0 {t.Fatalf("HEAD %d bytes=%d",head.Code,head.Body.Len())}
+   })
+  }
  }
- if n:=upstreamCalls.Load();n!=0{t.Fatalf("cache-hit made %d upstream calls",n)}
+ if upstreamCalls.Load()!=0{t.Fatal("mock region accessed NOAA sentinel")}
 
- // Reusing an existing output directory is forbidden (protects a real cache).
+ outside:=httptest.NewRequest("GET",nauticalTilePrefix+"12/1/1.png",nil)
+ outside.Host="localhost:8765";outside.RemoteAddr="127.0.0.1:55555"
+ w:=httptest.NewRecorder();handler.ServeHTTP(w,outside)
+ if w.Code!=http.StatusNotFound||w.Header().Get("X-Sailing-Chart-Result")!="outside-mock-region"{
+  t.Fatalf("outside region returned %d, result %q",w.Code,w.Header().Get("X-Sailing-Chart-Result"))
+ }
+ if upstreamCalls.Load()!=0{t.Fatal("mock out-of-region request contacted NOAA")}
+ 
+ // A public Host cannot cause dynamic fake imagery, even if the owner
+ // explicitly enabled the local mode on the server.
+ public:=httptest.NewRequest("GET",nauticalTilePrefix+"18/41928/101347.png",nil)
+ public.Host="weather.themauris.org";public.RemoteAddr="127.0.0.1:55555"
+ w=httptest.NewRecorder();handler.ServeHTTP(w,public)
+ if w.Code==http.StatusOK||w.Header().Get("X-Sailing-Chart-Result")=="mock-generated"{
+  t.Fatal("public hostname must never render on-demand fake chart imagery")
+ }
+ if upstreamCalls.Load()==0{t.Fatal("public request bypassed upstream sentinel unexpectedly")}
+
+ // A generated output directory is never overwritten.
  cmd=exec.Command("go","run","./cmd/mocknauticaltiles","-dir",root)
  output,err=cmd.CombinedOutput()
  if err==nil||!strings.Contains(string(output),"already exists"){
-  t.Fatalf("generator failed to reject existing directory: err=%v, output=%s",err,output)
+  t.Fatalf("generator did not reject existing directory: %v: %s",err,output)
  }
 }
