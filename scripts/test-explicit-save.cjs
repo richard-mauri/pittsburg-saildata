@@ -233,6 +233,13 @@ function testNauticalResponseDiagnostics(){
  let timer=null, updates=0, fallbackEvents=0, stagedMapType='nautical';
  const timers=new Map();
  let timerId=0;
+ const fire=(ms)=>{
+  const found=[...timers.entries()].find(([,t])=>t.ms===ms);
+  assert.ok(found,'expected live timer at '+ms+'ms');
+  timers.delete(found[0]);
+  found[1].fn();
+ };
+ const expired=(ms)=>[...timers.values()].find(t=>t.ms===ms)?.fn;
  const streetInput={
   checked:false,
   dispatchEvent(ev){
@@ -266,16 +273,33 @@ function testNauticalResponseDiagnostics(){
  vm.createContext(context);
  vm.runInContext(source.slice(a,b),context);
  context.realUpdateNauticalZoomUI=()=>vm.runInContext('updateNauticalZoomUI()',context);
- // The real timeout code must show immediate feedback before NOAA answers.
+ // Fast cached tiles complete before 200ms: no progress panel, even if
+ // the browser later executes a previously queued callback.
  assert.equal(typeof callbacks.loading,'function');
  callbacks.loading();
- assert.equal(typeof timer,'function','tile loading should arm bounded response check');
- assert.equal(note.hidden,false,'progress must appear as soon as loading begins');
+ assert.equal(typeof timer,'function','tile loading arms a bounded response check');
+ assert.equal(note.hidden,true,'loading must NOT immediately show a popup');
+ assert.equal(progress.hidden,true,'fast cached tiles never display progress');
+ const staleFastProgress=expired(200);
+ callbacks.tileload();
+ callbacks.load();
+ assert.equal(note.hidden,true,'fast success must remain popup-free');
+ staleFastProgress();
+ assert.equal(note.hidden,true,'stale 200ms callback cannot resurrect popup');
+ assert.equal(progress.hidden,true);
+ assert.equal(tileContainer.style.visibility,'','loading never hides chart pixels');
+ // A genuinely slow request shows progress only after the short threshold,
+ // then converts that SAME panel to an error on the 12-second timeout.
+ context.nauticalSuccessfulZooms={};
+ context.map.getZoom=()=>9;
+ callbacks.loading();
+ assert.equal(note.hidden,true);
+ fire(200);
+ assert.equal(note.hidden,false,'slow request shows the one status panel after 200ms');
  assert.ok(statusText.textContent.includes('Loading NOAA nautical chart'));
- assert.equal(cancelButton.hidden,false,'loading must offer Cancel');
- assert.equal(progress.hidden,false,'indeterminate progress bar appears while waiting');
- assert.equal(tileContainer.style.visibility,'','progress panel must NOT hide existing chart tiles');
- timer();
+ assert.equal(cancelButton.hidden,false,'visible loading offers Cancel');
+ assert.equal(progress.hidden,false,'visible loading offers progress bar');
+ fire(12000);
  assert.equal(context.nauticalFailureNotice,true,'stalled WMS must record visible warning');
  assert.equal(fallbackEvents,0,'timeout must never force a Street radio change');
  assert.equal(stagedMapType,'nautical','timeout preserves staged Nautical preference');
@@ -300,7 +324,7 @@ function testNauticalResponseDiagnostics(){
  // The same error panel automatically dismisses without requiring Close.
  context.preferredMapLayerName='nautical';
  callbacks.loading();
- timer();
+ fire(12000);
  const autoDismiss=[...timers.values()].find(t=>t.ms===8000);
  assert.ok(autoDismiss,'timeout should schedule automatic dismissal');
  autoDismiss.fn();
@@ -311,6 +335,8 @@ function testNauticalResponseDiagnostics(){
  context.nauticalFailureNotice=false;
  context.nauticalStatusMessage='';
  callbacks.loading();
+ assert.equal(note.hidden,true,'progress has a 200ms threshold');
+ fire(200);
  assert.equal(note.hidden,false);
  cancelButton.click();
  assert.equal(fallbackEvents,1,'ONLY explicit Cancel must reset Street via staged change');
@@ -320,6 +346,7 @@ function testNauticalResponseDiagnostics(){
 
  // A tile that arrived must not be labeled as a hard outage.
  context.preferredMapLayerName='nautical';
+ context.map.getZoom=()=>10;
  callbacks.loading();
  callbacks.tileload();
  assert.equal(tileContainer.style.visibility,'','cached tiles must remain visible during progress');
@@ -337,8 +364,8 @@ function testNauticalResponseDiagnostics(){
  context.preferredMapLayerName='nautical';
  const fallbackBeforeMock=fallbackEvents;
  callbacks.loading();
- assert.equal(note.hidden,false,'mock mode uses the SAME progress panel');
- assert.equal(progress.hidden,false,'mock inspection shows progress before tiles');
+ assert.equal(note.hidden,true,'mock fast tiles must not trigger a late popup');
+ assert.equal(progress.hidden,true,'mock progress remains delayed by 200ms');
  assert.equal(tileContainer.style.visibility,'','mock images never disappear during zoom');
  assert.ok([...timers.values()].some(t=>t.ms===2500),'mock progress is bounded without NOAA fallback');
  callbacks.tileerror();
@@ -368,11 +395,14 @@ function testNauticalResponseDiagnostics(){
  // Repeated zoom attempts must clear stale error and allow new tiles.
  callbacks.loading();
  assert.equal(context.nauticalFailureNotice,false,'new zoom dismisses prior failure');
- assert.equal(progress.hidden,false,'new zoom shows progress in the same panel');
+ assert.equal(progress.hidden,true,'new zoom keeps popup hidden for fast requests');
+ const staleRetryProgress=expired(200);
  callbacks.tileload();
  callbacks.load();
  assert.equal(context.preferredMapLayerName,'nautical');
  assert.equal(note.hidden,true,'success after failed zoom clears the panel');
+ staleRetryProgress();
+ assert.equal(note.hidden,true,'stale callback cannot show progress after recovery');
  // An additional failed batch at the same zoom must NOT claim that all chart
  // tiles are unavailable if some mock or NOAA tiles already succeeded there.
  const zoomTen=10;
@@ -400,8 +430,10 @@ function testNauticalResponseDiagnostics(){
   source.includes('window.location.hostname === "127.0.0.1"') &&
   source.includes('get("nautical_mock_test") === "1"'),
   'mock inspection must require both explicit URL opt-in and loopback host');
- assert.ok(source.includes('if (showNautical && nauticalCheckTimer === null && !nauticalLoading'),
-  'initial chart selection must start a single progress state before adding tiles');
+ assert.ok(source.includes('if (showNautical && nauticalCheckTimer === null &&'),
+  'initial chart selection must schedule the request check before adding tiles');
+ assert.ok(source.includes('}, 200);'),
+  'progress panel must have a 200ms delay for fast cached tiles');
  assert.ok(source.indexOf('startNauticalResponseCheck();',source.indexOf('function applyPreferredBaseMap()')) <
   source.indexOf('streetLayer.addTo(map)',source.indexOf('function applyPreferredBaseMap()')),
   'progress must be initiated before Leaflet adds any chart tiles');
