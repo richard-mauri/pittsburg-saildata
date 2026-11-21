@@ -82,7 +82,8 @@ func (a *SailingHTTPAuth) sessionBearer(r *http.Request) string {
 }
 
 func sailingBootstrapRoute(r *http.Request) bool {
- if r.Method!=http.MethodGet{return false}
+ if r.Method!=http.MethodGet||r.Header.Get("X-Requested-With")!=""{return false}
+ if dest:=r.Header.Get("Sec-Fetch-Dest");dest!=""&&dest!="document"{return false}
  switch r.URL.Path {
  case "/","/planning":return true
  case "/report":
@@ -180,8 +181,18 @@ func (a *SailingHTTPAuth) ProtectWeather(next http.Handler) http.Handler {
   // Explicit Authorization is useful for CLI requests, while browser
   // navigations and same-origin fetches use the sealed HttpOnly cookie.
   credential:=r.Header.Get("Authorization")
+  fromCookie:=false
   if credential=="" {
-   if bearer:=a.sessionBearer(r);bearer!=""{credential="Bearer "+bearer}
+   if bearer:=a.sessionBearer(r);bearer!=""{
+    credential="Bearer "+bearer
+    fromCookie=true
+   }
+  }
+  // Cookie authentication is only for same-origin browser traffic. A bearer
+  // supplied explicitly by a CLI client is separately verified by Homepage.
+  if fromCookie && r.Method!=http.MethodGet && r.Method!=http.MethodHead && !sailingSameOrigin(r) {
+   http.Error(w,"invalid write origin",http.StatusForbidden)
+   return
   }
   if credential=="" && sailingBootstrapRoute(r){
    sailingEntry(w)
