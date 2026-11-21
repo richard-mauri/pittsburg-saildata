@@ -809,7 +809,7 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     if (preferredMapLayerName !== "nautical" || !map.hasLayer(nauticalLayer)) return;
     if (nauticalTileLoads === 0 && nauticalTileErrors > 0) {
       nauticalUnavailable = true;
-      nauticalStatusMessage = "NOAA Nautical Chart could not be loaded — showing Street Map.";
+      nauticalStatusMessage = "NOAA nautical charts are temporarily unavailable. Showing Street Map instead; please try again later.";
       applyPreferredBaseMap();
     } else if (nauticalTileLoads > 0) {
       nauticalUnavailable = false;
