@@ -16,6 +16,26 @@
   const controlDefaults = {"swell_playback_speed":"1","swell_playback_step":"3","alertcalifornia_mode":"clustered"};
   const controlIDs = {"map-swell-playback-speed":"swell_playback_speed","map-swell-playback-step":"swell_playback_step","map-alertcalifornia-mode":"alertcalifornia_mode"};
   const controlOptions = {"swell_playback_speed":["0.5","1","2"],"swell_playback_step":["1","3","6"],"alertcalifornia_mode":["clustered","all"]};
+  const planningControls = {
+    "planning-start":{key:"planning_start",defaultValue:"12:00",kind:"time"},
+    "planning-end":{key:"planning_end",defaultValue:"17:00",kind:"time"},
+    "planning-caution-ebb":{key:"caution_ebb",defaultValue:"2.0",kind:"decimal"},
+    "planning-caution-flood":{key:"caution_flood",defaultValue:"2.0",kind:"decimal"},
+    "planning-max-ebb":{key:"max_ebb",defaultValue:"3.0",kind:"decimal"},
+    "planning-max-flood":{key:"max_flood",defaultValue:"3.0",kind:"decimal"},
+    "planning-buffer":{key:"planning_buffer",defaultValue:"60",kind:"minutes"},
+    "planning-current-distance-warning":{key:"current_distance_warning",defaultValue:"15.0",kind:"decimal"}
+  };
+  function planningValue(raw,config) {
+    const value = String(raw).trim();
+    if (config.kind === "time")
+      return /^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(value) ? value : null;
+    const number = Number(value);
+    if (!value || !Number.isFinite(number)) return null;
+    if (config.kind === "minutes")
+      return number >= 0 && number <= 360 ? String(Math.round(number)) : null;
+    return number > 0 && number <= 30 ? number.toFixed(1) : null;
+  }
   const params = urlParams.concat(Object.keys(controlDefaults));
   const overlays = ["map-show-marine-zone","map-show-smoke","map-show-fire-perimeters","map-show-fire-detections","map-show-air-temperature","map-show-clouds","map-show-radar","map-show-wind-barbs","map-show-inland-wind-barbs","map-show-pressure","map-show-swell","map-show-structure","map-show-saildrone","map-show-alertcalifornia","show-tide-range-overlay"];
   const onPublicHost = location.protocol === "https:" && location.hostname === "weather.themauris.org";
@@ -163,6 +183,15 @@
         ? state.params.map_layer : "map";
     }
     if (state.params.current_days === "1") delete state.params.current_days;
+    // The report's four-hour history is the default even when the current URL
+    // or an older saved record spells out wind_hours=4 explicitly.
+    if (state.params.wind_hours === "4") delete state.params.wind_hours;
+    Object.values(planningControls).forEach(function(config) {
+      if (state.params[config.key] === undefined) return;
+      const normalized = planningValue(state.params[config.key],config);
+      if (normalized === config.defaultValue) delete state.params[config.key];
+      else if (normalized !== null) state.params[config.key] = normalized;
+    });
     // A radio selection is authoritative; the map controller updates the URL
     // after our capturing change listener runs.
     if (state.mapType === "map") delete state.params.map_layer;
@@ -267,6 +296,17 @@
           tide.dispatchEvent(new Event("change",{bubbles:true}));
         }
       }
+      // Planning controls are also part of the server-replaced current chart
+      // subtree. Reapply the canonical pending/saved values without dispatching
+      // a new chart request or staging artificial edits.
+      Object.entries(planningControls).forEach(function(pair) {
+        const el = document.getElementById(pair[0]);
+        if (!el) return;
+        const config = pair[1];
+        const value = data.params[config.key];
+        el.value = value === undefined ? config.defaultValue :
+          (planningValue(value,config) || config.defaultValue);
+      });
     } finally { applying = false; }
   }
   document.addEventListener("sailing-current-chart-updated",function(){
@@ -563,6 +603,7 @@
     if (!target) return;
     const preference = target.id === "wind-unit-select" || target.id === "distance-unit-select" ||
       target.id === "wind-reading-hours" || target.id === "current-days-picker" ||
+      Object.prototype.hasOwnProperty.call(planningControls,target.id) ||
       Object.prototype.hasOwnProperty.call(controlIDs,target.id) ||
       target.matches("input[name='map-type']") ||
       target.matches(".map-marine-place-toggle") || overlays.includes(target.id);
@@ -583,7 +624,18 @@
     }
     if (target.id === "wind-unit-select") next.params.wind_unit = target.value === "mph" ? "mph" : "kts";
     if (target.id === "distance-unit-select") next.params.distance_unit = target.value === "mi" ? "mi" : "nmi";
-    if (target.id === "wind-reading-hours") next.params.wind_hours = String(target.value);
+    if (target.id === "wind-reading-hours") {
+      if (!["1","4","8","12","16","20","24"].includes(String(target.value))) return;
+      if (String(target.value) === "4") delete next.params.wind_hours;
+      else next.params.wind_hours = String(target.value);
+    }
+    if (Object.prototype.hasOwnProperty.call(planningControls,target.id)) {
+      const config = planningControls[target.id];
+      const value = planningValue(target.value,config);
+      if (value === null) return; // Invalid UI values cannot become saved state.
+      if (value === config.defaultValue) delete next.params[config.key];
+      else next.params[config.key] = value;
+    }
     if (Object.prototype.hasOwnProperty.call(controlIDs,target.id)) {
       const key = controlIDs[target.id];
       if (!controlOptions[key].includes(target.value)) return;
