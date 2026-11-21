@@ -749,7 +749,9 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
     {
       layers: "0,1,2,3,4,5,6,7,8,9,10,11,12",
       format: "image/png",
-      transparent: false,
+      // Transparent outside NOAA chart coverage; Street Map remains beneath
+      // this WMS so a blank chart tile cannot erase the entire basemap.
+      transparent: true,
       version: "1.3.0",
       attribution: "NOAA Office of Coast Survey"
     }
@@ -797,6 +799,24 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   // temporarily differ from preferredMapLayerName when Nautical is selected
   // but the map is zoomed farther out than the NOAA chart is useful.
   var activeMapLayerName = "map";
+  var nauticalTileLoads = 0;
+  var nauticalTileErrors = 0;
+  var nauticalUnavailable = false;
+  var nauticalStatusMessage = "";
+  nauticalLayer.on("tileload", function() { nauticalTileLoads++; });
+  nauticalLayer.on("tileerror", function() { nauticalTileErrors++; });
+  nauticalLayer.on("load", function() {
+    if (preferredMapLayerName !== "nautical" || !map.hasLayer(nauticalLayer)) return;
+    if (nauticalTileLoads === 0 && nauticalTileErrors > 0) {
+      nauticalUnavailable = true;
+      nauticalStatusMessage = "NOAA Nautical Chart could not be loaded — showing Street Map.";
+      applyPreferredBaseMap();
+    } else if (nauticalTileLoads > 0) {
+      nauticalUnavailable = false;
+      nauticalStatusMessage = "";
+      updateNauticalZoomUI();
+    }
+  });
 
   function baseLayerForName(name) {
     if (name === "nautical") return nauticalLayer;
@@ -828,12 +848,12 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       nauticalTypeLabel.classList.toggle("is-unavailable", belowMinimum);
     }
     if (nauticalZoomNote) {
-      var showNotice = preferredMapLayerName === "nautical" && belowMinimum;
+      var showNotice = preferredMapLayerName === "nautical" &&
+        (belowMinimum || nauticalUnavailable);
       nauticalZoomNote.hidden = !showNotice;
-      if (showNotice) {
-        nauticalZoomNote.textContent =
-          "Nautical chart available at Zoom 9+ — showing Street Map temporarily.";
-      }
+      if (showNotice) nauticalZoomNote.textContent = belowMinimum
+        ? "Nautical chart available at Zoom 9+ — showing Street Map temporarily."
+        : nauticalStatusMessage;
     }
   }
 
@@ -846,14 +866,25 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 
   function applyPreferredBaseMap() {
     var effectiveName = effectiveMapLayerName();
-    var targetLayer = baseLayerForName(effectiveName);
+    // Nautical is a transparent chart ABOVE a real street basemap, never the
+    // sole map surface. If NOAA tiles fail, fall back without changing the
+    // user's preferred Nautical selection or silently saving another type.
+    var showNautical = effectiveName === "nautical" && !nauticalUnavailable;
+    var targetLayer = baseLayerForName(
+      effectiveName === "nautical" && nauticalUnavailable ? "map" : effectiveName
+    );
 
     [streetLayer, nauticalLayer, satelliteLayer, hybridLayer].forEach(function(layer) {
-      if (layer !== targetLayer && map.hasLayer(layer)) map.removeLayer(layer);
+      var keep = layer === targetLayer || (showNautical && layer === streetLayer);
+      if (!keep && map.hasLayer(layer)) map.removeLayer(layer);
     });
+    // Order is significant: put the fallback in place before requesting NOAA.
+    if (showNautical && !map.hasLayer(streetLayer)) streetLayer.addTo(map);
     if (!map.hasLayer(targetLayer)) targetLayer.addTo(map);
+    if (showNautical) nauticalLayer.bringToFront();
 
-    activeMapLayerName = effectiveName;
+    activeMapLayerName = showNautical ? "nautical" :
+      effectiveName === "nautical" ? "map" : effectiveName;
     updateNauticalZoomUI();
 
     document.querySelectorAll('input[name="map-type"]').forEach(function(input) {
@@ -893,6 +924,12 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
       return;
     }
 
+    if (name === "nautical" && preferredMapLayerName !== "nautical") {
+      nauticalUnavailable = false;
+      nauticalTileLoads = 0;
+      nauticalTileErrors = 0;
+      nauticalStatusMessage = "";
+    }
     preferredMapLayerName = name;
     persistPreferredMapLayer();
     applyPreferredBaseMap();
@@ -925,13 +962,14 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   var cloudImageServiceURL =
     "https://satellitemaps.nesdis.noaa.gov/arcgis/rest/services/Most_Recent_MERGEDGC/ImageServer/exportImage";
 
-  var radarLayer = L.tileLayer.wms(
-    "https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q.cgi?",
+  // Use IEM's published transparent NEXRAD tile-cache product instead of
+  // per-viewport WMS raster tiles, which could return opaque blank patches.
+  // -0 selects the latest available nationwide N0Q composite.
+  var radarLayer = L.tileLayer(
+    "https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/ridge::USCOMP-N0Q-0/{z}/{x}/{y}.png",
     {
-      layers: "nexrad-n0q-900913",
-      format: "image/png",
-      transparent: true,
-      version: "1.1.1",
+      maxZoom: 18,
+      maxNativeZoom: 12,
       opacity: 0.72,
       pane: "radarOverlayPane",
       attribution: "NWS NEXRAD radar via Iowa State IEM"
@@ -1979,9 +2017,11 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
 
   radarLayer.on("load", function() {
     if (!mapState.radarOverlayVisible) return;
-    if (radarTilesLoaded === 0 && radarTileErrors > 0) {
+    if (radarTileErrors > 0) {
       setWeatherOverlayStatus(
-        "Weather radar could not be loaded from Iowa State IEM.",
+        radarTilesLoaded === 0
+          ? "Weather radar could not be loaded from Iowa State IEM."
+          : "Some weather radar tiles are unavailable; map remains visible.",
         true
       );
     } else if (!mapState.cloudOverlayVisible) {
