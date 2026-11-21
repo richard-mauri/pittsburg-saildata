@@ -3,6 +3,8 @@ package main
 import (
  "bytes"
  "context"
+ "errors"
+ "log"
  "fmt"
  "image/png"
  "io"
@@ -21,6 +23,33 @@ const nauticalTilePrefix = "/api/charts/tiles/"
 const nauticalWMSURL = "https://gis.charttools.noaa.gov/arcgis/rest/services/MCS/NOAAChartDisplay/MapServer/exts/MaritimeChartService/WMSServer"
 
 const nauticalMaxTileBytes = 4 << 20
+
+// Browser diagnostics contain no local filesystem path, token, or NOAA URL.
+func nauticalTileDiagnostics(w http.ResponseWriter, source, result string) {
+ w.Header().Set("X-Sailing-Chart-Source", source)
+ w.Header().Set("X-Sailing-Chart-Result", result)
+}
+
+type nauticalUpstreamError struct {
+ kind string
+ status int
+ cause error
+}
+func (e *nauticalUpstreamError) Error() string {
+ return fmt.Sprintf("NOAA %s status=%d: %v",e.kind,e.status,e.cause)
+}
+func (e *nauticalUpstreamError) Unwrap() error {return e.cause}
+
+func nauticalFailureResult(err error) string {
+ if err==nil {return "noaa-fetched"}
+ var upstream *nauticalUpstreamError
+ if errors.As(err,&upstream) {return upstream.kind}
+ if errors.Is(err,context.DeadlineExceeded) {return "noaa-timeout"}
+ var netErr interface{Timeout() bool}
+ if errors.As(err,&netErr) && netErr.Timeout(){return "noaa-timeout"}
+ return "noaa-error"
+}
+
 
 // defaultNauticalCacheDir keeps downloaded tiles outside the git working tree.
 // If the user's cache directory is unavailable, the handler remains explicitly
@@ -59,22 +88,25 @@ func nauticalTileHandlerWithUpstream(directory, upstream string, client *http.Cl
   w.Header().Set("Cache-Control","no-store")
   if r.Method!=http.MethodGet && r.Method!=http.MethodHead {
    w.Header().Set("Allow","GET, HEAD")
+   nauticalTileDiagnostics(w,"unavailable","invalid-method")
    http.Error(w,"method not allowed",http.StatusMethodNotAllowed);return
   }
   z,x,y,ok:=parseNauticalTilePath(r.URL.Path)
-  if !ok {http.Error(w,"invalid nautical tile coordinates",http.StatusBadRequest);return}
-  if root=="" {w.Header().Set("Retry-After","60");http.Error(w,"nautical chart cache unavailable",http.StatusServiceUnavailable);return}
+  if !ok {nauticalTileDiagnostics(w,"unavailable","invalid-coordinates");http.Error(w,"invalid nautical tile coordinates",http.StatusBadRequest);return}
+  if root=="" {nauticalTileDiagnostics(w,"unavailable","cache-unavailable");w.Header().Set("Retry-After","60");http.Error(w,"nautical chart cache unavailable",http.StatusServiceUnavailable);return}
   filename:=filepath.Join(root,strconv.Itoa(z),strconv.Itoa(x),fmt.Sprintf("%d.png",y))
   data,err:=os.ReadFile(filename)
   if err==nil && !validNauticalPNG(data) {
    // Do not serve stale, corrupted or HTML-as-PNG files; do not overwrite
    // an existing operator file automatically.
+   nauticalTileDiagnostics(w,"unavailable","cache-invalid")
    http.Error(w,"invalid cached nautical tile",http.StatusServiceUnavailable);return
   }
   if err!=nil && !os.IsNotExist(err) {
+   nauticalTileDiagnostics(w,"unavailable","cache-read-error")
    http.Error(w,"nautical chart cache unreadable",http.StatusServiceUnavailable);return
   }
-  if err==nil {writeNauticalTile(w,r,data);return}
+  if err==nil {nauticalTileDiagnostics(w,"cache","cache-hit");writeNauticalTile(w,r,data);return}
 
   // Deduplicate simultaneous cache misses for this same tile. Waiters never
   // launch an additional NOAA request and can abandon waiting on disconnect.
@@ -82,6 +114,7 @@ func nauticalTileHandlerWithUpstream(directory, upstream string, client *http.Cl
   mu.Lock()
   if time.Now().Before(retryAfter) {
    mu.Unlock()
+   nauticalTileDiagnostics(w,"unavailable","cooldown")
    w.Header().Set("Retry-After","30")
    http.Error(w,"NOAA nautical charts temporarily unavailable",http.StatusServiceUnavailable);return
   }
@@ -92,8 +125,10 @@ func nauticalTileHandlerWithUpstream(directory, upstream string, client *http.Cl
    case <-existing.done:
    }
    if existing.err!=nil {
+    nauticalTileDiagnostics(w,"unavailable",nauticalFailureResult(existing.err))
     http.Error(w,"NOAA nautical charts temporarily unavailable",http.StatusServiceUnavailable);return
    }
+   nauticalTileDiagnostics(w,"noaa","noaa-fetched-shared")
    writeNauticalTile(w,r,existing.data);return
   }
   flight:=&tileFlight{done:make(chan struct{})}
@@ -111,8 +146,10 @@ func nauticalTileHandlerWithUpstream(directory, upstream string, client *http.Cl
   case <-ctx.Done():
    flight.err=ctx.Err()
   }
+  fetchResult:=nauticalFailureResult(flight.err)
   if flight.err==nil {
    flight.err=saveNauticalTile(filename,flight.data)
+   if flight.err!=nil {fetchResult="cache-write-error";log.Printf("NAUTICAL tile=%s result=cache-write-error",key)}
    // A successfully fetched tile remains useful for this request even if
    // the disk is not writable; however, do not imply it is cached.
    if flight.err!=nil {
@@ -126,9 +163,11 @@ func nauticalTileHandlerWithUpstream(directory, upstream string, client *http.Cl
   close(flight.done)
   mu.Unlock()
   if flight.err!=nil {
+   nauticalTileDiagnostics(w,"unavailable",fetchResult)
    w.Header().Set("Retry-After","30")
    http.Error(w,"NOAA nautical charts temporarily unavailable",http.StatusServiceUnavailable);return
   }
+  nauticalTileDiagnostics(w,"noaa","noaa-fetched")
   writeNauticalTile(w,r,flight.data)
  })
 }
@@ -192,21 +231,46 @@ func nauticalWMSRequestURL(base string,z,x,y int) (string,error) {
  return u.String(),nil
 }
 
-func fetchNauticalWMSTile(ctx context.Context,client *http.Client,base string,z,x,y int)([]byte,error){
- target,err:=nauticalWMSRequestURL(base,z,x,y)
- if err!=nil{return nil,err}
- req,err:=http.NewRequestWithContext(ctx,http.MethodGet,target,nil)
- if err!=nil{return nil,err}
+// Log only real outgoing NOAA requests; never expose the full WMS URL.
+func fetchNauticalWMSTile(ctx context.Context,client *http.Client,base string,z,x,y int)(data []byte,err error){
+ started:=time.Now()
+ status:=0
+ result:="noaa-error"
+ defer func(){
+  log.Printf("NAUTICAL tile=%d/%d/%d upstream=noaa result=%s status=%d duration_ms=%d",z,x,y,result,status,time.Since(started).Milliseconds())
+ }()
+ target,parseErr:=nauticalWMSRequestURL(base,z,x,y)
+ if parseErr!=nil {result="noaa-request-error";err=&nauticalUpstreamError{kind:result,cause:parseErr};return}
+ req,reqErr:=http.NewRequestWithContext(ctx,http.MethodGet,target,nil)
+ if reqErr!=nil {result="noaa-request-error";err=&nauticalUpstreamError{kind:result,cause:reqErr};return}
  req.Header.Set("Accept","image/png")
  req.Header.Set("User-Agent","SailingGo nautical tile cache")
- resp,err:=client.Do(req)
- if err!=nil{return nil,err}
+ resp,fetchErr:=client.Do(req)
+ if fetchErr!=nil {
+  result=nauticalFailureResult(fetchErr)
+  err=&nauticalUpstreamError{kind:result,cause:fetchErr}
+  return
+ }
  defer resp.Body.Close()
- if resp.StatusCode!=http.StatusOK {return nil,fmt.Errorf("NOAA status %d",resp.StatusCode)}
- data,err:=io.ReadAll(io.LimitReader(resp.Body,nauticalMaxTileBytes+1))
- if err!=nil{return nil,err}
- if !validNauticalPNG(data) {return nil,fmt.Errorf("NOAA returned non-tile or invalid PNG")}
- return data,nil
+ status=resp.StatusCode
+ if status!=http.StatusOK {
+  result="noaa-http-error"
+  err=&nauticalUpstreamError{kind:result,status:status,cause:fmt.Errorf("upstream status %d",status)}
+  return
+ }
+ data,err=io.ReadAll(io.LimitReader(resp.Body,nauticalMaxTileBytes+1))
+ if err!=nil {
+  result=nauticalFailureResult(err)
+  err=&nauticalUpstreamError{kind:result,status:status,cause:err}
+  return
+ }
+ if !validNauticalPNG(data) {
+  result="noaa-invalid-png"
+  err=&nauticalUpstreamError{kind:result,status:status,cause:fmt.Errorf("invalid image")}
+  return
+ }
+ result="noaa-fetched"
+ return
 }
 
 func parseNauticalTilePath(path string) (z, x, y int, ok bool) {
