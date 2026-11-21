@@ -10,7 +10,7 @@ const guestEnd=source.indexOf('  // A handoff is transferred only through the fr
 const stageStart=source.indexOf('  // Staging is separate from persistence:');
 const stageEnd=source.indexOf('  async function hydrate() {',stageStart);
 assert.ok(guestStart>=0&&guestEnd>guestStart&&stageStart>=0&&stageEnd>stageStart);
-const comparisonStart=source.indexOf('  // Compare preference values,');
+const comparisonStart=source.indexOf('  // Compare canonical preference state,');
 const comparisonEnd=source.indexOf('  function actualParameterChanges(',comparisonStart);
 assert.ok(comparisonStart>=0 && comparisonEnd>comparisonStart);
 const settingsStart=source.indexOf('  function settingsFromPage(fallback) {');
@@ -36,6 +36,7 @@ const makeFixture=({guest=false,failSave=false,conflict=false}={})=>{
   window:{addEventListener(name,fn){if(name==='beforeunload')ctx.beforeunload=fn}},
   document:{documentElement:{classList:{remove(){}}}},
   guestIdentity:guest?'guest-001':'',
+  overlays:['map-show-radar','map-show-smoke'],
   signedIn:!guest,user:guest?'':'reader',initializing:false,applying:false,
   blocked:false,saving:false,dirty:false,suppressUnload:false,
   revision:3,baseline:JSON.parse(JSON.stringify(saved)),
@@ -165,13 +166,23 @@ async function run(){
   const ui=makeFixture({guest:guestMode});
   let radio={value:'map',matches(selector){return selector==="input[name='map-type']";}};
   ui.ctx.params=['wind_unit','map_layer'];
-  ui.ctx.overlays=[];
+  ui.ctx.overlays=['map-show-radar','map-show-smoke'];
+  // Saved records may predate an overlay/category and omit their false keys.
+  // The real page still supplies those unchecked DOM controls on every edit.
+  ui.saved.overlays['map-show-radar']=true;
+  ui.ctx.savedSnapshot.overlays['map-show-radar']=true;
+  ui.ctx.baseline.overlays['map-show-radar']=true;
+  const controls={
+   'map-show-radar':{checked:true},
+   'map-show-smoke':{checked:false},
+  };
+  const category={checked:false,getAttribute(name){return name==='data-marine-category'?'harbors':null}};
   ui.ctx.location={href:'https://weather.themauris.org/planning?wind_unit=kts'};
   ui.ctx.URL=URL;
   ui.ctx.document={
    querySelector(selector){return selector==='input[name="map-type"]:checked'?radio:null},
-   querySelectorAll(){return []},
-   getElementById(){return null},
+   querySelectorAll(selector){return selector==='.map-marine-place-toggle'?[category]:[]},
+   getElementById(id){return controls[id]||null},
    addEventListener(name,handler){if(name==='change')this.changeHandler=handler},
   };
   vm.runInContext(realEventOperations,ui.ctx);
@@ -188,6 +199,14 @@ async function run(){
   assert.equal(ui.discardButton.disabled,true,'real map undo must disable Discard');
   assert.equal(ui.store.has('session:'+(guestMode?ui.ctx.guestDraftKey:ui.ctx.draftKey)),false,'real map undo clears draft');
   assert.equal(ui.requests.length,0,'real map undo must not save');
+  // An actual overlay edit must still be detected, then clear when undone.
+  controls['map-show-smoke'].checked=true;
+  const smoke={id:'map-show-smoke',matches(){return false}};
+  ui.ctx.document.changeHandler({target:smoke});
+  assert.equal(ui.ctx.dirty,true,'enabling an overlay must remain a real change');
+  controls['map-show-smoke'].checked=false;
+  ui.ctx.document.changeHandler({target:smoke});
+  assert.equal(ui.ctx.dirty,false,'overlay reversal must return to saved state');
  }
  console.log('SailingGo explicit Save/Discard: personal, Guest, net-zero edits, 409, failure and unload checks passed.');
 }

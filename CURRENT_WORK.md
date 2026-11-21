@@ -12,6 +12,8 @@
 
 **Verification:** CI exact-head result pending. Run `./devbuild.sh` on the Mac for root test/build, then `./sailing-go -version`. No restart authorized. The new guard unit tests do not establish the current runtime is protected. No merge, issue closure, branch deletion, deployment, tag or release authorized.
 
+**NEXT — canonical preference equality (Build v431):** Owner again reproduced Street → Nautical → Street leaving Save enabled after v430 and requested a comparable state object. The account client's `canonicalState()` now compares saved/current preferences with missing overlay and marine-category flags treated as `false`, and derives `map_layer` from map type. The existing real capture-listener regression now exercises populated controls and an overlay toggle/reversal for both personal and Guest sessions. Only `web/static/account.js`, its JS test, development build lineage and affected docs are changed. No Homepage PUT, schema migration, owner-local settings/data/tokens, NOAA, listener, tunnel or deployment touched. Node regression passed locally; exact-head CI and owner Safari acceptance remain pending.
+
 ---
 
 ## Historical UI and NOAA work (previous CURRENT_WORK snapshot)

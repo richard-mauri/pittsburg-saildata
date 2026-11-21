@@ -59,3 +59,7 @@ On either report view with a verified personal or Guest session, switch **Map Ty
 ### Repro for Map Type event-order regression (Build v430)
 
 On the owner Mac with the current PR candidate, in Safari's Planning and Details map, start with saved **Street Map**. Choose **Nautical Chart** at a supported zoom (9+), confirm Save/Discard activate; choose **Street Map** again, confirm both disable, the unsaved-status text clears and returning to Homepage no longer prompts for unsaved changes. Repeat as Guest and as a personal user. The CI-only JavaScript regression intentionally runs the real capture listener before the simulated map controller updates the `map_layer` URL; this is materially different from testing manually assembled preference values. The map controller must still update the URL normally after the account listener; selected location and overlays remain intact. Mac build/test: `./devbuild.sh` only.
+
+### Canonical saved-state regression (Build v431)
+
+Repeat Street → Nautical → Street with an older saved account/Guest record that has no keys for currently unchecked overlays or marine-place categories. Save and Discard must both disable after the reversal. Turn an overlay on and verify both activate; turn it off and verify both disable again. Test both report views and both account types. The CI-only real capture-handler fixture now includes these controls instead of an empty map, but Safari acceptance remains required.

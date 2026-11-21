@@ -128,8 +128,22 @@
       return /^[a-z_]+$/.test(pair[0]) && pair[0].length <= 48 && typeof pair[1] === "boolean";
     });
   }
-  // Compare preference values, not the number of change events or object key order.
-  // This also handles an edit that exactly reverses an earlier map/overlay change.
+  // Compare canonical preference state, not raw DOM snapshots. Older saved
+  // records omit unchecked overlays/categories, while the live page reports
+  // those same values as false. Both describe the same saved state.
+  function canonicalState(data) {
+    if (!data) return null;
+    const state = JSON.parse(JSON.stringify(data));
+    overlays.forEach(function (id) { state.overlays[id] = !!state.overlays[id]; });
+    Object.keys(state.marineCategories).forEach(function (cat) {
+      state.marineCategories[cat] = !!state.marineCategories[cat];
+    });
+    // A radio selection is authoritative; the map controller updates the URL
+    // after our capturing change listener runs.
+    if (state.mapType === "map") delete state.params.map_layer;
+    else if (state.mapType) state.params.map_layer = state.mapType;
+    return state;
+  }
   function stable(value) {
     if (Array.isArray(value)) return value.map(stable);
     if (value && typeof value === "object") {
@@ -139,7 +153,19 @@
     }
     return value;
   }
-  function same(a,b) { return JSON.stringify(stable(a)) === JSON.stringify(stable(b)); }
+  function same(a,b) {
+    const left = canonicalState(a), right = canonicalState(b);
+    if (left && right) {
+      // A category missing from an older record is the same as unchecked.
+      Object.keys(left.marineCategories).forEach(function(cat) {
+        if (!(cat in right.marineCategories)) right.marineCategories[cat] = false;
+      });
+      Object.keys(right.marineCategories).forEach(function(cat) {
+        if (!(cat in left.marineCategories)) left.marineCategories[cat] = false;
+      });
+    }
+    return JSON.stringify(stable(left)) === JSON.stringify(stable(right));
+  }
   function refreshDirty(next,guest) {
     const key = guest ? guestDraftKey : draftKey;
     const saved = savedSnapshot;
