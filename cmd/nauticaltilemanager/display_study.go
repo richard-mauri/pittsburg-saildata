@@ -31,7 +31,7 @@ func writeDisplayStudy(ctx context.Context,out,endpoint string,client *http.Clie
  if _,err:=os.Lstat(abs);err==nil{return errors.New("display study directory already exists")}else if !os.IsNotExist(err){return err}
  if client==nil {client=&http.Client{Timeout:timeout}}
  if err:=os.Mkdir(abs,0700);err!=nil{return err}
- // Same XYZ footprints at Pittsburg for every rendering variant.
+ // Compare the original Pittsburg tile with an existing Suisun Bay water-area sample.
  const layers="0,1,2,3,4,5,6,7"
  // NOAA validates HonorScamin as integer 1 or 2. Esri documentation
  // identifies 1 as disabling SCAMIN; compare images before concluding effect.
@@ -41,8 +41,12 @@ func writeDisplayStudy(ctx context.Context,out,endpoint string,client *http.Clie
   }},
  }}
  payload,err:=json.Marshal(override);if err!=nil{return err}
+ for _,sample:=range []struct{name string;lon,lat float64}{
+  {"pittsburg",-121.88,38.03},
+  {"suisun-bay",-122.06,38.07},
+ }{
  for _,z:=range []int{13,14,15}{
-  x,y:=xyz(-121.88,38.03,z)
+  x,y:=xyz(sample.lon,sample.lat,z)
   for _,variant:=range []struct{name,display string}{
    {"default",""},{"scamin-off",string(payload)},
   }{
@@ -50,7 +54,7 @@ func writeDisplayStudy(ctx context.Context,out,endpoint string,client *http.Clie
    u,err:=url.Parse(base);if err!=nil{return err}
    if variant.display!="" {q:=u.Query();q.Set("Display_params",variant.display);u.RawQuery=q.Encode()}
    // Preserve exact query in a separate manifest for reproducibility.
-   filename:=fmt.Sprintf("pittsburg-z%d-%s.png",z,variant.name)
+   filename:=fmt.Sprintf("%s-z%d-%s.png",sample.name,z,variant.name)
    meta:=fmt.Sprintf("GET %s\n",u.String())
    if err:=os.WriteFile(filepath.Join(abs,filename+".request.txt"),[]byte(meta),0600);err!=nil{return err}
    data,status,ctype,err:=fetchDisplayStudyPNG(ctx,client,u.String(),retries)
@@ -66,6 +70,7 @@ func writeDisplayStudy(ctx context.Context,out,endpoint string,client *http.Clie
    if err:=atomicPNG(filepath.Join(abs,filename),data);err!=nil{return err}
    fmt.Printf("  %s: %d bytes\n",filename,len(data))
   }
+ }
  }
  fmt.Printf("Display study complete: %s; compare images visually. A returned PNG does not establish override support.\n",abs)
  return nil
