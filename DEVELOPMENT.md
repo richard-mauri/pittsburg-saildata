@@ -309,3 +309,16 @@ go run ./cmd/nauticaltilemanager -west -122.70 -south 37.65 -east -121.45 -north
 ```
 
 Review counts and ensure `NEW_DIR` is new and separate from the accepted cache. **Only after explicit owner approval**, repeat each command with `-download`. Download is serial and may take substantial time; failed acquisitions can be resumed in the same marked directory without overwriting valid tiles. A dry run performs no NOAA requests and creates no directory. Do not change browser supported zooms, launch processes, tunnel, or production cache in this phase.
+
+
+## Current Issue #39 regional SCAMIN-disabled acquisition (2026-11-22)
+
+**Use this section instead of earlier historical z9–16 or z13–14 acquisition examples.** The Mac-hosted SailingGo instance is exposed by Cloudflare Tunnel, not Render. Never restart the service/tunnel or alter the operational cache without separate owner approval. On the Mac, first inspect git status --short --branch, reconcile local changes, then git fetch origin, git checkout charts/39-clean-wms-zoom12-15-samples, and git pull --ff-only origin charts/39-clean-wms-zoom12-15-samples. Follow the existing devbuild.sh workflow for runtime checks.
+
+From ~/projects/sailing-go the owner-approved full-region acquisition command is:
+
+    go run ./cmd/nauticaltilemanager -source noaa -disable-scamin -workers 4 -west -122.70 -south 37.65 -east -121.45 -north 38.35 -min-zoom 12 -max-zoom 15 -max-tiles 13000 -max-bytes 1073741824 -timeout 45s -retries 2 -dir "$PWD/cache/noaa-scamin-regional" -download
+
+Omit -download for a dry run without network or disk writes. Owner confirmed **12,499** planned tiles: z12 176, z13 630, z14 2378, z15 9315, with zero existing in the new directory. Owner has **started**, not yet reported completion of, the four-worker download. Re-run the same command to resume. Workers are bounded 1–8 (default 4); a single collector applies cumulative byte caps and atomic PNG commits. Distinct v3 provenance records HonorScamin=1; do not mix with default v2 NOAA imagery.
+
+Before operational migration, verify final acquisition summary, dry-run inventory (12,499 existing and zero new), counts by zoom, PNG integrity, marker provenance, representative visual quality and seams. Preserve the existing cache/nautical_tiles as a whole-directory rollback; it currently includes 12 manually substituted pilot PNGs and their .png.bak originals. Do not acquire into that modified directory. Swap only after owner approval, verify browser and local Cloudflare-served imagery, and remove backups only after explicit acceptance. No FINISH, Issue closure, service restart, version/tag/release or tunnel changes authorized.
