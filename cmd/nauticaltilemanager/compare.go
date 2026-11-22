@@ -23,6 +23,13 @@ func compareNOAALayers(ctx context.Context,out,endpoint string,client *http.Clie
  if timeout<=0||retries<0||retries>5{return errors.New("invalid -timeout or -retries")}
  abs,err:=filepath.Abs(out);if err!=nil{return err}
  if abs==string(filepath.Separator){return errors.New("refusing filesystem root as comparison directory")}
+ // Refuse a child of ANY managed NOAA/mock dataset, irrespective of the
+ // caller's shell variable. Avoid writing an unmanaged file into an XYZ cache.
+ for parent:=filepath.Dir(abs);;parent=filepath.Dir(parent){
+  marker:=filepath.Join(parent,markerFile)
+  if _,err:=os.Lstat(marker);err==nil{return errors.New("comparison output cannot live inside a managed nautical tile directory")}
+  if parent==filepath.Dir(parent){break}
+ }
  if _,err:=os.Lstat(abs);err==nil{return errors.New("comparison directory already exists: use a new directory (no overwrites)")}else if !os.IsNotExist(err){return err}
  if client==nil{client=&http.Client{Timeout:timeout}}
  // Exact same XYZ tiles and bounding boxes for both layer configurations,
