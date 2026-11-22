@@ -33,6 +33,7 @@ type options struct {
  MaxBytes int64
  Dir, Source string
  AllowLegacyNOAA bool // Internal maintenance only; never exposed as a CLI flag.
+ DisableSCAMIN bool // NOAA only; isolated managed dataset with separate provenance.
  Download bool
  Timeout time.Duration
  Retries int
@@ -63,6 +64,7 @@ func buildPlan(o options) (plan,error) {
  if o.Timeout<=0 {return p,errors.New("-timeout must be positive")}
  if o.Retries<0||o.Retries>5{return p,errors.New("-retries must be within 0..5")}
  if o.Source!="noaa" && o.Source!="mock" {return p,errors.New("-source must be noaa or mock")}
+ if o.DisableSCAMIN && o.Source!="noaa" {return p,errors.New("-disable-scamin requires -source noaa")}
  if o.Source=="mock" && (o.West<mockchart.West||o.East>mockchart.East||
    o.South<mockchart.South||o.North>mockchart.North) {
   return p,errors.New("mock bounds must be inside the test-only Bay-to-Monterey rectangle")
@@ -88,6 +90,7 @@ func (o options) print(p plan) {
 }
 func (o options) signature() string {
  // Original v1 marker retained as source/provenance identity across additions.\n // Caps are enforced cumulatively by the managed-directory inventory.
+ if o.Source=="noaa" && o.DisableSCAMIN {return fmt.Sprintf("SailingGo-managed-XYZ-v3\\nsource=noaa\\nlayers=0,1,2,3,4,5,6,7\\nHonorScamin=1\\nbounds=%.8f,%.8f,%.8f,%.8f\\nzoom=%d..%d\\n",o.West,o.South,o.East,o.North,o.MinZoom,o.MaxZoom)}
  if o.Source=="noaa" {return fmt.Sprintf("SailingGo-managed-XYZ-v2\nsource=noaa\nlayers=0,1,2,3,4,5,6,7\nbounds=%.8f,%.8f,%.8f,%.8f\nzoom=%d..%d\n",o.West,o.South,o.East,o.North,o.MinZoom,o.MaxZoom)}
  return fmt.Sprintf("SailingGo-managed-XYZ-v1\nsource=%s\nbounds=%.8f,%.8f,%.8f,%.8f\nzoom=%d..%d\n",
   o.Source,o.West,o.South,o.East,o.North,o.MinZoom,o.MaxZoom)
@@ -115,9 +118,15 @@ func requestURLWithLayers(base string,z,x,y int,layers string)(string,error){
  u.RawQuery=q.Encode()
  return u.String(),nil
 }
+func withSCAMINDisabled(target string)(string,error){
+ u,err:=url.Parse(target);if err!=nil{return "",err}
+ q:=u.Query();q.Set("Display_params",`{"ECDISParameters":{"DynamicParameters":{"Parameter":[{"name":"HonorScamin","value":1}]}}}`);u.RawQuery=q.Encode()
+ return u.String(),nil
+}
 func getTile(ctx context.Context,o options,base string,client *http.Client,z,x,y int)([]byte,error){
  if o.Source=="mock" {return mockchart.Render(z,x,y)}
  target,err:=requestURL(base,z,x,y);if err!=nil{return nil,err}
+ if o.DisableSCAMIN {target,err=withSCAMINDisabled(target);if err!=nil{return nil,err}}
  req,err:=http.NewRequestWithContext(ctx,http.MethodGet,target,nil);if err!=nil{return nil,err}
  req.Header.Set("Accept","image/png")
  req.Header.Set("User-Agent","SailingGo nautical tile manager")
@@ -225,6 +234,7 @@ func main(){
  flag.StringVar(&o.Dir,"dir","","existing managed directory to extend or new managed directory (required for -download)")
  flag.StringVar(&o.Source,"source","noaa","noaa or mock")
  flag.BoolVar(&o.Download,"download",false,"explicitly enable file creation and NOAA downloads")
+ flag.BoolVar(&o.DisableSCAMIN,"disable-scamin",false,"NOAA only: render all SCAMIN-filtered features; requires separate managed -dir")
  flag.BoolVar(&compareLayers,"compare-layers",false,"save a small separate NOAA WMS 0-12 vs 0-7 diagnostic sample; never touch managed cache")
  flag.StringVar(&compareDir,"compare-dir","","NEW output directory for WMS layer comparison PNG samples")
  flag.BoolVar(&zoomSamples,"zoom-samples",false,"fetch 12 isolated NOAA WMS z12..15 PNGs for visual study; never modify managed cache")
@@ -237,7 +247,7 @@ func main(){
  if flag.NArg()!=0 {fmt.Fprintln(os.Stderr,"unexpected positional arguments");os.Exit(2)}
  if applyPrune&&!prune {fmt.Fprintln(os.Stderr,"-apply-prune requires -prune");os.Exit(2)}
  if displayStudy {
-  if prune||applyPrune||compareLayers||zoomSamples||compareDir!=""||zoomSamplesDir!=""||o.Download||o.Dir!=""||o.Source!="noaa" {fmt.Fprintln(os.Stderr,"-display-study is isolated from acquisition and other diagnostics");os.Exit(2)}
+  if prune||applyPrune||compareLayers||zoomSamples||compareDir!=""||zoomSamplesDir!=""||o.Download||o.Dir!=""||o.Source!="noaa"||o.DisableSCAMIN {fmt.Fprintln(os.Stderr,"-display-study is isolated from acquisition and other diagnostics");os.Exit(2)}
   if err:=writeDisplayStudy(context.Background(),displayStudyDir,noaaURL,&http.Client{Timeout:o.Timeout},o.Timeout,o.Retries);err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)}
   return
  }
