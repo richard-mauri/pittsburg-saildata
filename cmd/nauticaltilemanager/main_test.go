@@ -75,7 +75,7 @@ func TestNOAAWMSAndAtomicOutput(t *testing.T){
   calls.Add(1)
   q:=r.URL.Query()
   if q.Get("REQUEST")!="GetMap"||q.Get("CRS")!="EPSG:3857"||
-    q.Get("WIDTH")!="256"||q.Get("TRANSPARENT")!="TRUE"{
+    q.Get("WIDTH")!="256"||q.Get("TRANSPARENT")!="TRUE"||q.Get("LAYERS")!="0,1,2,3,4,5,6,7"{
    t.Errorf("wrong NOAA WMS query: %v",q)
   }
   w.Header().Set("Content-Type","image/png")
@@ -83,6 +83,11 @@ func TestNOAAWMSAndAtomicOutput(t *testing.T){
  }));defer upstream.Close()
  first,err:=execute(context.Background(),o,upstream.URL,upstream.Client())
  if err!=nil{t.Fatal(err)}
+ marker,err:=os.ReadFile(filepath.Join(o.Dir,markerFile));if err!=nil{t.Fatal(err)}
+ if !strings.HasPrefix(string(marker),"SailingGo-managed-XYZ-v2\\n") ||
+  !strings.Contains(string(marker),"\\nlayers=0,1,2,3,4,5,6,7\\n"){
+  t.Fatalf("clean NOAA dataset marker does not record layer provenance: %q",marker)
+ }
  if calls.Load()!=int32(first.Created){t.Fatalf("upstream calls %d != created %d",calls.Load(),first.Created)}
  second,err:=execute(context.Background(),o,upstream.URL,upstream.Client())
  if err!=nil{t.Fatal(err)}
