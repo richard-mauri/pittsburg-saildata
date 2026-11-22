@@ -136,32 +136,46 @@ function testMapTileFallback(){
  const source=fs.readFileSync('web/templates/sailing.html','utf8');
  const a=source.indexOf('  function applyPreferredBaseMap() {');
  const b=source.indexOf('  function setBaseMapLayer(name) {',a);
- assert.ok(a>=0&&b>a,'actual basemap implementation must be available');
+ const c=source.indexOf('\n  applyPreferredBaseMap();\n',b);
+ assert.ok(a>=0&&b>a&&c>b,'actual basemap implementation must be available');
  const makeLayer=name=>({
   name,addTo(map){map.layers.add(this);map.order.push(this.name);return this},
   bringToFront(){map.order.push(this.name)},setStyle(){}
  });
- const map={layers:new Set(),order:[],hasLayer(x){return this.layers.has(x)},removeLayer(x){this.layers.delete(x)},getZoom(){return 10}};
+ const map={layers:new Set(),order:[],hasLayer(x){return this.layers.has(x)},removeLayer(x){this.layers.delete(x)},getZoom(){return 14}};
  const streetLayer=makeLayer('street');
  const nauticalLayer=makeLayer('nautical');
  const satelliteLayer=makeLayer('satellite');
  const hybridLayer=makeLayer('hybrid');
  const radio=[{value:'map'},{value:'nautical'},{value:'satellite'}];
+ let timeoutStarts=0;
  const context={
   map,streetLayer,nauticalLayer,satelliteLayer,hybridLayer,
   preferredMapLayerName:'nautical',activeMapLayerName:'map',
-  nauticalUnavailable:false,minimumNauticalZoom:9,
+  nauticalUnavailable:false,nauticalCheckTimer:null,nauticalAdvisory:false,nauticalTileLoads:0,
+  nauticalLoading:false,
+  nauticalAutomaticFallback:false,nauticalFailureNotice:false,nauticalStatusMessage:'',minimumNauticalZoom:13,maximumNauticalZoom:14,
+  nauticalMockInspection:false,
   mapState:{cloudOverlayVisible:false,radarOverlayVisible:false},
   cloudLayer:null,radarLayer:null,marineZoneHaloLayer:null,
   marineZoneLayer:null,smokeLayer:null,smokeOutlineLayer:null,
   updateNauticalZoomUI(){},updateSmokeLegendForBaseMap(){},
+  startNauticalResponseCheck(){timeoutStarts++;context.nauticalCheckTimer=1;},
+  stopNauticalWaiting(){context.nauticalCheckTimer=null;},
+  dismissNauticalFailureNotice(){context.nauticalFailureNotice=false;context.nauticalStatusMessage='';},
+  clearTimeout(){context.nauticalCheckTimer=null;},
+  persistPreferredMapLayer(){},
   document:{querySelectorAll(){return radio}},
   effectiveMapLayerName(){return context.preferredMapLayerName},
   baseLayerForName(name){return {map:streetLayer,nautical:nauticalLayer,satellite:satelliteLayer,hybrid:hybridLayer}[name]},
  };
  vm.createContext(context);
  vm.runInContext(source.slice(a,b),context);
+ vm.runInContext(source.slice(b,c),context);
  context.applyPreferredBaseMap();
+ assert.equal(timeoutStarts,1,'initial saved Nautical must arm timeout without Leaflet loading');
+ context.applyPreferredBaseMap();
+ assert.equal(timeoutStarts,1,'reapplying Nautical must not restart the same timeout');
  assert.ok(map.hasLayer(streetLayer),'nautical must retain street underlay');
  assert.ok(map.hasLayer(nauticalLayer),'nautical layer should render over street');
  assert.equal(context.activeMapLayerName,'nautical');
@@ -174,12 +188,28 @@ function testMapTileFallback(){
  assert.equal(context.preferredMapLayerName,'nautical',
   'fallback must not silently change saved preference');
  assert.equal(context.activeMapLayerName,'map');
+ assert.equal(context.nauticalCheckTimer,null,'fallback cancels outstanding timeout');
  context.preferredMapLayerName='satellite';
  context.applyPreferredBaseMap();
  assert.ok(map.hasLayer(satelliteLayer),'satellite selection remains intact');
  assert.ok(!map.hasLayer(streetLayer),'other basemaps should not keep Street');
- assert.ok(source.includes('transparent: true,\n      version: "1.3.0"'),
-  'NOAA WMS must be transparent outside chart coverage');
+ context.setBaseMapLayer('nautical');
+ assert.equal(timeoutStarts,2,'manual Nautical selection must arm timeout without loading event');
+ assert.ok(map.hasLayer(nauticalLayer),'manual Nautical retry should attempt chart display');
+ assert.equal(context.preferredMapLayerName,'nautical','retry retains Nautical preference');
+ assert.ok(source.includes('No nautical chart tiles are available in this area at the current zoom.') &&
+  source.includes('showNauticalFailureNotice(nauticalNoCoverageMessage());'),
+  'a failed viewport must recommend panning or changing zoom without forcing Street');
+ assert.ok(!source.includes('returnToStreetFromNautical();\n    // A final result'),
+  'automatic chart failure must never call the Street transition');
+ assert.ok(source.includes('nauticalStatusText.textContent = status') &&
+  source.includes('nauticalFailureNotice') &&
+  source.includes('nauticalZoomNote.hidden = !selected'),
+  'chart failure must update the below-map status text, not an overlay');
+ assert.ok(source.includes('L.tileLayer("/api/charts/tiles/{z}/{x}/{y}.png"'),
+  'NOAA tiles must always be fetched through the local SailingGo Go endpoint');
+ assert.ok(!source.includes('gis.charttools.noaa.gov'),
+  'browser must not call NOAA chart WMS directly');
  assert.ok(source.includes('ridge::USCOMP-N0Q-0/{z}/{x}/{y}.png'),
   'radar must use IEM cached NEXRAD transparency-preserving tiles');
  assert.ok(!source.includes('L.tileLayer.wms(\n    "https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q.cgi?'),
@@ -187,8 +217,152 @@ function testMapTileFallback(){
  assert.ok(source.includes('radarTileErrors > 0'),
   'partial radar tile failures must be visible to the user');
 }
+// Exercise actual NOAA tile-event logic, including HTTP-successful images
+// which may be visually blank, and requests that never complete.
+function testNauticalResponseDiagnostics(){
+ const source=fs.readFileSync('web/templates/sailing.html','utf8');
+ const a=source.indexOf('  var nauticalTileLoads = 0;');
+ const b=source.indexOf('  function persistPreferredMapLayer() {',a);
+ assert.ok(a>=0&&b>a,'actual nautical status and tile events must be present');
+ // The status is a sibling AFTER the map and footer, never an overlay.
+ const statusMarkup='<div id="map-nautical-zoom-note"';
+ const statusAt=source.indexOf(statusMarkup);
+ const footerAt=source.indexOf('<div class="map-footer-row">');
+ const controlsAt=source.indexOf('<div class="map-state-controls"');
+ assert.ok(footerAt>=0&&statusAt>footerAt&&statusAt<controlsAt,
+  'Nautical status must live outside the map, after its footer');
+ assert.ok(!source.includes('id="map-nautical-progress"') &&
+  !source.includes('id="map-nautical-cancel"') &&
+  !source.includes('id="map-nautical-close"'),
+  'no progress bar, popup buttons or overlay controls may exist');
+ assert.ok(!source.includes('nauticalProgressTimer') &&
+  !source.includes('setNauticalTileVisibility'),
+  'no progress timing or whole-layer tile visibility manipulation');
+ assert.ok(source.includes('.map-nautical-zoom-note[data-state="unavailable"]{color:#ffe1a1;font-weight:800}'),
+  'unavailable status must use a bright high-contrast warning color on the dark page');
+ assert.ok(!source.includes('.map-nautical-zoom-note[data-state="unavailable"]{color:#9b1c1c}'),
+  'the formerly unreadable dark-red warning text must not return');
+
+ const callbacks={};
+ const tileContainer={style:{visibility:''}};
+ const nauticalLayer={options:{maxNativeZoom:14},getTileSize(){return {x:256}},
+  on(name,fn){callbacks[name]=fn;},getContainer(){return tileContainer;}};
+ const note={hidden:true,state:'',setAttribute(name,value){
+  assert.equal(name,'data-state');this.state=value;
+ }};
+ const statusText={textContent:''};
+ const typeInput={disabled:false,setAttribute(){},title:''};
+ const label={classList:{toggle(){}}};
+ const timers=new Map();
+ let timerId=0,viewX=1310,viewY=3166,zoom=13;
+ const map={hasLayer(layer){return layer===nauticalLayer},getZoom(){return zoom},
+  getBounds(){return {getNorthWest(){return {x:viewX,y:viewY}},
+   getSouthEast(){return {x:viewX+0.9,y:viewY+0.9}}};},
+  project(point){return {x:point.x*256,y:point.y*256};}};
+ const context={nauticalLayer,preferredMapLayerName:'nautical',
+  nauticalZoomNote:note,nauticalStatusText:statusText,nauticalTypeInput:typeInput,
+  nauticalTypeLabel:label,minimumNauticalZoom:13,maximumNauticalZoom:14,nauticalMockInspection:false,map,
+  setTimeout(fn,ms){const id=++timerId;timers.set(id,{fn,ms});return id;},
+  clearTimeout(id){timers.delete(id);},
+  updateNauticalZoomUI(){return context.realUpdateNauticalZoomUI();},
+ };
+ vm.createContext(context);
+ vm.runInContext(source.slice(a,b),context);
+ context.realUpdateNauticalZoomUI=()=>vm.runInContext('updateNauticalZoomUI()',context);
+ const success=(x=viewX,y=viewY)=>callbacks.tileload({coords:{z:Math.min(zoom,14),x,y}});
+ const failure=(x=viewX,y=viewY)=>callbacks.tileerror({coords:{z:Math.min(zoom,14),x,y}});
+ const fire=ms=>{const timer=[...timers.entries()].find(([,t])=>t.ms===ms);
+  assert.ok(timer,'expected '+ms+'ms safety timer');timers.delete(timer[0]);timer[1].fn();};
+
+ // A fast cached batch produces no overlay, and a short status below map.
+ callbacks.loading();
+ assert.equal(note.hidden,false,'status line remains outside map');
+ assert.ok(statusText.textContent.includes('Checking chart coverage'));
+ assert.equal(timers.size,1,'only a safety timer; no 200ms progress timer');
+ assert.ok(![...timers.values()].some(t=>t.ms===200));
+ success();
+ callbacks.load();
+ assert.equal(note.hidden,false,'status text remains visible for selected Nautical');
+ assert.ok(statusText.textContent.includes('Chart tiles visible'));
+ assert.equal(context.nauticalLoading,false,'Leaflet completion clears loading state');
+ assert.equal(timers.size,0,'successful load cancels safety timer');
+ assert.equal(tileContainer.style.visibility,'','tile container is never hidden');
+
+ // A failed viewport reports coverage in the same out-of-map status line.
+ zoom=13;viewX=1320;viewY=3170;
+ callbacks.loading();
+ assert.ok(statusText.textContent.includes('Checking chart coverage'));
+ failure();
+ callbacks.load();
+ assert.equal(note.hidden,false);
+ assert.equal(note.state,'unavailable');
+ assert.ok(statusText.textContent.includes('this area at the current zoom'));
+ assert.equal(context.preferredMapLayerName,'nautical');
+ assert.equal(timers.size,0,'settled failures have no wait or dismiss timers');
+
+ // Moving back to known coverage clears the warning and never overlays map.
+ zoom=13;viewX=1310;viewY=3166;
+ context.checkNauticalViewportAfterMove();
+ assert.equal(note.state,'ready');
+ assert.ok(statusText.textContent.includes('Chart tiles visible'));
+
+ // Missing peripheral tile does not erase valid visible chart coverage.
+ callbacks.loading();
+ failure(1311,3166);
+ callbacks.load();
+ assert.equal(note.state,'ready');
+ assert.ok(statusText.textContent.includes('Chart tiles visible'));
+
+ // Distant same-zoom pan uses current XYZ viewport, not zoom history.
+ viewX=1350;viewY=3170;
+ context.checkNauticalViewportAfterMove();
+ assert.equal(note.state,'unavailable');
+ assert.ok(statusText.textContent.includes('this area'));
+ viewX=1310;viewY=3166;
+ context.checkNauticalViewportAfterMove();
+ assert.equal(note.state,'ready');
+
+ // Slow chart requests never pop a progress bar: safety timeout sets status.
+ zoom=14;viewX=2620;viewY=6334;
+ callbacks.loading();
+ assert.equal(timers.size,1);
+ assert.ok(statusText.textContent.includes('Checking chart coverage'));
+ fire(12000);
+ assert.equal(context.nauticalFailureNotice,true);
+ assert.equal(note.state,'unavailable');
+ assert.equal(timers.size,0,'timeout generates no auto-dismiss timer');
+
+ // Loopback mock inspection also uses only text, not a progress overlay.
+ zoom=14;viewX=2640;viewY=6360;
+ context.nauticalMockInspection=true;
+ callbacks.loading();
+ assert.ok(statusText.textContent.includes('Checking mock chart coverage'));
+ assert.ok([...timers.values()].some(t=>t.ms===2500));
+ failure();
+ callbacks.load();
+ assert.equal(note.state,'unavailable');
+ assert.equal(context.preferredMapLayerName,'nautical');
+
+ // Stale timer from an obsolete zoom cannot overwrite the newer state.
+ zoom=13;viewX=1322;viewY=3159;
+ callbacks.loading();
+ const obsolete=[...timers.values()][0].fn;
+ zoom=14;viewX=2644;viewY=6318;
+ callbacks.loading();
+ success();
+ callbacks.load();
+ obsolete();
+ assert.ok(statusText.textContent.includes('Chart tiles visible'));
+ assert.equal(note.state,'ready');
+ assert.equal(tileContainer.style.visibility,'');
+ assert.ok(source.includes('minZoom: 13,') && source.includes('maxZoom: 14,') &&
+  source.includes('maxNativeZoom: 14,'),
+  'accepted NOAA chart interval is native zoom 13-14 only, without overzoom');
+}
+
 async function run(){
  testMapTileFallback();
+ testNauticalResponseDiagnostics();
  await assertChartFailureKeepsPage();
  const personal=makeFixture();
  const next={schema:1,params:{wind_unit:'mph'},overlays:{},mapType:'map',marineCategories:{}};

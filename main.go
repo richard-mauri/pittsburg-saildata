@@ -2137,6 +2137,9 @@ func runServer(
   go reporter.Run(ctx)
  }
  mux := http.NewServeMux()
+ // All browser chart requests terminate at SailingGo. An operator may later
+ // configure a local XYZ chart directory; no NOAA network fetch occurs here.
+ mux.Handle("/api/charts/tiles/", nauticalTileHandler(defaultNauticalCacheDir()))
  if reporter!=nil {
   mux.HandleFunc("/api/activity/ping",reporter.ping)
   mux.HandleFunc("/api/activity/identity",reporter.identity)

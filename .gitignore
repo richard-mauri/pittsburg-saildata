@@ -9,3 +9,6 @@ pittsburg-saildata
 sailing-go
 private/
 .aider*
+
+# Downloaded NOAA raster chart databases remain outside Git.
+*.mbtiles
