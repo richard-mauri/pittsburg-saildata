@@ -280,3 +280,8 @@ open -a Preview cache/noaa-zoom-study-20261122/*.png
 
 This command is an explicit NOAA network operation making **12 requests**; `-zoom-samples-dir` must not point inside a managed NOAA or mock dataset and must not exist yet. It fails closed on a bad HTTP response or invalid image, never overwrites an output, and leaves the original **3,008 z13/14 tiles at `cache/nautical_tiles` untouched**. Any partial output from a failed experiment is restricted to the new sample directory; use a fresh name for a retry. The output uses names `pittsburg-z12-layers-0-7.png` through `delta-junction-z15-layers-0-7.png`. Submit screenshots or images for evaluation; only a further owner `NEXT` after visual acceptance may authorize adding z12 or z15 to managed acquisition/display. Existing service, tunnel, and other user data remain unchanged.
 
+
+
+## NOAA regional zoom study (Issue #39, draft)
+
+The standalone Nautical Tile Manager can plan and acquire bounded NOAA WMS layers 0–7 at native zooms 12–15. The existing public nautical overlay still uses accepted native z13–14 data only. Zoom 12/15 full-region acquisition is an isolated owner-controlled evaluation, not automatically published or merged into the accepted chart cache. See DEVELOPMENT.md for guarded dry-run and acquisition procedure.
