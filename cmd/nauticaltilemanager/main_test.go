@@ -4,6 +4,7 @@ import (
  "bytes"
  "context"
  "encoding/json"
+ "io"
  "net/http"
  "net/http/httptest"
  "os"
@@ -230,4 +231,22 @@ func TestNOAAScaminOffManagedProvenanceAndRequest(t *testing.T) {
  if _,err:=execute(context.Background(),normal,upstream.URL,upstream.Client());err==nil{t.Fatal("SCAMIN-off allowed in default cache")}
  mock:=localPlan();mock.DisableSCAMIN=true
  if _,err:=buildPlan(mock);err==nil{t.Fatal("mock accepted SCAMIN override")}
+}
+
+func TestAcquisitionProgressReportsEachTileAndResume(t *testing.T) {
+ o:=localPlan();o.Download=true;o.Dir=filepath.Join(t.TempDir(),"progress")
+ capture:=func() (string,totals,error) {
+  old:=os.Stdout
+  reader,writer,err:=os.Pipe();if err!=nil{t.Fatal(err)}
+  os.Stdout=writer
+  defer func(){os.Stdout=old;_ = writer.Close();_ = reader.Close()}()
+  result,runErr:=execute(context.Background(),o,"",nil)
+  _=writer.Close()
+  output,readErr:=io.ReadAll(reader);if readErr!=nil{t.Fatal(readErr)}
+  return string(output),result,runErr
+ }
+ first,created,err:=capture();if err!=nil{t.Fatal(err)}
+ if created.Created<1||!strings.Contains(first,"fetching z13/")||!strings.Contains(first,"100.0%")||!strings.Contains(first,"ETA=")||!strings.Contains(first,"saved ("){t.Fatalf("missing acquisition progress: %s",first)}
+ second,resumed,err:=capture();if err!=nil{t.Fatal(err)}
+ if resumed.Created!=0||resumed.Skipped!=created.Created||!strings.Contains(second,"existing")||!strings.Contains(second,"100.0%"){t.Fatalf("missing resume progress: %s",second)}
 }
