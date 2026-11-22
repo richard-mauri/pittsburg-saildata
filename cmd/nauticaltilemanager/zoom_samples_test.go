@@ -79,10 +79,10 @@ func TestZoomSamplesRejectManagedCacheAndInvalidNetworkPNG(t *testing.T){
  if len(entries)!=0{t.Fatal("invalid NOAA PNG was saved")}
 }
 
-func TestExistingManagedAcquisitionStillRejectsZoom12And15(t *testing.T){
+func TestManagedAcquisitionNowAcceptsZoom12And15(t *testing.T){
  for _,zoom:=range []int{12,15}{
   o:=localPlan()
   o.Source="noaa";o.MinZoom=zoom;o.MaxZoom=zoom
-  if _,err:=buildPlan(o);err==nil{t.Fatalf("normal managed acquisition accepted zoom %d",zoom)}
+  if _,err:=buildPlan(o);err!=nil{t.Fatalf("normal managed acquisition rejected zoom %d: %v",zoom,err)}
  }
 }
