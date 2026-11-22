@@ -62,12 +62,12 @@ func TestPruneRefusesUnknownOrMixedDataset(t *testing.T){
  if _,err:=os.Stat(filepath.Join(root,"9"));err!=nil{t.Fatal("prune deleted tiles despite unsafe extra file")}
  if _,err:=os.Stat(extra);err!=nil{t.Fatal("unexpected file removed")}
 }
-func TestRestrictNOAAAcquisitionToNative13And14(t *testing.T){
- for _,pair:=range [][2]int{{9,12},{12,13},{14,15},{15,16},{13,14}} {
+func TestRestrictNOAAAcquisitionToNative12Through15(t *testing.T){
+ for _,pair:=range [][2]int{{9,12},{11,12},{15,16},{16,16},{12,15},{13,14}} {
   o:=localPlan();o.Source="noaa";o.MinZoom=pair[0];o.MaxZoom=pair[1]
   _,err:=buildPlan(o)
-  if pair==[2]int{13,14} {
-   if err!=nil{t.Fatalf("valid 13-14 plan rejected: %v",err)}
+  if pair==[2]int{13,14} || pair==[2]int{12,15} {
+   if err!=nil{t.Fatalf("valid 12-15 plan rejected: %v",err)}
   } else if err==nil{t.Fatalf("bad NOAA range %v accepted",pair)}
  }
 }
