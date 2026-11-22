@@ -33,10 +33,10 @@ func TestPruneDryRunAndExplicitApply(t *testing.T){
  _,before,err:=inspectManaged(options{Source:"noaa",Dir:root,MaxTiles:100,AllowLegacyNOAA:true},plan{})
  if err!=nil||before.Count!=8{t.Fatalf("bad fixture inventory %+v err=%v",before,err)}
  if err:=pruneManaged(o,false);err!=nil{t.Fatal(err)}
- _,afterDry,err:=inspectManaged(options{Source:"noaa",Dir:root,MaxTiles:100},plan{})
+ _,afterDry,err:=inspectManaged(options{Source:"noaa",Dir:root,MaxTiles:100,AllowLegacyNOAA:true},plan{})
  if err!=nil||afterDry!=before{t.Fatalf("dry run mutated dataset: %+v versus %+v",afterDry,before)}
  if err:=pruneManaged(o,true);err!=nil{t.Fatal(err)}
- _,after,err:=inspectManaged(options{Source:"noaa",Dir:root,MaxTiles:100},plan{})
+ _,after,err:=inspectManaged(options{Source:"noaa",Dir:root,MaxTiles:100,AllowLegacyNOAA:true},plan{})
  if err!=nil||after.Count!=2||after.Bytes>=before.Bytes{t.Fatalf("prune didn't retain z13/14 only: %+v %v",after,err)}
  for _,z:=range []int{9,10,11,12,15,16} {
   if _,err:=os.Stat(filepath.Join(root,strconv.Itoa(z)));!os.IsNotExist(err){t.Fatalf("zoom %d not removed: %v",z,err)}
