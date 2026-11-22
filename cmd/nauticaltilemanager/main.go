@@ -194,6 +194,16 @@ func execute(ctx context.Context,o options,base string,client *http.Client)(tota
  if !o.Download{return t,nil}
  if err:=createManagedRoot(dir,o);err!=nil{return t,err}
  t.Bytes=inv.Bytes
+ started:=time.Now()
+ var processed int64
+ progress:=func(z,x,y int,action string){
+  processed++
+  elapsed:=time.Since(started)
+  remaining:="calculating"
+  if processed>0 {remaining=(time.Duration(float64(elapsed)*float64(p.Total-processed)/float64(processed))).Round(time.Second).String()}
+  fmt.Printf("[%d/%d] %.1f%% z%d/%d/%d %s | saved=%d skipped=%d | elapsed=%s ETA=%s\n",processed,p.Total,100*float64(processed)/float64(p.Total),z,x,y,action,t.Created,t.Skipped,elapsed.Round(time.Second),remaining)
+ }
+ fmt.Printf("Acquiring %d planned tiles (new=%d, existing=%d); source=%s, SCAMIN disabled=%t\n",p.Total,inv.New,inv.Overlap,o.Source,o.DisableSCAMIN)
  if client==nil{client=&http.Client{Timeout:o.Timeout}}
  // Serial and deterministic; no unbounded concurrent NOAA downloads.
  for _,row:=range p.Rows{
@@ -203,15 +213,18 @@ func execute(ctx context.Context,o options,base string,client *http.Client)(tota
    if b,err:=os.ReadFile(path);err==nil {
     if !validPNG(b){return t,fmt.Errorf("invalid existing tile, refusing overwrite: %s",path)}
     t.Skipped++
+    progress(row.Z,x,y,"existing")
     if o.MaxBytes>0&&t.Bytes>o.MaxBytes{return t,fmt.Errorf("existing cache exceeds -max-bytes=%d",o.MaxBytes)}
     continue
    }else if !os.IsNotExist(err){return t,err}
+   fmt.Printf("[%d/%d] fetching z%d/%d/%d...\n",processed+1,p.Total,row.Z,x,y)
    b,err:=downloadWithRetry(ctx,o,base,client,row.Z,x,y)
    if err!=nil{return t,fmt.Errorf("tile %d/%d/%d: %w",row.Z,x,y,err)}
    if !validPNG(b){return t,fmt.Errorf("tile %d/%d/%d: invalid PNG",row.Z,x,y)}
    if o.MaxBytes>0&&t.Bytes+int64(len(b))>o.MaxBytes{return t,fmt.Errorf("next tile exceeds -max-bytes=%d; resume with larger budget only if intended",o.MaxBytes)}
    if err:=atomicPNG(path,b);err!=nil{return t,err}
    t.Created++;t.Bytes+=int64(len(b))
+   progress(row.Z,x,y,fmt.Sprintf("saved (%d bytes)",len(b)))
   }}
  }
  fmt.Printf("Saved %d new tiles, verified %d existing tiles, PNG bytes=%d (acquisition restricted to native z12..15)\n",t.Created,t.Skipped,t.Bytes)
