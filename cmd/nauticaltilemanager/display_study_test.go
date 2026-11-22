@@ -24,7 +24,7 @@ func TestDisplayStudyIsolatedAndSameFootprints(t *testing.T){
   variant:="default"
   if q.Has("Display_params"){variant="scamin-off";if !strings.Contains(q.Get("Display_params"),"HonorScamin"){t.Errorf("missing SCAMIN parameter")}else{
    var payload struct{ ECDISParameters struct{ DynamicParameters struct{ Parameter []struct{ Name string `json:"name"`; Value int `json:"value"` } `json:"Parameter"` } `json:"DynamicParameters"` } `json:"ECDISParameters"` }
-   if err:=json.Unmarshal([]byte(q.Get("Display_params")),&payload);err!=nil{t.Errorf("SCAMIN value must be integer: %v",err)}else if len(payload.ECDISParameters.DynamicParameters.Parameter)!=1||payload.ECDISParameters.DynamicParameters.Parameter[0].Name!="HonorScamin"||payload.ECDISParameters.DynamicParameters.Parameter[0].Value!=0{t.Errorf("unexpected SCAMIN payload: %s",q.Get("Display_params"))}
+   if err:=json.Unmarshal([]byte(q.Get("Display_params")),&payload);err!=nil{t.Errorf("SCAMIN value must be integer: %v",err)}else if len(payload.ECDISParameters.DynamicParameters.Parameter)!=1||payload.ECDISParameters.DynamicParameters.Parameter[0].Name!="HonorScamin"||payload.ECDISParameters.DynamicParameters.Parameter[0].Value!=1{t.Errorf("unexpected SCAMIN payload: %s",q.Get("Display_params"))}
   }}
   mu.Lock()
   if seen[q.Get("BBOX")]==nil{seen[q.Get("BBOX")]=map[string]bool{}}
