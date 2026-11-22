@@ -279,3 +279,17 @@ Expected **3,008 planned new files** (z13: 630, z14: 2,378), zero existing. Afte
 
 CI tests using local HTTP fixtures assert normal WMS `LAYERS=0..7`, new v2 marker provenance, resumption and rejection of old v1 NOAA cache mixing. The 8-file comparison still requests both original and visible layer groups. No GitHub CI call contacts NOAA. Owner Mac/Safari actual clean chart visual acceptance remains unverified until reported.
 
+### Clean NOAA z12/z15 quality evaluation — Issue #39
+
+This phase is a **small independent NOAA WMS diagnostic**, not new chart coverage or a browser zoom-range change. The existing z13/z14 `cache/nautical_tiles` dataset (3,008 clean layers-0–7 tiles) and the running Cloudflare instance are preserved. After ensuring a clean local Git tree, pulling the scoped branch and running `./devbuild.sh` **once**, explicitly request 12 images into a new Git-ignored folder:
+
+```sh
+cd ~/projects/sailing-go
+go run ./cmd/nauticaltilemanager \
+  -zoom-samples -timeout 45s -retries 2 \
+  -zoom-samples-dir "$HOME/projects/sailing-go/cache/noaa-zoom-study-20261122"
+open -a Preview cache/noaa-zoom-study-20261122/*.png
+```
+
+Expected output is 12 validated PNGs for Pittsburg, Suisun Bay and Delta junction at native z12,13,14,15, using WMS layers 0–7. The new sample directory **must not already exist**, cannot be inside a managed NOAA/mock cache, and is not served by SailingGo. Compare z12's overview quality and z15's actual chart detail/clutter against the accepted z13/z14 samples. Send images or findings before any proposal to extend Tile Manager native zoom permissions. No server restart, Cloudflare tunnel change, mock dataset alteration, marker migration, personal data migration or production switch. The new unit tests use a local mock WMS, without upstream NOAA traffic. Root `devbuild.sh` runs root-package tests and build once; GitHub CI separately checks standalone commands.
+
