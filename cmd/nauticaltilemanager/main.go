@@ -86,25 +86,9 @@ func (o options) print(p plan) {
  if !o.Download {fmt.Println("DRY RUN: no network or disk writes; pass -download to fetch/save tiles")}
 }
 func (o options) signature() string {
- // Deliberately excludes caps and -download so a stricter resume is safe.
+ // Original v1 marker retained as source/provenance identity across additions.\n // Caps are enforced cumulatively by the managed-directory inventory.
  return fmt.Sprintf("SailingGo-managed-XYZ-v1\nsource=%s\nbounds=%.8f,%.8f,%.8f,%.8f\nzoom=%d..%d\n",
   o.Source,o.West,o.South,o.East,o.North,o.MinZoom,o.MaxZoom)
-}
-func safeOutput(o options) (string,error) {
- if strings.TrimSpace(o.Dir)=="" {return "",errors.New("-dir is required with -download")}
- abs,err:=filepath.Abs(o.Dir);if err!=nil{return "",err}
- if abs==string(filepath.Separator) {return "",errors.New("refusing filesystem root as output")}
- info,err:=os.Lstat(abs)
- if os.IsNotExist(err){
-  if err=os.MkdirAll(abs,0700);err!=nil{return "",err}
-  if err=os.WriteFile(filepath.Join(abs,markerFile),[]byte(o.signature()),0600);err!=nil{return "",err}
-  return abs,nil
- }
- if err!=nil{return "",err}
- if !info.IsDir()||info.Mode()&os.ModeSymlink!=0{return "",errors.New("output must be a real directory")}
- b,err:=os.ReadFile(filepath.Join(abs,markerFile))
- if err!=nil||string(b)!=o.signature(){return "",errors.New("existing directory has no matching Tile Manager marker; refusing to overwrite or mix caches")}
- return abs,nil
 }
 func validPNG(b []byte)bool{
  if len(b)<8||len(b)>maxPNGBytes||!bytes.Equal(b[:8],[]byte{137,80,78,71,13,10,26,10}){return false}
@@ -185,9 +169,17 @@ type totals struct {Skipped,Created int64; Bytes int64}
 func execute(ctx context.Context,o options,base string,client *http.Client)(totals,error){
  var t totals
  p,err:=buildPlan(o);if err!=nil{return t,err}
+ // Validate the entire existing managed dataset and count only genuinely new
+ // XYZ paths before ANY download or cache write.
+ dir,inv,err:=inspectManaged(o,p);if err!=nil{return t,err}
  o.print(p)
+ if o.Dir!="" {
+  fmt.Printf("Managed dataset: existing=%d tiles (%d PNG bytes), overlap=%d, new=%d, projected-total=%d / max-tiles=%d\\n",
+   inv.Count,inv.Bytes,inv.Overlap,inv.New,inv.Count+inv.New,o.MaxTiles)
+ }
  if !o.Download{return t,nil}
- dir,err:=safeOutput(o);if err!=nil{return t,err}
+ if err:=createManagedRoot(dir,o);err!=nil{return t,err}
+ t.Bytes=inv.Bytes
  if client==nil{client=&http.Client{Timeout:o.Timeout}}
  // Serial and deterministic; no unbounded concurrent NOAA downloads.
  for _,row:=range p.Rows{
@@ -196,7 +188,7 @@ func execute(ctx context.Context,o options,base string,client *http.Client)(tota
    path:=filepath.Join(dir,strconv.Itoa(row.Z),strconv.Itoa(x),strconv.Itoa(y)+".png")
    if b,err:=os.ReadFile(path);err==nil {
     if !validPNG(b){return t,fmt.Errorf("invalid existing tile, refusing overwrite: %s",path)}
-    t.Skipped++;t.Bytes+=int64(len(b))
+    t.Skipped++
     if o.MaxBytes>0&&t.Bytes>o.MaxBytes{return t,fmt.Errorf("existing cache exceeds -max-bytes=%d",o.MaxBytes)}
     continue
    }else if !os.IsNotExist(err){return t,err}
@@ -219,11 +211,11 @@ func main(){
  flag.Float64Var(&o.North,"north",math.NaN(),"northern latitude")
  flag.IntVar(&o.MinZoom,"min-zoom",9,"first native nautical zoom (9..16)")
  flag.IntVar(&o.MaxZoom,"max-zoom",12,"last native nautical zoom (9..16)")
- flag.IntVar(&o.MaxTiles,"max-tiles",0,"required hard ceiling on planned XYZ tile count")
+ flag.IntVar(&o.MaxTiles,"max-tiles",0,"required hard ceiling on cumulative XYZ files in the managed directory")
  flag.Int64Var(&o.MaxBytes,"max-bytes",0,"optional total cached PNG bytes ceiling (0 = not configured)")
  flag.DurationVar(&o.Timeout,"timeout",30*time.Second,"NOAA request timeout for each attempt")
  flag.IntVar(&o.Retries,"retries",2,"extra attempts after a timeout or HTTP 429/5xx (0..5)")
- flag.StringVar(&o.Dir,"dir","","isolated output directory (required for -download)")
+ flag.StringVar(&o.Dir,"dir","","existing managed directory to extend or new managed directory (required for -download)")
  flag.StringVar(&o.Source,"source","noaa","noaa or mock")
  flag.BoolVar(&o.Download,"download",false,"explicitly enable file creation and NOAA downloads")
  flag.Parse()
