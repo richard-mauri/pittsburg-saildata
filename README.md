@@ -285,3 +285,12 @@ This command is an explicit NOAA network operation making **12 requests**; `-zoo
 ## NOAA regional zoom study (Issue #39, draft)
 
 The standalone Nautical Tile Manager can plan and acquire bounded NOAA WMS layers 0–7 at native zooms 12–15. The existing public nautical overlay still uses accepted native z13–14 data only. Zoom 12/15 full-region acquisition is an isolated owner-controlled evaluation, not automatically published or merged into the accepted chart cache. See DEVELOPMENT.md for guarded dry-run and acquisition procedure.
+
+
+## Current nautical chart status — Issue #39 / draft PR #40 (2026-11-22)
+
+**This section supersedes older historical zoom and acquisition instructions above.** SailingGo runs on the owner's Mac behind Cloudflare Tunnel, **not Render**. The Go server serves local chart PNGs from the cache selected by sailgo.sh (cache/nautical_tiles); the browser uses same-origin /api/charts/tiles/z/x/y.png. The current Nautical display supports native **z12–15**.
+
+The standalone Go Nautical Tile Manager supports dry-run-first NOAA WMS layers 0–7 at native z12–15. Opt-in **-disable-scamin** sends integer HonorScamin=1 in Display_params and creates distinct **v3** managed provenance, isolated from default v2 NOAA datasets. **-workers 4** is the default, configurable 1–8; bounded concurrent downloads retain atomic writes, cumulative byte limits, retries, resumption and per-tile progress/ETA. Owner-reviewed Suisun Bay imagery showed restored depth soundings at z13/z15.
+
+The owner approved full-region regeneration within west -122.70, south 37.65, east -121.45, north 38.35: **12,499** tiles (z12 176, z13 630, z14 2,378, z15 9,315). The owner confirmed the exact dry-run and **started** a four-worker download into separate cache/noaa-scamin-regional; completion has **not** been reported. Existing cache/nautical_tiles contains 12 manually substituted pilot PNGs with .png.bak originals, per owner report. Do not remove backups or swap directories until validated and explicitly approved. See DEVELOPMENT.md for the current procedure. No tunnel/service restart or PR merge is authorized.
