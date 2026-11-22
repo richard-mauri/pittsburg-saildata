@@ -260,8 +260,9 @@ func execute(ctx context.Context,o options,base string,client *http.Client)(tota
 }
 func main(){
  var o options
- var prune,applyPrune,compareLayers,zoomSamples,displayStudy bool
- var compareDir,zoomSamplesDir,displayStudyDir string
+ var prune,applyPrune,compareLayers,zoomSamples,displayStudy,seamStudy bool
+ var compareDir,zoomSamplesDir,displayStudyDir,seamStudyDir string
+ var seamLon,seamLat float64
  flag.Float64Var(&o.West,"west",math.NaN(),"western longitude")
  flag.Float64Var(&o.South,"south",math.NaN(),"southern latitude")
  flag.Float64Var(&o.East,"east",math.NaN(),"eastern longitude")
@@ -283,11 +284,21 @@ func main(){
  flag.StringVar(&zoomSamplesDir,"zoom-samples-dir","","NEW output directory for zoom 12..15 study PNGs")
  flag.BoolVar(&displayStudy,"display-study",false,"save isolated NOAA default vs experimental SCAMIN comparison; never modify managed cache")
  flag.StringVar(&displayStudyDir,"display-study-dir","","NEW output directory for NOAA display study")
+ flag.BoolVar(&seamStudy,"seam-study",false,"isolated 2x2 XYZ versus single 512px NOAA WMS seam comparison")
+ flag.StringVar(&seamStudyDir,"seam-study-dir","","NEW directory for seam comparison (outside managed cache)")
+ flag.Float64Var(&seamLon,"seam-lon",-121.94,"longitude at diagnostic seam")
+ flag.Float64Var(&seamLat,"seam-lat",38.06,"latitude at diagnostic seam")
  flag.BoolVar(&prune,"prune",false,"plan removal of NOAA cached tiles outside native zoom 13..14 (dry-run default)")
  flag.BoolVar(&applyPrune,"apply-prune",false,"with -prune, explicitly delete zooms 9..12 and 15..16 from managed NOAA dataset")
  flag.Parse()
  if flag.NArg()!=0 {fmt.Fprintln(os.Stderr,"unexpected positional arguments");os.Exit(2)}
  if applyPrune&&!prune {fmt.Fprintln(os.Stderr,"-apply-prune requires -prune");os.Exit(2)}
+ if seamStudy {
+  if prune||applyPrune||compareLayers||zoomSamples||displayStudy||o.Download||o.Dir!=""||o.Source!="noaa"||o.DisableSCAMIN||compareDir!=""||zoomSamplesDir!=""||displayStudyDir!="" {fmt.Fprintln(os.Stderr,"-seam-study is isolated from acquisition and other modes");os.Exit(2)}
+  if err:=writeSeamStudy(context.Background(),seamStudyDir,noaaURL,&http.Client{Timeout:o.Timeout},seamLon,seamLat);err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)}
+  return
+ }
+ if seamStudyDir!="" {fmt.Fprintln(os.Stderr,"-seam-study-dir requires -seam-study");os.Exit(2)}
  if displayStudy {
   if prune||applyPrune||compareLayers||zoomSamples||compareDir!=""||zoomSamplesDir!=""||o.Download||o.Dir!=""||o.Source!="noaa"||o.DisableSCAMIN {fmt.Fprintln(os.Stderr,"-display-study is isolated from acquisition and other diagnostics");os.Exit(2)}
   if err:=writeDisplayStudy(context.Background(),displayStudyDir,noaaURL,&http.Client{Timeout:o.Timeout},o.Timeout,o.Retries);err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)}
