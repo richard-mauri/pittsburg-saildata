@@ -3,6 +3,7 @@ package main
 import (
  "bytes"
  "context"
+ "encoding/json"
  "net/http"
  "net/http/httptest"
  "os"
@@ -201,4 +202,28 @@ func TestExtendDryRunDoesNotModifyExisting(t *testing.T){
  }
  _,inv,err:=inspectManaged(o,mustPlan(t,o))
  if err!=nil||inv.Count!=first.Created||inv.New==0{t.Fatalf("dry-run inventory wrong: %+v err=%v",inv,err)}
+}
+
+func TestNOAAScaminOffManagedProvenanceAndRequest(t *testing.T) {
+ o:=localPlan();o.Source="noaa";o.DisableSCAMIN=true;o.Download=true;o.Dir=filepath.Join(t.TempDir(),"scamin-off")
+ data,err:=mockchart.Render(9,81,197);if err!=nil{t.Fatal(err)}
+ var calls atomic.Int32
+ upstream:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
+  calls.Add(1)
+  var v struct{ECDISParameters struct{DynamicParameters struct{Parameter []struct{Name string `json:"name"`;Value int `json:"value"`} `json:"Parameter"`} `json:"DynamicParameters"`} `json:"ECDISParameters"`}
+  if err:=json.Unmarshal([]byte(r.URL.Query().Get("Display_params")),&v);err!=nil||len(v.ECDISParameters.DynamicParameters.Parameter)!=1||v.ECDISParameters.DynamicParameters.Parameter[0].Name!="HonorScamin"||v.ECDISParameters.DynamicParameters.Parameter[0].Value!=1{t.Errorf("wrong SCAMIN-off WMS query: %v, %v",r.URL.Query(),err)}
+  w.Header().Set("Content-Type","image/png");_,_=w.Write(data)
+ }));defer upstream.Close()
+ first,err:=execute(context.Background(),o,upstream.URL,upstream.Client());if err!=nil{t.Fatal(err)}
+ if first.Created<1||calls.Load()!=int32(first.Created){t.Fatalf("unexpected acquisition %+v, calls=%d",first,calls.Load())}
+ marker,err:=os.ReadFile(filepath.Join(o.Dir,markerFile));if err!=nil||!strings.HasPrefix(string(marker),"SailingGo-managed-XYZ-v3\n")||!strings.Contains(string(marker),"\nHonorScamin=1\n"){t.Fatalf("wrong SCAMIN provenance %q %v",marker,err)}
+ again,err:=execute(context.Background(),o,upstream.URL,upstream.Client());if err!=nil||again.Created!=0||again.Skipped!=first.Created{t.Fatalf("SCAMIN resume failed %+v %v",again,err)}
+ normal:=o;normal.DisableSCAMIN=false
+ if _,err:=execute(context.Background(),normal,upstream.URL,upstream.Client());err==nil{t.Fatal("default NOAA allowed in SCAMIN-off cache")}
+ normal.Dir=filepath.Join(t.TempDir(),"default")
+ if _,err:=execute(context.Background(),normal,upstream.URL,upstream.Client());err!=nil{t.Fatal(err)}
+ normal.DisableSCAMIN=true
+ if _,err:=execute(context.Background(),normal,upstream.URL,upstream.Client());err==nil{t.Fatal("SCAMIN-off allowed in default cache")}
+ mock:=localPlan();mock.DisableSCAMIN=true
+ if _,err:=buildPlan(mock);err==nil{t.Fatal("mock accepted SCAMIN override")}
 }
