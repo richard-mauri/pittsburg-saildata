@@ -37,14 +37,16 @@ func TestDisplayStudyIsolatedAndSameFootprints(t *testing.T){
  parent:=t.TempDir()
  out:=filepath.Join(parent,"display-study")
  if err:=writeDisplayStudy(context.Background(),out,server.URL,server.Client(),time.Second,0);err!=nil{t.Fatal(err)}
+ for _,sample:=range []string{"pittsburg","suisun-bay"}{
  for _,z:=range []string{"13","14","15"}{
   for _,variant:=range []string{"default","scamin-off"}{
-   file:=filepath.Join(out,"pittsburg-z"+z+"-"+variant+".png")
+   file:=filepath.Join(out,sample+"-z"+z+"-"+variant+".png")
    if b,err:=os.ReadFile(file);err!=nil||!validPNG(b){t.Fatalf("missing/invalid %s: %v",file,err)}
    if _,err:=os.Stat(file+".request.txt");err!=nil{t.Fatal(err)}
   }
  }
- if len(seen)!=3{t.Fatalf("expected three distinct footprints, got %d",len(seen))}
+ }
+ if len(seen)!=6{t.Fatalf("expected six distinct footprints, got %d",len(seen))}
  for bbox,v:=range seen{if !v["default"]||!v["scamin-off"]{t.Fatalf("unpaired footprint %s: %v",bbox,v)}}
  if err:=writeDisplayStudy(context.Background(),out,server.URL,server.Client(),time.Second,0);err==nil{t.Fatal("allowed output overwrite")}
 }
@@ -70,11 +72,13 @@ func TestDisplayStudyCapturesExceptionAndContinues(t *testing.T){
  defer server.Close()
  out:=filepath.Join(t.TempDir(),"exception-study")
  if err:=writeDisplayStudy(context.Background(),out,server.URL,server.Client(),time.Second,0);err!=nil{t.Fatal(err)}
+ for _,sample:=range []string{"pittsburg","suisun-bay"}{
  for _,z:=range []string{"13","14","15"}{
-  if b,err:=os.ReadFile(filepath.Join(out,"pittsburg-z"+z+"-default.png"));err!=nil||!validPNG(b){t.Fatalf("missing default z%s: %v",z,err)}
-  failed:=filepath.Join(out,"pittsburg-z"+z+"-scamin-off.png")
+  if b,err:=os.ReadFile(filepath.Join(out,sample+"-z"+z+"-default.png"));err!=nil||!validPNG(b){t.Fatalf("missing default z%s: %v",z,err)}
+  failed:=filepath.Join(out,sample+"-z"+z+"-scamin-off.png")
   if _,err:=os.Stat(failed);!os.IsNotExist(err){t.Fatalf("invalid PNG written for z%s",z)}
   report,err:=os.ReadFile(failed+".response.txt")
   if err!=nil||!strings.Contains(string(report),"unsupported Display_params"){t.Fatalf("missing exception report z%s: %v",z,err)}
+ }
  }
 }
