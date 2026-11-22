@@ -294,3 +294,12 @@ The standalone `cmd/nauticaltilemanager/zoom_samples.go` adds explicit diagnosti
 ## Issue #39 managed NOAA acquisition boundary
 
 The standalone Tile Manager's permitted native NOAA planning/acquisition zoom range is 12–15. Existing disk-only runtime chart delivery and browser Nautical display remain restricted to 13–14; the CLI's broader range does not modify runtime behavior. The owner-approved study uses a distinct v2 layers-0–7 managed root for z12/z15 with the same bounding rectangle as the accepted 3,008 z13/z14 PNGs. The tool enforces cumulative tile/byte limits, refuses unmarked or source-mismatched roots, validates 256×256 PNGs and does not overwrite existing tiles. Publication, consolidation and runtime zoom expansion require separate approval.
+
+
+## Current nautical chart pipeline — Issue #39 / draft PR #40 (2026-11-22)
+
+**Supersedes older z9–16 and z13–14 design snapshots above.** SailingGo runs on the owner Mac behind Cloudflare Tunnel. The same-origin Go chart endpoint reads XYZ PNGs from the local directory configured by sailgo.sh (cache/nautical_tiles); browser Nautical native zoom is **12–15**. The runtime chart handler is read-only; standalone cmd/nauticaltilemanager performs NOAA WMS acquisition separately.
+
+The manager plans inclusive XYZ tiles at z12–15, dry-run by default, using NOAA layers 0–7 and fully validated 256x256 PNGs. Opt-in -disable-scamin sends Display_params HonorScamin=1 and requires a separate v3 managed marker, preventing mixing with v2 default NOAA imagery. -workers defaults to 4 (range 1–8). Bounded concurrent workers fetch tiles; one result collector serializes cumulative byte-cap accounting, PNG validation, atomic non-overwriting writes and progress. On failure it cancels scheduling and drains workers; completed tiles remain resumable. The manually modified operational cache with .png.bak files is not a managed acquisition destination.
+
+The approved regional bounds are -122.70,37.65,-121.45,38.35 with **12,499** tiles (176/630/2378/9315 at z12/13/14/15). A 12-tile Suisun Bay pilot succeeded. The owner has started the separate full-region download to cache/noaa-scamin-regional; completion, promotion and backup cleanup are pending. No Cloudflare Tunnel or production process changes are part of this PR.
