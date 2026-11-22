@@ -232,3 +232,19 @@ go run ./cmd/nauticaltilemanager -west -122.05 -south 37.91 -east -121.75 -north
 ```
 
 Expected if only the original 756 tiles are present: new plan **3,174** and cumulative **3,930** files. If an actual inventory differs, investigate before downloading. After owner acceptance of dry-run limits, append `-download` to the *same* command. Dry-run uses no network/disk writes; explicit download writes only newly requested files under the managed root, preserves existing files and performs no launcher/tunnel changes. `-max-tiles` is the cumulative full-directory ceiling, not merely a cap on the new selection. This is a separate CLI operation from `./devbuild.sh` (root Go app tests/build); GitHub CI tests/builds the command itself. Owner Mac/Safari NOAA detail still requires inspection after acquisition.
+
+### Owner NEXT: retire unused NOAA native zooms safely (2026-11-22)
+
+The owner's successful 3,930-file NOAA cache occupies approximately 44 MiB on disk. Safari acceptance established that only **native z13 and z14** contain useful chart detail; other zooms are unnecessary or introduce overscale imagery. Update the existing Issue #37 / Draft PR #38 branch only after inspecting a clean owner-local working tree, then run `./devbuild.sh` once. The standalone Go Tile Manager and browser checks also run independently in GitHub CI.
+
+On the owner Mac, with `$HOME/projects/sailing-go/cache/nautical_tiles` confirmed to be the existing manager-marked NOAA directory, run the CLI **without `-download`** and review its dry-run report:
+
+```sh
+go run ./cmd/nauticaltilemanager -source noaa \
+  -dir "$HOME/projects/sailing-go/cache/nautical_tiles" -prune
+```
+
+Expected if unchanged: retain 213 native z13/14 PNGs and propose deletion of 3,717 PNGs across z9–12 and z15–16. **Do not delete if actual inventory differs unexpectedly.** If satisfied, owner may explicitly add `-apply-prune` to the same command to delete those obsolete levels. Validate `find cache/nautical_tiles -type f -name '*.png' | wc -l` and `du -sh cache/nautical_tiles`. The program rejects unrelated files, symlinks, source-mismatched markers, and an unmarked folder. It does not restart the server or modify any tunnel.
+
+After cleanup, a follow-on dry-run using `-min-zoom 13 -max-zoom 14`, `-max-tiles 5000` and a broader selected rectangle can calculate incremental remaining capacity; the tool rejects any acquisition spanning other native zooms. Current browser maps show Nautical at z13/14 and Street outside that range, preserving the Nautical preference without global map-type switching. Review the on-Mac visual behavior separately before FINISH; no deployment or live process/tunnel change is authorized.
+
