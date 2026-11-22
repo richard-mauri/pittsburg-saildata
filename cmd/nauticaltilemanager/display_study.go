@@ -17,7 +17,7 @@ import (
 )
 
 // writeDisplayStudy compares identical NOAA XYZ footprints under default
-// rendering and an explicitly experimental SCAMIN override. It does not
+// rendering and an explicitly experimental integer SCAMIN override. It does not
 // assume the public WMS honors vendor-specific display parameters.
 func writeDisplayStudy(ctx context.Context,out,endpoint string,client *http.Client,timeout time.Duration,retries int) error {
  if strings.TrimSpace(out)=="" {return errors.New("-display-study-dir is required")}
@@ -37,7 +37,7 @@ func writeDisplayStudy(ctx context.Context,out,endpoint string,client *http.Clie
  // confirmed for NOAA's public WMS. Never interpret HTTP 200 as proof.
  override:=map[string]interface{}{"ECDISParameters":map[string]interface{}{
   "DynamicParameters":map[string]interface{}{"Parameter":[]map[string]interface{}{
-   {"name":"HonorScamin","value":false},
+   {"name":"HonorScamin","value":0},
   }},
  }}
  payload,err:=json.Marshal(override);if err!=nil{return err}
