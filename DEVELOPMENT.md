@@ -248,3 +248,17 @@ Expected if unchanged: retain 213 native z13/14 PNGs and propose deletion of 3,7
 
 After cleanup, a follow-on dry-run using `-min-zoom 13 -max-zoom 14`, `-max-tiles 5000` and a broader selected rectangle can calculate incremental remaining capacity; the tool rejects any acquisition spanning other native zooms. Current browser maps show Nautical at z13/14 and Street outside that range, preserving the Nautical preference without global map-type switching. Review the on-Mac visual behavior separately before FINISH; no deployment or live process/tunnel change is authorized.
 
+### NEXT: inspect isolated NOAA WMS layer samples (2026-11-22)
+
+Owner's Safari screenshot at native zoom 14 over Suisun Bay shows repeated triangular/overscale-like shapes even after limiting acquisition to native z13–14 and broadening coverage to 3,008 PNGs. The immediate comparison phase intentionally makes **no replacement** of the live managed cache. After updating the draft branch with a clean Mac working tree, run `./devbuild.sh` once (root Go tests/build). The standalone comparison command makes eight explicit NOAA WMS requests and writes **only** eight validated PNGs to a **new** Git-ignored diagnostic directory:
+
+```sh
+cd ~/projects/sailing-go
+go run ./cmd/nauticaltilemanager \
+  -compare-layers -timeout 45s -retries 2 \
+  -compare-dir "$HOME/projects/sailing-go/cache/noaa-layer-comparison-20261122"
+open -a Preview cache/noaa-layer-comparison-20261122/*.png
+```
+
+This requires that the named output directory not already exist; if it exists (including after a failed partial run), choose a new suffixed directory. The comparison requests identical XYZ/BBOX sample pairs at native z13 and 14 near Pittsburg and Suisun Bay, with layers **0–12 versus 0–7**. Review the matching image pairs for triangle removal and retention of sounding/buoy/channel detail; compare PNG bytes alone is not visual acceptance. Never move these diagnostics into `cache/nautical_tiles`, delete the 3,008 production-like NOAA PNGs, or restart the running service/tunnel during this phase. The existing `-download` WMS layers remain unchanged pending acceptance; CI uses a fake local WMS server with no NOAA network.
+
