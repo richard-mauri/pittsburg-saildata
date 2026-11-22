@@ -18,6 +18,7 @@ import (
  "path/filepath"
  "strconv"
  "strings"
+ "sync"
  "time"
 
  "pittsburg-saildata/internal/mockchart"
@@ -29,7 +30,7 @@ const markerFile = ".sailing-nautical-tile-manager.json"
 
 type options struct {
  West, South, East, North float64
- MinZoom, MaxZoom, MaxTiles int
+ MinZoom, MaxZoom, MaxTiles, Workers int
  MaxBytes int64
  Dir, Source string
  AllowLegacyNOAA bool // Internal maintenance only; never exposed as a CLI flag.
@@ -59,6 +60,7 @@ func buildPlan(o options) (plan,error) {
  if o.MinZoom<12 || o.MaxZoom>15 || o.MinZoom>o.MaxZoom {
   return p,errors.New("managed NOAA tile acquisition is restricted to native zooms 12..15")
  }
+ if o.Workers<0||o.Workers>8{return p,errors.New("-workers must be within 1..8")}
  if o.MaxTiles<=0 {return p,errors.New("-max-tiles must be positive")}
  if o.MaxBytes<0 {return p,errors.New("-max-bytes must be nonnegative")}
  if o.Timeout<=0 {return p,errors.New("-timeout must be positive")}
@@ -183,50 +185,76 @@ type totals struct {Skipped,Created int64; Bytes int64}
 func execute(ctx context.Context,o options,base string,client *http.Client)(totals,error){
  var t totals
  p,err:=buildPlan(o);if err!=nil{return t,err}
- // Validate the entire existing managed dataset and count only genuinely new
- // XYZ paths before ANY download or cache write.
  dir,inv,err:=inspectManaged(o,p);if err!=nil{return t,err}
  o.print(p)
- if o.Dir!="" {
-  fmt.Printf("Managed dataset: existing=%d tiles (%d PNG bytes), overlap=%d, new=%d, projected-total=%d / max-tiles=%d\n",
-   inv.Count,inv.Bytes,inv.Overlap,inv.New,inv.Count+inv.New,o.MaxTiles)
- }
+ if o.Dir!="" {fmt.Printf("Managed dataset: existing=%d tiles (%d PNG bytes), overlap=%d, new=%d, projected-total=%d / max-tiles=%d\n",inv.Count,inv.Bytes,inv.Overlap,inv.New,inv.Count+inv.New,o.MaxTiles)}
  if !o.Download{return t,nil}
  if err:=createManagedRoot(dir,o);err!=nil{return t,err}
  t.Bytes=inv.Bytes
+ if o.MaxBytes>0&&t.Bytes>o.MaxBytes{return t,fmt.Errorf("existing cache exceeds -max-bytes=%d",o.MaxBytes)}
+ workers:=o.Workers
+ if workers==0{workers=1} // Backward-compatible default for direct callers.
+ if client==nil{client=&http.Client{Timeout:o.Timeout}}
+ ctx,cancel:=context.WithCancel(ctx);defer cancel()
+ type tileJob struct{z,x,y int}
+ type tileResult struct{job tileJob;b []byte;existing bool;err error}
+ jobs:=make(chan tileJob)
+ results:=make(chan tileResult,workers)
+ var wg sync.WaitGroup
+ for i:=0;i<workers;i++{
+  wg.Add(1)
+  go func(){
+   defer wg.Done()
+   for j:=range jobs{
+    path:=filepath.Join(dir,strconv.Itoa(j.z),strconv.Itoa(j.x),strconv.Itoa(j.y)+".png")
+    var result tileResult
+    result.job=j
+    if b,e:=os.ReadFile(path);e==nil{
+     if !validPNG(b){result.err=fmt.Errorf("invalid existing tile, refusing overwrite: %s",path)}else{result.existing=true}
+    }else if !os.IsNotExist(e){result.err=e
+    }else{
+     result.b,result.err=downloadWithRetry(ctx,o,base,client,j.z,j.x,j.y)
+    }
+    results<-result
+   }
+  }()
+ }
+ go func(){
+  defer close(jobs)
+  for _,row:=range p.Rows{
+   for x:=row.X0;x<=row.X1;x++{for y:=row.Y0;y<=row.Y1;y++{
+    select{case <-ctx.Done():return;case jobs<-tileJob{row.Z,x,y}:}
+   }}
+  }
+ }()
+ go func(){wg.Wait();close(results)}()
  started:=time.Now()
  var processed int64
- progress:=func(z,x,y int,action string){
+ var firstErr error
+ fmt.Printf("Acquiring %d planned tiles (new=%d, existing=%d); source=%s, SCAMIN disabled=%t, workers=%d\n",p.Total,inv.New,inv.Overlap,o.Source,o.DisableSCAMIN,workers)
+ for r:=range results{
+  if firstErr!=nil{continue} // Drain workers safely after cancellation.
+  j:=r.job
+  if r.err!=nil{firstErr=fmt.Errorf("tile %d/%d/%d: %w",j.z,j.x,j.y,r.err);cancel();continue}
+  action:="existing"
+  if r.existing{t.Skipped++}else{
+   if !validPNG(r.b){firstErr=fmt.Errorf("tile %d/%d/%d: invalid PNG",j.z,j.x,j.y);cancel();continue}
+   if o.MaxBytes>0&&t.Bytes+int64(len(r.b))>o.MaxBytes{
+    firstErr=fmt.Errorf("next tile exceeds -max-bytes=%d; resume with larger budget only if intended",o.MaxBytes);cancel();continue
+   }
+   path:=filepath.Join(dir,strconv.Itoa(j.z),strconv.Itoa(j.x),strconv.Itoa(j.y)+".png")
+   if err:=atomicPNG(path,r.b);err!=nil{firstErr=err;cancel();continue}
+   t.Created++;t.Bytes+=int64(len(r.b))
+   action=fmt.Sprintf("saved (%d bytes)",len(r.b))
+  }
   processed++
   elapsed:=time.Since(started)
-  remaining:="calculating"
-  if processed>0 {remaining=(time.Duration(float64(elapsed)*float64(p.Total-processed)/float64(processed))).Round(time.Second).String()}
-  fmt.Printf("[%d/%d] %.1f%% z%d/%d/%d %s | saved=%d skipped=%d | elapsed=%s ETA=%s\n",processed,p.Total,100*float64(processed)/float64(p.Total),z,x,y,action,t.Created,t.Skipped,elapsed.Round(time.Second),remaining)
+  eta:="calculating"
+  if processed>0{eta=time.Duration(float64(elapsed)*float64(p.Total-processed)/float64(processed)).Round(time.Second).String()}
+  fmt.Printf("[%d/%d] %.1f%% z%d/%d/%d %s | saved=%d skipped=%d | elapsed=%s ETA=%s\n",processed,p.Total,100*float64(processed)/float64(p.Total),j.z,j.x,j.y,action,t.Created,t.Skipped,elapsed.Round(time.Second),eta)
  }
- fmt.Printf("Acquiring %d planned tiles (new=%d, existing=%d); source=%s, SCAMIN disabled=%t\n",p.Total,inv.New,inv.Overlap,o.Source,o.DisableSCAMIN)
- if client==nil{client=&http.Client{Timeout:o.Timeout}}
- // Serial and deterministic; no unbounded concurrent NOAA downloads.
- for _,row:=range p.Rows{
-  for x:=row.X0;x<=row.X1;x++{for y:=row.Y0;y<=row.Y1;y++{
-   select{case <-ctx.Done():return t,ctx.Err();default:}
-   path:=filepath.Join(dir,strconv.Itoa(row.Z),strconv.Itoa(x),strconv.Itoa(y)+".png")
-   if b,err:=os.ReadFile(path);err==nil {
-    if !validPNG(b){return t,fmt.Errorf("invalid existing tile, refusing overwrite: %s",path)}
-    t.Skipped++
-    progress(row.Z,x,y,"existing")
-    if o.MaxBytes>0&&t.Bytes>o.MaxBytes{return t,fmt.Errorf("existing cache exceeds -max-bytes=%d",o.MaxBytes)}
-    continue
-   }else if !os.IsNotExist(err){return t,err}
-   fmt.Printf("[%d/%d] fetching z%d/%d/%d...\n",processed+1,p.Total,row.Z,x,y)
-   b,err:=downloadWithRetry(ctx,o,base,client,row.Z,x,y)
-   if err!=nil{return t,fmt.Errorf("tile %d/%d/%d: %w",row.Z,x,y,err)}
-   if !validPNG(b){return t,fmt.Errorf("tile %d/%d/%d: invalid PNG",row.Z,x,y)}
-   if o.MaxBytes>0&&t.Bytes+int64(len(b))>o.MaxBytes{return t,fmt.Errorf("next tile exceeds -max-bytes=%d; resume with larger budget only if intended",o.MaxBytes)}
-   if err:=atomicPNG(path,b);err!=nil{return t,err}
-   t.Created++;t.Bytes+=int64(len(b))
-   progress(row.Z,x,y,fmt.Sprintf("saved (%d bytes)",len(b)))
-  }}
- }
+ if firstErr!=nil{return t,firstErr}
+ if err:=ctx.Err();err!=nil{return t,err}
  fmt.Printf("Saved %d new tiles, verified %d existing tiles, PNG bytes=%d (acquisition restricted to native z12..15)\n",t.Created,t.Skipped,t.Bytes)
  return t,nil
 }
@@ -240,6 +268,7 @@ func main(){
  flag.Float64Var(&o.North,"north",math.NaN(),"northern latitude")
  flag.IntVar(&o.MinZoom,"min-zoom",13,"first native nautical zoom (12..15)")
  flag.IntVar(&o.MaxZoom,"max-zoom",14,"last native nautical zoom (12..15)")
+ flag.IntVar(&o.Workers,"workers",4,"concurrent tile requests (1..8; default 4)")
  flag.IntVar(&o.MaxTiles,"max-tiles",0,"required hard ceiling on cumulative XYZ files in the managed directory")
  flag.Int64Var(&o.MaxBytes,"max-bytes",0,"optional total cached PNG bytes ceiling (0 = not configured)")
  flag.DurationVar(&o.Timeout,"timeout",30*time.Second,"NOAA request timeout for each attempt")
