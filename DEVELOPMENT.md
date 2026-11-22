@@ -211,7 +211,7 @@ cd ~/projects/sailing-go
 go run ./cmd/nauticaltilemanager -west -123 -south 36.5 -east -121.45 -north 38.45 -min-zoom 9 -max-zoom 12 -max-tiles 1000
 ```
 
-Only an explicit subsequent owner action with `-download` and a **new distinct** `-dir` makes disk writes or live NOAA requests. An optional `-max-bytes` guards bytes. Resume is permitted only against the manager's matching marker/configuration, with individual existing PNG files validated and preserved. The CLI never runs implicitly during map navigation and does not touch local production services/tunnels. Do not run download mode from CI or as part of the Mac root build. To verify the command's own tests locally, `go test -count=1 ./cmd/nauticaltilemanager` is separate from `./devbuild.sh`, which tests only the root application package. Do not update or restart the production instance without owner authorization.
+Only an explicit subsequent owner action with `-download` and a **new distinct** `-dir` makes disk writes or live NOAA requests. An optional `-max-bytes` guards bytes. Resume and incremental additions are permitted in a manager-marked directory with the **same chart source**; the requested bounds/zooms may change, while the original v1 marker stays unchanged. Existing PNGs in the requested area are validated and preserved, and the complete tree's tile count/bytes are included in cumulative caps. The CLI never runs implicitly during map navigation and does not touch local production services/tunnels. Do not run download mode from CI or as part of the Mac root build. To verify the command's own tests locally, `go test -count=1 ./cmd/nauticaltilemanager` is separate from `./devbuild.sh`, which tests only the root application package. Do not update or restart the production instance without owner authorization.
 
 ### Validate the read-only Nautical runtime
 
@@ -220,3 +220,15 @@ Run the normal owner `./devbuild.sh` after a clean branch update. In CI, new roo
 ### Owner-observed first NOAA WMS request timeout (2026-11-21)
 
 First live `-source noaa -download` attempt for the 756-tile z9–12 region timed out awaiting response headers for tile `9/81/196` at the previous fixed 5s timeout, with no PNG saved. After updating to the revised draft PR and running `./devbuild.sh`, repeat the same isolated managed-directory command with `-timeout 45s -retries 2`; existing matching files are resumed, not replaced. This uses NOAA over the network **only on the owner's explicit command** and does not restart or alter the SailingGo server or its tunnel. If a longer request still fails, inspect the exact NOAA HTTP response/endpoint rather than increasing retries indefinitely.
+
+### NEXT owner test — extend NOAA dataset without creating a second cache
+
+The owner has a completed 756-tile NOAA managed dataset from native z9–12, recently moved into the repository's Git-ignored `cache/` tree for testing; the actual on-disk target/marker and owner Mac working-tree status must be confirmed locally. The read-only map demonstrated correct partial coverage but insufficient detail near Pittsburg at z12. After clean-tree inspection and branch update, run `./devbuild.sh` once. Then verify `test -f "$HOME/projects/sailing-go/cache/nautical_tiles/.sailing-nautical-tile-manager.json"` before any acquisition. Safe incremental dry-run:
+
+```sh
+go run ./cmd/nauticaltilemanager -west -122.05 -south 37.91 -east -121.75 -north 38.09 \
+  -min-zoom 13 -max-zoom 16 -max-tiles 5000 -max-bytes 1073741824 \
+  -timeout 45s -retries 2 -dir "$HOME/projects/sailing-go/cache/nautical_tiles"
+```
+
+Expected if only the original 756 tiles are present: new plan **3,174** and cumulative **3,930** files. If an actual inventory differs, investigate before downloading. After owner acceptance of dry-run limits, append `-download` to the *same* command. Dry-run uses no network/disk writes; explicit download writes only newly requested files under the managed root, preserves existing files and performs no launcher/tunnel changes. `-max-tiles` is the cumulative full-directory ceiling, not merely a cap on the new selection. This is a separate CLI operation from `./devbuild.sh` (root Go app tests/build); GitHub CI tests/builds the command itself. Owner Mac/Safari NOAA detail still requires inspection after acquisition.
