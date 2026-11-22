@@ -245,7 +245,7 @@ function testNauticalResponseDiagnostics(){
 
  const callbacks={};
  const tileContainer={style:{visibility:''}};
- const nauticalLayer={options:{maxNativeZoom:16},getTileSize(){return {x:256}},
+ const nauticalLayer={options:{maxNativeZoom:14},getTileSize(){return {x:256}},
   on(name,fn){callbacks[name]=fn;},getContainer(){return tileContainer;}};
  const note={hidden:true,state:'',setAttribute(name,value){
   assert.equal(name,'data-state');this.state=value;
@@ -254,14 +254,14 @@ function testNauticalResponseDiagnostics(){
  const typeInput={disabled:false,setAttribute(){},title:''};
  const label={classList:{toggle(){}}};
  const timers=new Map();
- let timerId=0,viewX=165,viewY=394,zoom=10;
+ let timerId=0,viewX=1310,viewY=3166,zoom=13;
  const map={hasLayer(layer){return layer===nauticalLayer},getZoom(){return zoom},
   getBounds(){return {getNorthWest(){return {x:viewX,y:viewY}},
    getSouthEast(){return {x:viewX+0.9,y:viewY+0.9}}};},
   project(point){return {x:point.x*256,y:point.y*256};}};
  const context={nauticalLayer,preferredMapLayerName:'nautical',
   nauticalZoomNote:note,nauticalStatusText:statusText,nauticalTypeInput:typeInput,
-  nauticalTypeLabel:label,minimumNauticalZoom:9,nauticalMockInspection:false,map,
+  nauticalTypeLabel:label,minimumNauticalZoom:13,maximumNauticalZoom:14,nauticalMockInspection:false,map,
   setTimeout(fn,ms){const id=++timerId;timers.set(id,{fn,ms});return id;},
   clearTimeout(id){timers.delete(id);},
   updateNauticalZoomUI(){return context.realUpdateNauticalZoomUI();},
@@ -269,8 +269,8 @@ function testNauticalResponseDiagnostics(){
  vm.createContext(context);
  vm.runInContext(source.slice(a,b),context);
  context.realUpdateNauticalZoomUI=()=>vm.runInContext('updateNauticalZoomUI()',context);
- const success=(x=viewX,y=viewY)=>callbacks.tileload({coords:{z:Math.min(zoom,16),x,y}});
- const failure=(x=viewX,y=viewY)=>callbacks.tileerror({coords:{z:Math.min(zoom,16),x,y}});
+ const success=(x=viewX,y=viewY)=>callbacks.tileload({coords:{z:Math.min(zoom,14),x,y}});
+ const failure=(x=viewX,y=viewY)=>callbacks.tileerror({coords:{z:Math.min(zoom,14),x,y}});
  const fire=ms=>{const timer=[...timers.entries()].find(([,t])=>t.ms===ms);
   assert.ok(timer,'expected '+ms+'ms safety timer');timers.delete(timer[0]);timer[1].fn();};
 
@@ -289,7 +289,7 @@ function testNauticalResponseDiagnostics(){
  assert.equal(tileContainer.style.visibility,'','tile container is never hidden');
 
  // A failed viewport reports coverage in the same out-of-map status line.
- zoom=9;viewX=82;viewY=197;
+ zoom=13;viewX=1320;viewY=3170;
  callbacks.loading();
  assert.ok(statusText.textContent.includes('Checking chart coverage'));
  failure();
@@ -301,29 +301,29 @@ function testNauticalResponseDiagnostics(){
  assert.equal(timers.size,0,'settled failures have no wait or dismiss timers');
 
  // Moving back to known coverage clears the warning and never overlays map.
- zoom=10;viewX=165;viewY=394;
+ zoom=13;viewX=1310;viewY=3166;
  context.checkNauticalViewportAfterMove();
  assert.equal(note.state,'ready');
  assert.ok(statusText.textContent.includes('Chart tiles visible'));
 
  // Missing peripheral tile does not erase valid visible chart coverage.
  callbacks.loading();
- failure(166,394);
+ failure(1311,3166);
  callbacks.load();
  assert.equal(note.state,'ready');
  assert.ok(statusText.textContent.includes('Chart tiles visible'));
 
  // Distant same-zoom pan uses current XYZ viewport, not zoom history.
- viewX=220;viewY=410;
+ viewX=1350;viewY=3170;
  context.checkNauticalViewportAfterMove();
  assert.equal(note.state,'unavailable');
  assert.ok(statusText.textContent.includes('this area'));
- viewX=165;viewY=394;
+ viewX=1310;viewY=3166;
  context.checkNauticalViewportAfterMove();
  assert.equal(note.state,'ready');
 
  // Slow chart requests never pop a progress bar: safety timeout sets status.
- zoom=11;viewX=330;viewY=789;
+ zoom=14;viewX=2620;viewY=6334;
  callbacks.loading();
  assert.equal(timers.size,1);
  assert.ok(statusText.textContent.includes('Checking chart coverage'));
@@ -333,7 +333,7 @@ function testNauticalResponseDiagnostics(){
  assert.equal(timers.size,0,'timeout generates no auto-dismiss timer');
 
  // Loopback mock inspection also uses only text, not a progress overlay.
- zoom=12;viewX=661;viewY=1579;
+ zoom=14;viewX=2640;viewY=6360;
  context.nauticalMockInspection=true;
  callbacks.loading();
  assert.ok(statusText.textContent.includes('Checking mock chart coverage'));
