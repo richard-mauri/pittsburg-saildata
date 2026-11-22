@@ -245,3 +245,21 @@ open -a Preview cache/noaa-layer-comparison-20261122/*.png
 
 Compare the matched images visually: if the triangles disappear while chart soundings/buoys remain, confirm that candidate layers 0–7 are appropriate. If not, investigate NOAA's chart scale and symbology instead. **Do not overwrite/re-download the existing 3,008 NOAA cached PNGs until the owner accepts the comparison**; the managed cache marker and current downloader remain unchanged.
 
+## Clean NOAA WMS layer 0–7 replacement dataset — operator acceptance pending (November 22, 2026)
+
+Visual comparison of matched z13 and z14 NOAA WMS PNGs confirms that **layers 0–7** remove much of the repeated gray triangle/crossing-pattern clutter seen with **layers 0–12** while retaining depth soundings and contours in the inspected Suisun Bay sample. Certain optional symbols also disappear; this visual comparison alone does not establish that all navigation information is identical, or that NOAA's ENC source resolution has changed.
+
+The **standalone** `cmd/nauticaltilemanager` now defaults its **normal NOAA GetMap download** to `LAYERS=0,1,2,3,4,5,6,7`. Its separate eight-image `-compare-layers` diagnostic retains both variants, and mock/test fixture rendering is unchanged. New manager-created NOAA directories carry a `SailingGo-managed-XYZ-v2` marker explicitly recording `source=noaa` and `layers=0,1,2,3,4,5,6,7`. The old NOAA data directory contains the earlier v1 marker and layer-0–12 PNGs; the updated manager **refuses to append clean imagery into that legacy NOAA directory**, including in dry-run preflight. Existing old datasets may still be explicitly pruned with the separate maintenance command, but are not silently migrated.
+
+**Safe side-by-side replacement workflow:** first run a new z13–14 dry-run without modifying `cache/nautical_tiles`:
+
+```sh
+go run ./cmd/nauticaltilemanager \
+  -west -122.70 -south 37.65 -east -121.45 -north 38.35 \
+  -min-zoom 13 -max-zoom 14 -max-tiles 5000 \
+  -max-bytes 1073741824 -timeout 45s -retries 2 \
+  -dir "$HOME/projects/sailing-go/cache/nautical_tiles_clean_0_7"
+```
+
+The expected new-directory plan is **3,008 native tiles** (z13=630; z14=2,378). Review the dry-run plan, then re-run with explicit `-download` to populate **only the new clean directory**. It is Git-ignored under `cache/`, separate from the current 3,008 old tiles and all mock data. The new directory's marker lets the manager safely resume interrupted downloads with the same source/layer selection, cumulative tile count and byte limits. Re-running its dry-run when finished should report `existing=3008, new=0`; check the PNG file count and `du -sh` independently. The old directory continues serving the existing instance until the owner separately authorizes a local test switch. Never overwrite, rename or delete `cache/nautical_tiles` in this phase. No service/tunnel restart, runtime setting migration, release or production cutover is part of this PR change. This is a chart presentation improvement, **not a substitute for navigation-grade charts or source quality assessment**.
+
