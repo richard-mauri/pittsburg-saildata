@@ -96,6 +96,9 @@ func validPNG(b []byte)bool{
  _,err=png.Decode(bytes.NewReader(b));return err==nil
 }
 func requestURL(base string,z,x,y int)(string,error){
+ return requestURLWithLayers(base,z,x,y,"0,1,2,3,4,5,6,7,8,9,10,11,12")
+}
+func requestURLWithLayers(base string,z,x,y int,layers string)(string,error){
  u,err:=url.Parse(base);if err!=nil||u.Scheme==""||u.Host==""{return "",errors.New("invalid NOAA URL")}
  const half=20037508.342789244
  size:=2*half/math.Exp2(float64(z))
@@ -103,7 +106,7 @@ func requestURL(base string,z,x,y int)(string,error){
  top:=half-float64(y)*size
  q:=u.Query()
  q.Set("SERVICE","WMS");q.Set("VERSION","1.3.0");q.Set("REQUEST","GetMap")
- q.Set("LAYERS","0,1,2,3,4,5,6,7,8,9,10,11,12");q.Set("STYLES","")
+ q.Set("LAYERS",layers);q.Set("STYLES","")
  q.Set("CRS","EPSG:3857")
  q.Set("BBOX",fmt.Sprintf("%.6f,%.6f,%.6f,%.6f",left,top-size,left+size,top))
  q.Set("WIDTH","256");q.Set("HEIGHT","256");q.Set("FORMAT","image/png");q.Set("TRANSPARENT","TRUE")
@@ -205,7 +208,8 @@ func execute(ctx context.Context,o options,base string,client *http.Client)(tota
 }
 func main(){
  var o options
- var prune,applyPrune bool
+ var prune,applyPrune,compareLayers bool
+ var compareDir string
  flag.Float64Var(&o.West,"west",math.NaN(),"western longitude")
  flag.Float64Var(&o.South,"south",math.NaN(),"southern latitude")
  flag.Float64Var(&o.East,"east",math.NaN(),"eastern longitude")
@@ -219,11 +223,22 @@ func main(){
  flag.StringVar(&o.Dir,"dir","","existing managed directory to extend or new managed directory (required for -download)")
  flag.StringVar(&o.Source,"source","noaa","noaa or mock")
  flag.BoolVar(&o.Download,"download",false,"explicitly enable file creation and NOAA downloads")
+ flag.BoolVar(&compareLayers,"compare-layers",false,"save a small separate NOAA WMS 0-12 vs 0-7 diagnostic sample; never touch managed cache")
+ flag.StringVar(&compareDir,"compare-dir","","NEW output directory for WMS layer comparison PNG samples")
  flag.BoolVar(&prune,"prune",false,"plan removal of NOAA cached tiles outside native zoom 13..14 (dry-run default)")
  flag.BoolVar(&applyPrune,"apply-prune",false,"with -prune, explicitly delete zooms 9..12 and 15..16 from managed NOAA dataset")
  flag.Parse()
  if flag.NArg()!=0 {fmt.Fprintln(os.Stderr,"unexpected positional arguments");os.Exit(2)}
  if applyPrune&&!prune {fmt.Fprintln(os.Stderr,"-apply-prune requires -prune");os.Exit(2)}
+ if compareLayers {
+  if prune||applyPrune||o.Download||o.Dir!=""||o.Source!="noaa"{
+   fmt.Fprintln(os.Stderr,"-compare-layers is isolated: cannot combine with -download, -prune, -dir or -source mock");os.Exit(2)
+  }
+  if err:=compareNOAALayers(context.Background(),compareDir,noaaURL,&http.Client{Timeout:o.Timeout},o.Timeout,o.Retries);err!=nil{
+   fmt.Fprintln(os.Stderr,err);os.Exit(1)
+  }
+  return
+ }
  if prune {
   if o.Download{fmt.Fprintln(os.Stderr,"-prune and -download are mutually exclusive");os.Exit(2)}
   if err:=pruneManaged(o,applyPrune);err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)}
