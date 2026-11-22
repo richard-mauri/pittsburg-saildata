@@ -1,7 +1,6 @@
 package main
 
 import (
- "bytes"
  "context"
  "encoding/json"
  "encoding/hex"
