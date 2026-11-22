@@ -23,6 +23,7 @@ func pruneManaged(o options, apply bool) error {
  check:=o
  check.MaxTiles=int(^uint(0)>>1)
  check.MaxBytes=0
+ check.AllowLegacyNOAA=true
  root,inv,err:=inspectManaged(check,plan{})
  if err!=nil{return fmt.Errorf("unsafe managed directory, no files removed: %w",err)}
  if root=="" {return errors.New("prune requires an existing managed directory")}
