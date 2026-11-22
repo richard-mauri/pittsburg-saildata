@@ -41,9 +41,18 @@ func inspectManaged(o options,p plan) (string,managedInventory,error) {
  // unchanged for existing datasets while permitting new bounding boxes.
  // Source identity MUST stay fixed: never mix fictitious and NOAA charts.
  lines:=string(marker)
- if !strings.HasPrefix(lines,"SailingGo-managed-XYZ-v1\n")||
-  !strings.Contains(lines,"\nsource="+o.Source+"\n"){
+ legacy:=strings.HasPrefix(lines,"SailingGo-managed-XYZ-v1\n")
+ clean:=strings.HasPrefix(lines,"SailingGo-managed-XYZ-v2\n")
+ if (!legacy&&!clean)||!strings.Contains(lines,"\nsource="+o.Source+"\n"){
   return "",inv,errors.New("managed directory marker has a different source or unknown format")
+ }
+ if o.Source=="noaa" && !o.AllowLegacyNOAA {
+  if !clean||!strings.Contains(lines,"\nlayers=0,1,2,3,4,5,6,7\n"){
+   return "",inv,errors.New("legacy NOAA cache was rendered with layers 0-12; do not mix imagery; choose a NEW -dir for layers 0-7")
+  }
+ }
+ if o.Source=="mock"&&!legacy {
+  return "",inv,errors.New("mock data requires its original isolated v1 marker")
  }
  // Reject unexpected files/links so an untracked dataset or symlink cannot
  // silently evade cumulative limits. Do not follow any symlinks.
