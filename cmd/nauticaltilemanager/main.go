@@ -32,6 +32,7 @@ type options struct {
  MinZoom, MaxZoom, MaxTiles int
  MaxBytes int64
  Dir, Source string
+ AllowLegacyNOAA bool // Internal maintenance only; never exposed as a CLI flag.
  Download bool
  Timeout time.Duration
  Retries int
