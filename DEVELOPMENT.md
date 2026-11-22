@@ -262,3 +262,20 @@ open -a Preview cache/noaa-layer-comparison-20261122/*.png
 
 This requires that the named output directory not already exist; if it exists (including after a failed partial run), choose a new suffixed directory. The comparison requests identical XYZ/BBOX sample pairs at native z13 and 14 near Pittsburg and Suisun Bay, with layers **0–12 versus 0–7**. Review the matching image pairs for triangle removal and retention of sounding/buoy/channel detail; compare PNG bytes alone is not visual acceptance. Never move these diagnostics into `cache/nautical_tiles`, delete the 3,008 production-like NOAA PNGs, or restart the running service/tunnel during this phase. The existing `-download` WMS layers remain unchanged pending acceptance; CI uses a fake local WMS server with no NOAA network.
 
+### Owner Mac handoff: acquire clean NOAA WMS layers 0–7 to new directory (November 22, 2026)
+
+Following the owner-provided Suisun Bay screenshot comparison, this NEXT changes only the **standalone Tile Manager's normal NOAA WMS layer set to 0–7**; the original 3,008 tiles with all optional layers are preserved. After inspecting a clean Git working tree, updating Draft PR #38 branch and running `./devbuild.sh` once, run the new-**directory** read-only preflight:
+
+```sh
+cd ~/projects/sailing-go
+go run ./cmd/nauticaltilemanager \
+  -west -122.70 -south 37.65 -east -121.45 -north 38.35 \
+  -min-zoom 13 -max-zoom 14 -max-tiles 5000 \
+  -max-bytes 1073741824 -timeout 45s -retries 2 \
+  -dir "$HOME/projects/sailing-go/cache/nautical_tiles_clean_0_7"
+```
+
+Expected **3,008 planned new files** (z13: 630, z14: 2,378), zero existing. After review, owner can add explicit `-download` to the same command to acquire and validate PNGs in the new, separate root. The new v2 marker includes `layers=0,1,2,3,4,5,6,7`, and the tool refuses old `cache/nautical_tiles` v1 NOAA directories for future normal downloads. A failure can be resumed safely in the **new clean directory** without touching any old PNG or Safari session. Inspect `find cache/nautical_tiles_clean_0_7 -type f -name '*.png' | wc -l`, `du -sh cache/nautical_tiles_clean_0_7` and an overlapping dry-run reporting no new tiles. Do not overwrite/delete/rename the original cache or point the currently running server/tunnel to the new root as part of the command. Inspect new data locally and approve any subsequent chart root switch separately.
+
+CI tests using local HTTP fixtures assert normal WMS `LAYERS=0..7`, new v2 marker provenance, resumption and rejection of old v1 NOAA cache mixing. The 8-file comparison still requests both original and visible layer groups. No GitHub CI call contacts NOAA. Owner Mac/Safari actual clean chart visual acceptance remains unverified until reported.
+
