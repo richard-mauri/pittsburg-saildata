@@ -54,8 +54,8 @@ func buildPlan(o options) (plan,error) {
     o.South < -85 || o.North > 85 || o.South>=o.North {
   return p,errors.New("invalid geographic bounds: use west < east, south < north, lon [-180,180] and lat [-85,85]")
  }
- if o.MinZoom<9 || o.MaxZoom>16 || o.MinZoom>o.MaxZoom {
-  return p,errors.New("native NOAA tile zoom must be within 9..16 (display z17/18 overzooms z16)")
+ if o.MinZoom<13 || o.MaxZoom>14 || o.MinZoom>o.MaxZoom {
+  return p,errors.New("managed NOAA tile acquisition is restricted to useful native zooms 13..14")
  }
  if o.MaxTiles<=0 {return p,errors.New("-max-tiles must be positive")}
  if o.MaxBytes<0 {return p,errors.New("-max-bytes must be nonnegative")}
@@ -200,17 +200,18 @@ func execute(ctx context.Context,o options,base string,client *http.Client)(tota
    t.Created++;t.Bytes+=int64(len(b))
   }}
  }
- fmt.Printf("Saved %d new tiles, verified %d existing tiles, PNG bytes=%d (native z9..16 only)\n",t.Created,t.Skipped,t.Bytes)
+ fmt.Printf("Saved %d new tiles, verified %d existing tiles, PNG bytes=%d (acquisition restricted to native z13..14)\n",t.Created,t.Skipped,t.Bytes)
  return t,nil
 }
 func main(){
  var o options
+ var prune,applyPrune bool
  flag.Float64Var(&o.West,"west",math.NaN(),"western longitude")
  flag.Float64Var(&o.South,"south",math.NaN(),"southern latitude")
  flag.Float64Var(&o.East,"east",math.NaN(),"eastern longitude")
  flag.Float64Var(&o.North,"north",math.NaN(),"northern latitude")
- flag.IntVar(&o.MinZoom,"min-zoom",9,"first native nautical zoom (9..16)")
- flag.IntVar(&o.MaxZoom,"max-zoom",12,"last native nautical zoom (9..16)")
+ flag.IntVar(&o.MinZoom,"min-zoom",13,"first native nautical zoom (13..14)")
+ flag.IntVar(&o.MaxZoom,"max-zoom",14,"last native nautical zoom (13..14)")
  flag.IntVar(&o.MaxTiles,"max-tiles",0,"required hard ceiling on cumulative XYZ files in the managed directory")
  flag.Int64Var(&o.MaxBytes,"max-bytes",0,"optional total cached PNG bytes ceiling (0 = not configured)")
  flag.DurationVar(&o.Timeout,"timeout",30*time.Second,"NOAA request timeout for each attempt")
@@ -218,8 +219,16 @@ func main(){
  flag.StringVar(&o.Dir,"dir","","existing managed directory to extend or new managed directory (required for -download)")
  flag.StringVar(&o.Source,"source","noaa","noaa or mock")
  flag.BoolVar(&o.Download,"download",false,"explicitly enable file creation and NOAA downloads")
+ flag.BoolVar(&prune,"prune",false,"plan removal of NOAA cached tiles outside native zoom 13..14 (dry-run default)")
+ flag.BoolVar(&applyPrune,"apply-prune",false,"with -prune, explicitly delete zooms 9..12 and 15..16 from managed NOAA dataset")
  flag.Parse()
  if flag.NArg()!=0 {fmt.Fprintln(os.Stderr,"unexpected positional arguments");os.Exit(2)}
+ if applyPrune&&!prune {fmt.Fprintln(os.Stderr,"-apply-prune requires -prune");os.Exit(2)}
+ if prune {
+  if o.Download{fmt.Fprintln(os.Stderr,"-prune and -download are mutually exclusive");os.Exit(2)}
+  if err:=pruneManaged(o,applyPrune);err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)}
+  return
+ }
  _,err:=execute(context.Background(),o,noaaURL,&http.Client{Timeout:o.Timeout})
  if err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)}
 }
