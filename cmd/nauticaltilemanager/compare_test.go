@@ -74,3 +74,14 @@ func TestComparisonRejectsMissingDirAndInvalidPNG(t *testing.T){
  entries,err:=os.ReadDir(dir);if err!=nil{t.Fatal(err)}
  if len(entries)!=0{t.Fatal("invalid PNG written to disk")}
 }
+
+func TestComparisonRefusesManagedDirectoryDescendant(t *testing.T){
+ root:=filepath.Join(t.TempDir(),"managed")
+ if err:=os.Mkdir(root,0700);err!=nil{t.Fatal(err)}
+ if err:=os.WriteFile(filepath.Join(root,markerFile),[]byte("SailingGo-managed-XYZ-v1\nsource=noaa\n"),0600);err!=nil{t.Fatal(err)}
+ child:=filepath.Join(root,"compare","new-run")
+ if err:=compareNOAALayers(context.Background(),child,"http://127.0.0.1:1",nil,time.Second,0);err==nil{
+  t.Fatal("comparison was allowed inside managed tile cache")
+ }
+ if _,err:=os.Stat(filepath.Join(root,"compare"));!os.IsNotExist(err){t.Fatal("comparison created a directory inside the managed cache")}
+}
