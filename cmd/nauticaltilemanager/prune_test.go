@@ -17,7 +17,6 @@ func legacyNOAARoot(t *testing.T) string {
  t.Helper()
  root:=filepath.Join(t.TempDir(),"managed-noaa")
  if err:=os.Mkdir(root,0700);err!=nil{t.Fatal(err)}
- original:=options{Source:"noaa",West:-123,South:36.5,East:-121.45,North:38.45,MinZoom:9,MaxZoom:12}
  if err:=os.WriteFile(filepath.Join(root,markerFile),[]byte("SailingGo-managed-XYZ-v1\nsource=noaa\nbounds=-123.00000000,36.50000000,-121.45000000,38.45000000\nzoom=9..12\n"),0600);err!=nil{t.Fatal(err)}
  for _,z:=range []int{9,10,11,12,13,14,15,16}{
   x,y:=xyz(-121.9,38.0,z)
