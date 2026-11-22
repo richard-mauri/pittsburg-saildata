@@ -33,11 +33,11 @@ func writeDisplayStudy(ctx context.Context,out,endpoint string,client *http.Clie
  if err:=os.Mkdir(abs,0700);err!=nil{return err}
  // Same XYZ footprints at Pittsburg for every rendering variant.
  const layers="0,1,2,3,4,5,6,7"
- // This parameter is documented for Esri Maritime Chart Service but not
- // confirmed for NOAA's public WMS. Never interpret HTTP 200 as proof.
+ // NOAA validates HonorScamin as integer 1 or 2. Esri documentation
+ // identifies 1 as disabling SCAMIN; compare images before concluding effect.
  override:=map[string]interface{}{"ECDISParameters":map[string]interface{}{
   "DynamicParameters":map[string]interface{}{"Parameter":[]map[string]interface{}{
-   {"name":"HonorScamin","value":0},
+   {"name":"HonorScamin","value":1},
   }},
  }}
  payload,err:=json.Marshal(override);if err!=nil{return err}
