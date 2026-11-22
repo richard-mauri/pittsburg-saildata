@@ -747,11 +747,11 @@ body.map-resizing{cursor:ns-resize!important;user-select:none!important}
   // All chart images come from this SailingGo origin. NOAA access, when
   // implemented, belongs to the Go server rather than Safari.
   var nauticalLayer = L.tileLayer("/api/charts/tiles/{z}/{x}/{y}.png", {
-    minZoom: 13,
-    maxZoom: 14,
-    // Owner-accepted NOAA chart detail is useful only at native z13..14.
+    minZoom: 12,
+    maxZoom: 15,
+    // Owner-acquired NOAA layers 0-7 now cover native z12..15.
     // Other map zooms keep the Street basemap; do not overzoom the charts.
-    maxNativeZoom: 14,
+    maxNativeZoom: 15,
     attribution: "NOAA Office of Coast Survey"
   });
 
