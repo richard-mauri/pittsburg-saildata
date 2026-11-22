@@ -142,7 +142,7 @@ function testMapTileFallback(){
   name,addTo(map){map.layers.add(this);map.order.push(this.name);return this},
   bringToFront(){map.order.push(this.name)},setStyle(){}
  });
- const map={layers:new Set(),order:[],hasLayer(x){return this.layers.has(x)},removeLayer(x){this.layers.delete(x)},getZoom(){return 10}};
+ const map={layers:new Set(),order:[],hasLayer(x){return this.layers.has(x)},removeLayer(x){this.layers.delete(x)},getZoom(){return 14}};
  const streetLayer=makeLayer('street');
  const nauticalLayer=makeLayer('nautical');
  const satelliteLayer=makeLayer('satellite');
@@ -154,7 +154,7 @@ function testMapTileFallback(){
   preferredMapLayerName:'nautical',activeMapLayerName:'map',
   nauticalUnavailable:false,nauticalCheckTimer:null,nauticalAdvisory:false,nauticalTileLoads:0,
   nauticalLoading:false,
-  nauticalAutomaticFallback:false,nauticalFailureNotice:false,nauticalStatusMessage:'',minimumNauticalZoom:9,
+  nauticalAutomaticFallback:false,nauticalFailureNotice:false,nauticalStatusMessage:'',minimumNauticalZoom:13,maximumNauticalZoom:14,
   nauticalMockInspection:false,
   mapState:{cloudOverlayVisible:false,radarOverlayVisible:false},
   cloudLayer:null,radarLayer:null,marineZoneHaloLayer:null,
@@ -355,8 +355,9 @@ function testNauticalResponseDiagnostics(){
  assert.ok(statusText.textContent.includes('Chart tiles visible'));
  assert.equal(note.state,'ready');
  assert.equal(tileContainer.style.visibility,'');
- assert.ok(source.includes('maxNativeZoom: 16,'),
-  'mock and NOAA must share native z16 ceiling; display z17/18 overzooms');
+ assert.ok(source.includes('minZoom: 13,') && source.includes('maxZoom: 14,') &&
+  source.includes('maxNativeZoom: 14,'),
+  'accepted NOAA chart interval is native zoom 13-14 only, without overzoom');
 }
 
 async function run(){
