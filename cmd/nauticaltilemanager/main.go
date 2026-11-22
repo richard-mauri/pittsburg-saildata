@@ -55,8 +55,8 @@ func buildPlan(o options) (plan,error) {
     o.South < -85 || o.North > 85 || o.South>=o.North {
   return p,errors.New("invalid geographic bounds: use west < east, south < north, lon [-180,180] and lat [-85,85]")
  }
- if o.MinZoom<13 || o.MaxZoom>14 || o.MinZoom>o.MaxZoom {
-  return p,errors.New("managed NOAA tile acquisition is restricted to useful native zooms 13..14")
+ if o.MinZoom<12 || o.MaxZoom>15 || o.MinZoom>o.MaxZoom {
+  return p,errors.New("managed NOAA tile acquisition is restricted to native zooms 12..15")
  }
  if o.MaxTiles<=0 {return p,errors.New("-max-tiles must be positive")}
  if o.MaxBytes<0 {return p,errors.New("-max-bytes must be nonnegative")}
@@ -205,7 +205,7 @@ func execute(ctx context.Context,o options,base string,client *http.Client)(tota
    t.Created++;t.Bytes+=int64(len(b))
   }}
  }
- fmt.Printf("Saved %d new tiles, verified %d existing tiles, PNG bytes=%d (acquisition restricted to native z13..14)\n",t.Created,t.Skipped,t.Bytes)
+ fmt.Printf("Saved %d new tiles, verified %d existing tiles, PNG bytes=%d (acquisition restricted to native z12..15)\n",t.Created,t.Skipped,t.Bytes)
  return t,nil
 }
 func main(){
@@ -216,8 +216,8 @@ func main(){
  flag.Float64Var(&o.South,"south",math.NaN(),"southern latitude")
  flag.Float64Var(&o.East,"east",math.NaN(),"eastern longitude")
  flag.Float64Var(&o.North,"north",math.NaN(),"northern latitude")
- flag.IntVar(&o.MinZoom,"min-zoom",13,"first native nautical zoom (13..14)")
- flag.IntVar(&o.MaxZoom,"max-zoom",14,"last native nautical zoom (13..14)")
+ flag.IntVar(&o.MinZoom,"min-zoom",13,"first native nautical zoom (12..15)")
+ flag.IntVar(&o.MaxZoom,"max-zoom",14,"last native nautical zoom (12..15)")
  flag.IntVar(&o.MaxTiles,"max-tiles",0,"required hard ceiling on cumulative XYZ files in the managed directory")
  flag.Int64Var(&o.MaxBytes,"max-bytes",0,"optional total cached PNG bytes ceiling (0 = not configured)")
  flag.DurationVar(&o.Timeout,"timeout",30*time.Second,"NOAA request timeout for each attempt")
