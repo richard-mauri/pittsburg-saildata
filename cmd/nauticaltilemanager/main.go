@@ -87,6 +87,7 @@ func (o options) print(p plan) {
 }
 func (o options) signature() string {
  // Original v1 marker retained as source/provenance identity across additions.\n // Caps are enforced cumulatively by the managed-directory inventory.
+ if o.Source=="noaa" {return fmt.Sprintf("SailingGo-managed-XYZ-v2\nsource=noaa\nlayers=0,1,2,3,4,5,6,7\nbounds=%.8f,%.8f,%.8f,%.8f\nzoom=%d..%d\n",o.West,o.South,o.East,o.North,o.MinZoom,o.MaxZoom)}
  return fmt.Sprintf("SailingGo-managed-XYZ-v1\nsource=%s\nbounds=%.8f,%.8f,%.8f,%.8f\nzoom=%d..%d\n",
   o.Source,o.West,o.South,o.East,o.North,o.MinZoom,o.MaxZoom)
 }
@@ -96,7 +97,7 @@ func validPNG(b []byte)bool{
  _,err=png.Decode(bytes.NewReader(b));return err==nil
 }
 func requestURL(base string,z,x,y int)(string,error){
- return requestURLWithLayers(base,z,x,y,"0,1,2,3,4,5,6,7,8,9,10,11,12")
+ return requestURLWithLayers(base,z,x,y,"0,1,2,3,4,5,6,7")
 }
 func requestURLWithLayers(base string,z,x,y int,layers string)(string,error){
  u,err:=url.Parse(base);if err!=nil||u.Scheme==""||u.Host==""{return "",errors.New("invalid NOAA URL")}
