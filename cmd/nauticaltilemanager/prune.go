@@ -46,7 +46,7 @@ func pruneManaged(o options, apply bool) error {
   if err!=nil{return err}
  }
  if count>inv.Count||bytes>inv.Bytes{return errors.New("prune inventory disagrees with total manager inventory")}
- fmt.Printf("NOAA cleanup: keep native z13..14; delete %d PNG tiles (%d PNG bytes); retain %d tiles (%d PNG bytes)\\n",
+ fmt.Printf("NOAA cleanup: keep native z13..14; delete %d PNG tiles (%d PNG bytes); retain %d tiles (%d PNG bytes)\n",
   count,bytes,inv.Count-count,inv.Bytes-bytes)
  if !apply {
   fmt.Println("DRY RUN: no files removed; pass -prune -apply-prune to delete only z9..12 and z15..16")
@@ -67,6 +67,6 @@ func pruneManaged(o options, apply bool) error {
   // os.Remove only succeeds on empty directories, unlike RemoveAll.
   if err:=os.Remove(path);err!=nil{return fmt.Errorf("empty old zoom directory %s: %w",path,err)}
  }
- fmt.Printf("Pruned %d unused NOAA tiles; retained native z13..14; marker unchanged\\n",count)
+ fmt.Printf("Pruned %d unused NOAA tiles; retained native z13..14; marker unchanged\n",count)
  return nil
 }
