@@ -37,6 +37,23 @@ func TestBoundsAndLimits(t *testing.T){
   t.Fatalf("oversized plan accepted: %v",err)
  }
 }
+func TestNativeZoom12And15ManagedPlanning(t *testing.T) {
+ for _, z := range []int{12, 15} {
+  o := localPlan()
+  o.Source = "noaa"
+  o.MinZoom, o.MaxZoom = z, z
+  o.MaxTiles = 100
+  p, err := buildPlan(o)
+  if err != nil || p.Total < 1 { t.Fatalf("z%d plan: %+v %v", z, p, err) }
+ }
+ o := localPlan()
+ o.Source = "noaa"
+ o.MinZoom, o.MaxZoom = 11, 11
+ if _, err := buildPlan(o); err == nil { t.Fatal("z11 accepted") }
+ o.MinZoom, o.MaxZoom = 16, 16
+ if _, err := buildPlan(o); err == nil { t.Fatal("z16 accepted") }
+}
+
 func TestDryRunWritesNothingAndNoNetwork(t *testing.T){
  o:=localPlan();o.Dir=filepath.Join(t.TempDir(),"must-not-exist")
  var requests atomic.Int32
