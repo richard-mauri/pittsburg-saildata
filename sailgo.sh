@@ -26,6 +26,9 @@ pkill -x sailing-go 2>/dev/null || true
 # Stop only the sailing Cloudflare Tunnel.
 SAILING_TOKEN="$HOME/projects/sailing-go/.cloudflared/tunnel_token"
 
+export SAILING_NAUTICAL_TILE_DIR="$HOME/projects/sailing-go/cache/nautical_tiles"
+
+
 ps -axo pid=,command= | while read -r pid command; do
     if [[ "$command" == *"cloudflared tunnel run"* &&
           "$command" == *"$SAILING_TOKEN"* ]]; then
