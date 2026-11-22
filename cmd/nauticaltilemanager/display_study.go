@@ -4,12 +4,13 @@ import (
  "bytes"
  "context"
  "encoding/json"
+ "encoding/hex"
  "errors"
  "fmt"
- "image/png"
  "io"
  "net/http"
  "net/url"
+ "unicode/utf8"
  "os"
  "path/filepath"
  "strings"
@@ -53,8 +54,16 @@ func writeDisplayStudy(ctx context.Context,out,endpoint string,client *http.Clie
    filename:=fmt.Sprintf("pittsburg-z%d-%s.png",z,variant.name)
    meta:=fmt.Sprintf("GET %s\n",u.String())
    if err:=os.WriteFile(filepath.Join(abs,filename+".request.txt"),[]byte(meta),0600);err!=nil{return err}
-   data,err:=fetchDisplayStudyPNG(ctx,client,u.String(),retries)
-   if err!=nil{return fmt.Errorf("%s: %w (operational cache unchanged)",filename,err)}
+   data,status,ctype,err:=fetchDisplayStudyPNG(ctx,client,u.String(),retries)
+   result:=fmt.Sprintf("HTTP status: %d\nContent-Type: %s\n",status,ctype)
+   if err!=nil {
+    result+=fmt.Sprintf("Result: %v\n",err)
+    if len(data)>0 {if utf8.Valid(data){result+="Response body (bounded):\n"+string(data)+"\n"}else{result+="Response hex prefix: "+hex.EncodeToString(data[:minInt(len(data),256)])+"\n"}}
+    if writeErr:=os.WriteFile(filepath.Join(abs,filename+".response.txt"),[]byte(result),0600);writeErr!=nil{return writeErr}
+    fmt.Printf("  %s: rejected (HTTP %d, %s); details in .response.txt; continuing\n",filename,status,ctype)
+    continue
+   }
+   if err:=os.WriteFile(filepath.Join(abs,filename+".response.txt"),[]byte(result+"Result: valid PNG\n"),0600);err!=nil{return err}
    if err:=atomicPNG(filepath.Join(abs,filename),data);err!=nil{return err}
    fmt.Printf("  %s: %d bytes\n",filename,len(data))
   }
@@ -63,32 +72,29 @@ func writeDisplayStudy(ctx context.Context,out,endpoint string,client *http.Clie
  return nil
 }
 
-func fetchDisplayStudyPNG(ctx context.Context,client *http.Client,target string,retries int)([]byte,error){
- // Reuse the existing bounded retry/PNG validation behavior by routing
- // through a private HTTP client whose transport rewrites the requested URL.
- u,err:=url.Parse(target);if err!=nil{return nil,err}
+func minInt(a,b int)int{if a<b{return a};return b}
+
+// fetchDisplayStudyPNG returns bounded response bodies even for WMS exception
+// documents, so failures are inspectable without ever writing an invalid PNG.
+func fetchDisplayStudyPNG(ctx context.Context,client *http.Client,target string,retries int)([]byte,int,string,error){
  for attempt:=0;attempt<=retries;attempt++{
-  req,err:=http.NewRequestWithContext(ctx,http.MethodGet,u.String(),nil);if err!=nil{return nil,err}
+  req,err:=http.NewRequestWithContext(ctx,http.MethodGet,target,nil);if err!=nil{return nil,0,"",err}
   req.Header.Set("Accept","image/png")
   resp,err:=client.Do(req)
-  if err!=nil {
-   if attempt==retries{return nil,err}
+  if err!=nil{
+   if ctx.Err()!=nil{return nil,0,"",ctx.Err()}
+   if attempt==retries{return nil,0,"",err}
   }else{
-   data,readErr:=readStudyResponse(resp)
-   if readErr==nil{return data,nil}
-   if resp.StatusCode!=429&&resp.StatusCode<500{return nil,readErr}
-   if attempt==retries{return nil,readErr}
+   data,readErr:=io.ReadAll(io.LimitReader(resp.Body,maxPNGBytes+1))
+   resp.Body.Close()
+   status,ctype:=resp.StatusCode,resp.Header.Get("Content-Type")
+   if readErr!=nil{return nil,status,ctype,readErr}
+   if status==http.StatusOK&&validPNG(data){return data,status,ctype,nil}
+   failure:=fmt.Errorf("HTTP %d: response is not a valid 256x256 PNG",status)
+   if status!=429&&status<500{return data,status,ctype,failure}
+   if attempt==retries{return data,status,ctype,failure}
   }
-  select{case <-ctx.Done():return nil,ctx.Err();case <-time.After(time.Duration(1<<uint(attempt))*time.Second):}
+  select{case <-ctx.Done():return nil,0,"",ctx.Err();case <-time.After(time.Duration(1<<uint(attempt))*time.Second):}
  }
- return nil,errors.New("exhausted attempts")
-}
-
-func readStudyResponse(resp *http.Response)([]byte,error){
- defer resp.Body.Close()
- if resp.StatusCode!=200{return nil,fmt.Errorf("NOAA HTTP %d",resp.StatusCode)}
- data,err:=io.ReadAll(io.LimitReader(resp.Body,maxPNGBytes+1));if err!=nil{return nil,err}
- if !validPNG(data){return nil,errors.New("non-256px or invalid PNG")}
- if _,err:=png.DecodeConfig(bytes.NewReader(data));err!=nil{return nil,err}
- return data,nil
+ return nil,0,"",errors.New("exhausted attempts")
 }
