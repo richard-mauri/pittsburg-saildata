@@ -263,3 +263,20 @@ go run ./cmd/nauticaltilemanager \
 
 The expected new-directory plan is **3,008 native tiles** (z13=630; z14=2,378). Review the dry-run plan, then re-run with explicit `-download` to populate **only the new clean directory**. It is Git-ignored under `cache/`, separate from the current 3,008 old tiles and all mock data. The new directory's marker lets the manager safely resume interrupted downloads with the same source/layer selection, cumulative tile count and byte limits. Re-running its dry-run when finished should report `existing=3008, new=0`; check the PNG file count and `du -sh` independently. The old directory continues serving the existing instance until the owner separately authorizes a local test switch. Never overwrite, rename or delete `cache/nautical_tiles` in this phase. No service/tunnel restart, runtime setting migration, release or production cutover is part of this PR change. This is a chart presentation improvement, **not a substitute for navigation-grade charts or source quality assessment**.
 
+### Experimental native zoom 12 and 15 NOAA WMS inspection (Issue #39; November 22, 2026)
+
+Earlier zoom-15 charts had severe triangular clutter while NOAA WMS included optional layers 8–12. After restoring the default-visible layer selection **0–7**, the owner accepted clean native z13/14 images and requested a new, narrow examination of z12 and z15.
+
+A standalone **diagnostic-only** CLI mode in `cmd/nauticaltilemanager` writes 12 **256×256 NOAA WMS PNGs**, consisting of three fixed locations (Pittsburg, Suisun Bay, Delta junction) × native zooms **12,13,14,15**, all using **LAYERS=0,1,2,3,4,5,6,7**. Adjacent zoom samples allow visual comparison of what NOAA actually renders; display zoom differences alone do not establish higher source ENC detail. This phase **does not change** the manager's safe native **13–14** acquisition bounds, marker, browser map-range restriction, or read-only runtime server. It cannot add these PNGs to the managed chart directory.
+
+To test after a clean branch update and local build, supply a **new, nonexistent, Git-ignored** comparison directory under `cache/`:
+
+```sh
+go run ./cmd/nauticaltilemanager -zoom-samples \
+  -timeout 45s -retries 2 \
+  -zoom-samples-dir "$HOME/projects/sailing-go/cache/noaa-zoom-study-20261122"
+open -a Preview cache/noaa-zoom-study-20261122/*.png
+```
+
+This command is an explicit NOAA network operation making **12 requests**; `-zoom-samples-dir` must not point inside a managed NOAA or mock dataset and must not exist yet. It fails closed on a bad HTTP response or invalid image, never overwrites an output, and leaves the original **3,008 z13/14 tiles at `cache/nautical_tiles` untouched**. Any partial output from a failed experiment is restricted to the new sample directory; use a fresh name for a retry. The output uses names `pittsburg-z12-layers-0-7.png` through `delta-junction-z15-layers-0-7.png`. Submit screenshots or images for evaluation; only a further owner `NEXT` after visual acceptance may authorize adding z12 or z15 to managed acquisition/display. Existing service, tunnel, and other user data remain unchanged.
+
