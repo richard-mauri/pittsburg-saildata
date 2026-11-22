@@ -52,3 +52,25 @@ func TestDisplayStudyRejectsManagedCache(t *testing.T){
  if err:=writeDisplayStudy(context.Background(),out,"http://127.0.0.1:1",nil,time.Second,0);err==nil{t.Fatal("allowed managed cache write")}
  if _,err:=os.Stat(out);!os.IsNotExist(err){t.Fatal("created output inside cache")}
 }
+
+func TestDisplayStudyCapturesExceptionAndContinues(t *testing.T){
+ server:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
+  if r.URL.Query().Has("Display_params"){
+   w.Header().Set("Content-Type","application/vnd.ogc.se_xml")
+   _,_=w.Write([]byte("<ServiceException>unsupported Display_params</ServiceException>"))
+   return
+  }
+  w.Header().Set("Content-Type","image/png")
+  if err:=png.Encode(w,image.NewRGBA(image.Rect(0,0,256,256)));err!=nil{t.Error(err)}
+ }))
+ defer server.Close()
+ out:=filepath.Join(t.TempDir(),"exception-study")
+ if err:=writeDisplayStudy(context.Background(),out,server.URL,server.Client(),time.Second,0);err!=nil{t.Fatal(err)}
+ for _,z:=range []string{"13","14","15"}{
+  if b,err:=os.ReadFile(filepath.Join(out,"pittsburg-z"+z+"-default.png"));err!=nil||!validPNG(b){t.Fatalf("missing default z%s: %v",z,err)}
+  failed:=filepath.Join(out,"pittsburg-z"+z+"-scamin-off.png")
+  if _,err:=os.Stat(failed);!os.IsNotExist(err){t.Fatalf("invalid PNG written for z%s",z)}
+  report,err:=os.ReadFile(failed+".response.txt")
+  if err!=nil||!strings.Contains(string(report),"unsupported Display_params"){t.Fatalf("missing exception report z%s: %v",z,err)}
+ }
+}
