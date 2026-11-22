@@ -4,6 +4,8 @@ import (
  "bytes"
  "context"
  "encoding/json"
+ "image"
+ "image/png"
  "io"
  "net/http"
  "net/http/httptest"
@@ -268,4 +270,28 @@ func TestBoundedParallelAcquisitionAndResume(t *testing.T){
  second,err:=execute(context.Background(),o,upstream.URL,upstream.Client());if err!=nil||second.Created!=0||second.Skipped!=p.Total{t.Fatalf("resume %+v %v",second,err)}
  o.Workers=9
  if _,err:=buildPlan(o);err==nil{t.Fatal("accepted excessive workers")}
+}
+
+
+func TestSeamStudySameExtentAndIsolation(t *testing.T) {
+ png256,err:=mockchart.Render(13,1300,3150);if err!=nil{t.Fatal(err)}
+ var seen atomic.Int32
+ server:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
+  q:=r.URL.Query()
+  if q.Get("LAYERS")!="0,1,2,3,4,5,6,7"||!strings.Contains(q.Get("Display_params"),"\"HonorScamin\"") {t.Errorf("missing provenance: %v",q)}
+  if q.Get("WIDTH")=="512"{
+   seen.Add(1)
+   im:=image.NewRGBA(image.Rect(0,0,512,512))
+   var b bytes.Buffer
+   if e:=png.Encode(&b,im);e!=nil{t.Error(e)}
+   w.Header().Set("Content-Type","image/png");_,_=w.Write(b.Bytes());return
+  }
+  if q.Get("WIDTH")!="256"{t.Errorf("unexpected width: %v",q)}
+  seen.Add(1);w.Header().Set("Content-Type","image/png");_,_=w.Write(png256)
+ }));defer server.Close()
+ out:=filepath.Join(t.TempDir(),"seam")
+ if err:=writeSeamStudy(context.Background(),out,server.URL,server.Client(),-121.94,38.06);err!=nil{t.Fatal(err)}
+ if seen.Load()!=5{t.Fatalf("expected 5 requests, got %d",seen.Load())}
+ for _,name:=range []string{"mosaic-4x256.png","single-512.png","requests.txt"}{if _,e:=os.Stat(filepath.Join(out,name));e!=nil{t.Fatal(e)}}
+ if err:=writeSeamStudy(context.Background(),out,server.URL,server.Client(),-121.94,38.06);err==nil{t.Fatal("overwriting study accepted")}
 }
