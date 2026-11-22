@@ -84,8 +84,8 @@ func TestNOAAWMSAndAtomicOutput(t *testing.T){
  first,err:=execute(context.Background(),o,upstream.URL,upstream.Client())
  if err!=nil{t.Fatal(err)}
  marker,err:=os.ReadFile(filepath.Join(o.Dir,markerFile));if err!=nil{t.Fatal(err)}
- if !strings.HasPrefix(string(marker),"SailingGo-managed-XYZ-v2\\n") ||
-  !strings.Contains(string(marker),"\\nlayers=0,1,2,3,4,5,6,7\\n"){
+ if !strings.HasPrefix(string(marker),"SailingGo-managed-XYZ-v2\n") ||
+  !strings.Contains(string(marker),"\nlayers=0,1,2,3,4,5,6,7\n"){
   t.Fatalf("clean NOAA dataset marker does not record layer provenance: %q",marker)
  }
  if calls.Load()!=int32(first.Created){t.Fatalf("upstream calls %d != created %d",calls.Load(),first.Created)}
