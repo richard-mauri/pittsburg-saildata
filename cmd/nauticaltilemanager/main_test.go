@@ -107,3 +107,76 @@ func TestTransientNOAARetry(t *testing.T){
  if err!=nil{t.Fatal(err)}
  if total.Created<1||calls.Load()!=int32(total.Created+1){t.Fatalf("expected one transient NOAA retry, got %+v calls=%d",total,calls.Load())}
 }
+
+func TestExtendManagedDatasetWithNewZoomAndOverlappingPlan(t *testing.T){
+ o:=localPlan();o.Dir=filepath.Join(t.TempDir(),"managed");o.Download=true
+ initial,err:=execute(context.Background(),o,"",nil)
+ if err!=nil{t.Fatal(err)}
+ if initial.Created<1{t.Fatal("no original tiles")}
+ markerBefore,err:=os.ReadFile(filepath.Join(o.Dir,markerFile));if err!=nil{t.Fatal(err)}
+ z10:=o;z10.MinZoom=10;z10.MaxZoom=10
+ p,err:=buildPlan(z10);if err!=nil{t.Fatal(err)}
+ _,inv,err:=inspectManaged(z10,p);if err!=nil{t.Fatal(err)}
+ if inv.Count!=initial.Created||inv.New!=p.Total||inv.Overlap!=0{t.Fatalf("unexpected initial extension inventory: %+v",inv)}
+ // Preflight the cumulative file count before downloading anything.
+ reject:=z10;reject.MaxTiles=int(initial.Created+p.Total-1)
+ if _,err:=execute(context.Background(),reject,"",nil);err==nil||!strings.Contains(err.Error(),"cumulative"){
+  t.Fatalf("cumulative tile cap not enforced: %v",err)
+ }
+ if _,err:=os.Stat(filepath.Join(o.Dir,"10"));!os.IsNotExist(err){t.Fatal("rejected plan created zoom-10 directory")}
+ extended,err:=execute(context.Background(),z10,"",nil)
+ if err!=nil{t.Fatal(err)}
+ if extended.Created!=p.Total||extended.Skipped!=0{t.Fatalf("extension failed: %+v",extended)}
+ markerAfter,err:=os.ReadFile(filepath.Join(o.Dir,markerFile))
+ if err!=nil||!bytes.Equal(markerAfter,markerBefore){t.Fatal("extension modified original marker/provenance",err)}
+ // Re-running original bounding box must recognize all original paths as
+ // overlaps; neither the original nor the newly added z10 paths are replaced.
+ again,err:=execute(context.Background(),o,"",nil)
+ if err!=nil{t.Fatal(err)}
+ if again.Created!=0||again.Skipped!=initial.Created{t.Fatalf("original plan did not resume: %+v",again)}
+ _,inv,err=inspectManaged(o,mustPlan(t,o))
+ if err!=nil||inv.Count!=initial.Created+extended.Created||inv.New!=0{
+  t.Fatalf("wrong total after extension: %+v err=%v",inv,err)
+ }
+ // A full directory byte cap cannot be bypassed by requesting a different
+ // zoom or bounding box.
+ tooSmall:=z10;tooSmall.MaxBytes=inv.Bytes-1
+ if _,err:=execute(context.Background(),tooSmall,"",nil);err==nil||!strings.Contains(err.Error(),"max-bytes"){
+  t.Fatalf("cumulative byte cap bypassed: %v",err)
+ }
+ // Never append mock imagery into a NOAA managed root or vice versa.
+ wrongSource:=z10;wrongSource.Source="noaa"
+ if _,err:=execute(context.Background(),wrongSource,"",nil);err==nil||!strings.Contains(err.Error(),"different source"){
+  t.Fatalf("mixed chart sources accepted: %v",err)
+ }
+}
+func mustPlan(t *testing.T,o options)plan{
+ t.Helper();p,err:=buildPlan(o);if err!=nil{t.Fatal(err)};return p
+}
+func TestExtendRejectsUnexpectedEntriesAndSymlinks(t *testing.T){
+ o:=localPlan();o.Dir=filepath.Join(t.TempDir(),"managed");o.Download=true
+ if _,err:=execute(context.Background(),o,"",nil);err!=nil{t.Fatal(err)}
+ bad:=filepath.Join(o.Dir,"unexpected.txt")
+ if err:=os.WriteFile(bad,[]byte("do not touch"),0600);err!=nil{t.Fatal(err)}
+ if _,err:=execute(context.Background(),o,"",nil);err==nil{
+  t.Fatal("unmanaged extra file accepted")
+ }
+ if err:=os.Remove(bad);err!=nil{t.Fatal(err)}
+ if err:=os.Symlink(filepath.Join(o.Dir,"9"),filepath.Join(o.Dir,"10"));err!=nil{t.Skipf("symlink test unavailable: %v",err)}
+ z10:=o;z10.MinZoom=10;z10.MaxZoom=10
+ if _,err:=execute(context.Background(),z10,"",nil);err==nil{
+  t.Fatal("managed tile tree symlink accepted")
+ }
+}
+func TestExtendDryRunDoesNotModifyExisting(t *testing.T){
+ o:=localPlan();o.Dir=filepath.Join(t.TempDir(),"managed");o.Download=true
+ first,err:=execute(context.Background(),o,"",nil)
+ if err!=nil{t.Fatal(err)}
+ o.MinZoom=10;o.MaxZoom=10;o.Download=false
+ if _,err:=execute(context.Background(),o,"",nil);err!=nil{t.Fatal(err)}
+ if _,err:=os.Stat(filepath.Join(o.Dir,"10"));!os.IsNotExist(err){
+  t.Fatal("dry-run extension created new zoom dir")
+ }
+ _,inv,err:=inspectManaged(o,mustPlan(t,o))
+ if err!=nil||inv.Count!=first.Created||inv.New==0{t.Fatalf("dry-run inventory wrong: %+v err=%v",inv,err)}
+}
