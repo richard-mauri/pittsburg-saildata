@@ -293,3 +293,19 @@ open -a Preview cache/noaa-zoom-study-20261122/*.png
 
 Expected output is 12 validated PNGs for Pittsburg, Suisun Bay and Delta junction at native z12,13,14,15, using WMS layers 0–7. The new sample directory **must not already exist**, cannot be inside a managed NOAA/mock cache, and is not served by SailingGo. Compare z12's overview quality and z15's actual chart detail/clutter against the accepted z13/z14 samples. Send images or findings before any proposal to extend Tile Manager native zoom permissions. No server restart, Cloudflare tunnel change, mock dataset alteration, marker migration, personal data migration or production switch. The new unit tests use a local mock WMS, without upstream NOAA traffic. Root `devbuild.sh` runs root-package tests and build once; GitHub CI separately checks standalone commands.
 
+
+
+### Issue #39 expanded owner NEXT — full region z12 and z15
+
+The 12-image `-zoom-samples` mode is diagnostic only. For matching regional coverage use the **managed** Tile Manager, now allowing native z12–15, but keep z12/z15 in a **new separate marked directory**. Bounds are exactly west -122.70, south 37.65, east -121.45, north 38.35. Predicted tile counts: z12 176, z15 9,315. The accepted 3,008 z13–14 tiles in `cache/nautical_tiles` must not be changed.
+
+After clean-tree branch checkout and one `./devbuild.sh`, run **dry runs only**:
+
+```sh
+cd "$HOME/projects/sailing-go"
+NEW_DIR="$HOME/projects/sailing-go/cache/noaa-zoom12-15-region"
+go run ./cmd/nauticaltilemanager -west -122.70 -south 37.65 -east -121.45 -north 38.35 -min-zoom 12 -max-zoom 12 -max-tiles 10000 -max-bytes 1073741824 -timeout 45s -retries 2 -dir "$NEW_DIR"
+go run ./cmd/nauticaltilemanager -west -122.70 -south 37.65 -east -121.45 -north 38.35 -min-zoom 15 -max-zoom 15 -max-tiles 10000 -max-bytes 1073741824 -timeout 45s -retries 2 -dir "$NEW_DIR"
+```
+
+Review counts and ensure `NEW_DIR` is new and separate from the accepted cache. **Only after explicit owner approval**, repeat each command with `-download`. Download is serial and may take substantial time; failed acquisitions can be resumed in the same marked directory without overwriting valid tiles. A dry run performs no NOAA requests and creates no directory. Do not change browser supported zooms, launch processes, tunnel, or production cache in this phase.
