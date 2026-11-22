@@ -210,3 +210,21 @@ go run ./cmd/nauticaltilemanager \
 ```
 
 For that rectangular high-resolution area, the new plan has **3,174** tiles (z13: 48, z14: 165, z15: 609, z16: 2,352). If the same managed directory still contains all original 756 tiles and there is no overlap at these zooms, the **projected cumulative total is 3,930 / 5,000**, subject to the manager's actual scan. The default remains a dry run. Following review, explicitly add `-download` to acquire only the missing tiles, without changing the existing marker or touching any cached originals. An output directory with a missing, unrecognized, or different-source marker is rejected, as are unexpected non-XYZ files and symlinks. Limits apply to the **entire managed directory**. The existing directory must contain the Tile Manager's marker from its original download; simply copying unmanaged PNG files into a new directory is not equivalent. Disk storage caps count compressed PNG bytes; filesystem directory metadata can add overhead. The new Go command does not restart the SailingGo server, alter its cache-directory environment, or contact NOAA during dry run.
+
+## Accepted NOAA nautical zoom range — 13 and 14 only (Issue #37; 2026-11-22)
+
+Owner visually confirmed that native NOAA z13 and z14 show usable detailed chart features near Pittsburg, while z9–12 are too coarse and z15–16 introduce repeated triangular/overscale-pattern imagery; display z17–18 adds no useful information. **This operational acceptance supersedes earlier notes about acquiring z9–16.** The Tile Manager now rejects acquisition plans outside native z13–14, including any attempt to download z15–16. The browser nautical layer uses `minZoom: 13`, `maxZoom: 14`, `maxNativeZoom: 14`; outside z13–14 the Street basemap remains visible, and the saved Nautical preference is not silently changed. Coverage gaps within z13–14 continue to show Street underneath available nautical tiles.
+
+### Review and prune obsolete native chart levels
+
+The separate Tile Manager provides a **dry-run-first** cleanup operation on a manager-marked `source=noaa` directory. No geographic or acquisition arguments are needed for the cleanup; the tool inventories the whole directory and rejects unrelated files, unknown markers, symlinks and mock datasets. Review first:
+
+```sh
+go run ./cmd/nauticaltilemanager -source noaa \
+  -dir "$HOME/projects/sailing-go/cache/nautical_tiles" -prune
+```
+
+It reports the exact number of files/PNG bytes that would be deleted and retained. **Only** after inspecting that report, add `-apply-prune` to the same command to remove files at native z9–12 and z15–16. The command removes only individually verified PNGs, then empty directories; it does not recursively delete an unrecognized path or change the manager's provenance marker. The owner previously reported 756 z9–12 + 48 z13 + 165 z14 + 609 z15 + 2,352 z16 = **3,930 total**. If unchanged, the dry run should propose **3,717 deletions** and **213 retained** (48 + 165); confirm actual bytes from the tool rather than estimating. After pruning, later acquisition plans may extend the remaining z13–14 directory; the **cumulative tile cap** counts only files actually retained and newly planned.
+
+This is an explicitly owner-run destructive maintenance operation, not an implicit effect of `-download` or browser panning. An application already using this directory may temporarily show missing coverage until the new browser code is built and deployed, so coordinate local acceptance without touching any public service or tunnel automatically.
+
