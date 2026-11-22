@@ -18,7 +18,7 @@ func legacyNOAARoot(t *testing.T) string {
  root:=filepath.Join(t.TempDir(),"managed-noaa")
  if err:=os.Mkdir(root,0700);err!=nil{t.Fatal(err)}
  original:=options{Source:"noaa",West:-123,South:36.5,East:-121.45,North:38.45,MinZoom:9,MaxZoom:12}
- if err:=os.WriteFile(filepath.Join(root,markerFile),[]byte(original.signature()),0600);err!=nil{t.Fatal(err)}
+ if err:=os.WriteFile(filepath.Join(root,markerFile),[]byte("SailingGo-managed-XYZ-v1\nsource=noaa\nbounds=-123.00000000,36.50000000,-121.45000000,38.45000000\nzoom=9..12\n"),0600);err!=nil{t.Fatal(err)}
  for _,z:=range []int{9,10,11,12,13,14,15,16}{
   x,y:=xyz(-121.9,38.0,z)
   pngData,err:=mockchart.Render(z,x,y);if err!=nil{t.Fatal(err)}
@@ -31,7 +31,7 @@ func legacyNOAARoot(t *testing.T) string {
 func TestPruneDryRunAndExplicitApply(t *testing.T){
  root:=legacyNOAARoot(t)
  o:=options{Source:"noaa",Dir:root,MaxTiles:1,MaxBytes:1,Timeout:time.Second}
- _,before,err:=inspectManaged(options{Source:"noaa",Dir:root,MaxTiles:100},plan{})
+ _,before,err:=inspectManaged(options{Source:"noaa",Dir:root,MaxTiles:100,AllowLegacyNOAA:true},plan{})
  if err!=nil||before.Count!=8{t.Fatalf("bad fixture inventory %+v err=%v",before,err)}
  if err:=pruneManaged(o,false);err!=nil{t.Fatal(err)}
  _,afterDry,err:=inspectManaged(options{Source:"noaa",Dir:root,MaxTiles:100},plan{})
@@ -47,10 +47,10 @@ func TestPruneDryRunAndExplicitApply(t *testing.T){
  }
  if _,err:=os.Stat(filepath.Join(root,markerFile));err!=nil{t.Fatal("marker removed")}
  if err:=pruneManaged(o,true);err!=nil{t.Fatalf("prune is not idempotent: %v",err)}
- // Existing keeper tiles must remain eligible for an extension within a
- // cumulative budget even though the original provenance marker was z9-12.
+ // Legacy NOAA PNGs were made with layers 0-12 and must NEVER be extended
+ // with cleaner 0-7 tiles, even after old zooms are pruned.
  ext:=options{Source:"noaa",Dir:root,West:-121.9,East:-121.89,South:37.99,North:38.0,MinZoom:13,MaxZoom:14,MaxTiles:100,Timeout:time.Second}
- if _,err:=execute(context.Background(),ext,"",nil);err!=nil{t.Fatalf("after prune dry-run cannot extend: %v",err)}
+ if _,err:=execute(context.Background(),ext,"",nil);err==nil{t.Fatal("legacy all-layer NOAA cache was accepted for clean-layer acquisition")}
 }
 func TestPruneRefusesUnknownOrMixedDataset(t *testing.T){
  root:=legacyNOAARoot(t)
