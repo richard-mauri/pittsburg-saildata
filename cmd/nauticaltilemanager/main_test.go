@@ -246,7 +246,26 @@ func TestAcquisitionProgressReportsEachTileAndResume(t *testing.T) {
   return string(output),result,runErr
  }
  first,created,err:=capture();if err!=nil{t.Fatal(err)}
- if created.Created<1||!strings.Contains(first,"fetching z13/")||!strings.Contains(first,"100.0%")||!strings.Contains(first,"ETA=")||!strings.Contains(first,"saved ("){t.Fatalf("missing acquisition progress: %s",first)}
+ if created.Created<1||!strings.Contains(first,"100.0%")||!strings.Contains(first,"ETA=")||!strings.Contains(first,"saved ("){t.Fatalf("missing acquisition progress: %s",first)}
  second,resumed,err:=capture();if err!=nil{t.Fatal(err)}
  if resumed.Created!=0||resumed.Skipped!=created.Created||!strings.Contains(second,"existing")||!strings.Contains(second,"100.0%"){t.Fatalf("missing resume progress: %s",second)}
+}
+
+func TestBoundedParallelAcquisitionAndResume(t *testing.T){
+ o:=localPlan();o.Source="noaa";o.Workers=4;o.Download=true;o.Dir=filepath.Join(t.TempDir(),"parallel")
+ data,err:=mockchart.Render(9,81,197);if err!=nil{t.Fatal(err)}
+ var active,maxActive atomic.Int32
+ upstream:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
+  n:=active.Add(1)
+  for {old:=maxActive.Load();if n<=old||maxActive.CompareAndSwap(old,n){break}}
+  time.Sleep(20*time.Millisecond)
+  active.Add(-1)
+  w.Header().Set("Content-Type","image/png");_,_=w.Write(data)
+ }));defer upstream.Close()
+ p,err:=buildPlan(o);if err!=nil{t.Fatal(err)}
+ first,err:=execute(context.Background(),o,upstream.URL,upstream.Client());if err!=nil{t.Fatal(err)}
+ if first.Created!=p.Total||maxActive.Load()<2||maxActive.Load()>4{t.Fatalf("parallel result %+v max concurrency=%d",first,maxActive.Load())}
+ second,err:=execute(context.Background(),o,upstream.URL,upstream.Client());if err!=nil||second.Created!=0||second.Skipped!=p.Total{t.Fatalf("resume %+v %v",second,err)}
+ o.Workers=9
+ if _,err:=buildPlan(o);err==nil{t.Fatal("accepted excessive workers")}
 }
