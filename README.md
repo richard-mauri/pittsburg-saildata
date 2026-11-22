@@ -228,3 +228,20 @@ It reports the exact number of files/PNG bytes that would be deleted and retaine
 
 This is an explicitly owner-run destructive maintenance operation, not an implicit effect of `-download` or browser panning. An application already using this directory may temporarily show missing coverage until the new browser code is built and deployed, so coordinate local acceptance without touching any public service or tunnel automatically.
 
+### Isolated NOAA WMS layer comparison — do not replace the managed cache yet (2026-11-22)
+
+Owner's Safari review of the expanded 3,008-tile NOAA native z13–14 dataset still shows repetitive gray triangles, raising concern that the encoded raster imagery includes an optional warning/pattern rather than inherently insufficient source-chart resolution. The Tile Manager's existing production acquisition request continues to use **WMS layers 0–12**. A new **explicit diagnostic**, `-compare-layers`, downloads four *identical* XYZ geographic tile footprints at two accepted native zooms (z13 and z14), sampling Pittsburg and Suisun Bay. It requests each footprint twice: once with the current `LAYERS=0,1,2,3,4,5,6,7,8,9,10,11,12`, once with candidate `LAYERS=0,1,2,3,4,5,6,7`. It creates **eight PNGs**, with names ending `all-0-12.png` and `visible-0-7.png`.
+
+**No managed dataset is touched and no CLI acquisition defaults change.** The output must be a **new nonexistent directory** outside any manager-marked NOAA/mock dataset; existing paths are refused, and no PNGs are downloaded until that dedicated output path is created. Both images are validated as 256×256 PNGs and printed with individual byte counts plus a same-bytes comparison. The diagnostic is incompatible with `-download`, `-prune`, `-dir` and `-source mock`. It uses the same NOAA WMS endpoint, timeout and bounded retry settings. A failed request may leave a partial diagnostic directory but will not modify the chart cache; choose a new comparison directory for any retry.
+
+Owner Mac example, **explicitly contacting NOAA eight times**, writing only under Git-ignored `cache/`:
+
+```sh
+go run ./cmd/nauticaltilemanager -compare-layers \
+  -timeout 45s -retries 2 \
+  -compare-dir "$HOME/projects/sailing-go/cache/noaa-layer-comparison-20261122"
+open -a Preview cache/noaa-layer-comparison-20261122/*.png
+```
+
+Compare the matched images visually: if the triangles disappear while chart soundings/buoys remain, confirm that candidate layers 0–7 are appropriate. If not, investigate NOAA's chart scale and symbology instead. **Do not overwrite/re-download the existing 3,008 NOAA cached PNGs until the owner accepts the comparison**; the managed cache marker and current downloader remain unchanged.
+
