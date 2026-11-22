@@ -174,7 +174,7 @@ func execute(ctx context.Context,o options,base string,client *http.Client)(tota
  dir,inv,err:=inspectManaged(o,p);if err!=nil{return t,err}
  o.print(p)
  if o.Dir!="" {
-  fmt.Printf("Managed dataset: existing=%d tiles (%d PNG bytes), overlap=%d, new=%d, projected-total=%d / max-tiles=%d\\n",
+  fmt.Printf("Managed dataset: existing=%d tiles (%d PNG bytes), overlap=%d, new=%d, projected-total=%d / max-tiles=%d\n",
    inv.Count,inv.Bytes,inv.Overlap,inv.New,inv.Count+inv.New,o.MaxTiles)
  }
  if !o.Download{return t,nil}
