@@ -18,6 +18,7 @@ import (
  "path/filepath"
  "strconv"
  "strings"
+ "sync"
  "time"
 
  "pittsburg-saildata/internal/mockchart"
@@ -29,10 +30,11 @@ const markerFile = ".sailing-nautical-tile-manager.json"
 
 type options struct {
  West, South, East, North float64
- MinZoom, MaxZoom, MaxTiles int
+ MinZoom, MaxZoom, MaxTiles, Workers int
  MaxBytes int64
  Dir, Source string
  AllowLegacyNOAA bool // Internal maintenance only; never exposed as a CLI flag.
+ DisableSCAMIN bool // NOAA only; isolated managed dataset with separate provenance.
  Download bool
  Timeout time.Duration
  Retries int
@@ -55,14 +57,16 @@ func buildPlan(o options) (plan,error) {
     o.South < -85 || o.North > 85 || o.South>=o.North {
   return p,errors.New("invalid geographic bounds: use west < east, south < north, lon [-180,180] and lat [-85,85]")
  }
- if o.MinZoom<13 || o.MaxZoom>14 || o.MinZoom>o.MaxZoom {
-  return p,errors.New("managed NOAA tile acquisition is restricted to useful native zooms 13..14")
+ if o.MinZoom<12 || o.MaxZoom>15 || o.MinZoom>o.MaxZoom {
+  return p,errors.New("managed NOAA tile acquisition is restricted to native zooms 12..15")
  }
+ if o.Workers<0||o.Workers>8{return p,errors.New("-workers must be within 1..8")}
  if o.MaxTiles<=0 {return p,errors.New("-max-tiles must be positive")}
  if o.MaxBytes<0 {return p,errors.New("-max-bytes must be nonnegative")}
  if o.Timeout<=0 {return p,errors.New("-timeout must be positive")}
  if o.Retries<0||o.Retries>5{return p,errors.New("-retries must be within 0..5")}
  if o.Source!="noaa" && o.Source!="mock" {return p,errors.New("-source must be noaa or mock")}
+ if o.DisableSCAMIN && o.Source!="noaa" {return p,errors.New("-disable-scamin requires -source noaa")}
  if o.Source=="mock" && (o.West<mockchart.West||o.East>mockchart.East||
    o.South<mockchart.South||o.North>mockchart.North) {
   return p,errors.New("mock bounds must be inside the test-only Bay-to-Monterey rectangle")
@@ -88,6 +92,7 @@ func (o options) print(p plan) {
 }
 func (o options) signature() string {
  // Original v1 marker retained as source/provenance identity across additions.\n // Caps are enforced cumulatively by the managed-directory inventory.
+ if o.Source=="noaa" && o.DisableSCAMIN {return fmt.Sprintf("SailingGo-managed-XYZ-v3\nsource=noaa\nlayers=0,1,2,3,4,5,6,7\nHonorScamin=1\nbounds=%.8f,%.8f,%.8f,%.8f\nzoom=%d..%d\n",o.West,o.South,o.East,o.North,o.MinZoom,o.MaxZoom)}
  if o.Source=="noaa" {return fmt.Sprintf("SailingGo-managed-XYZ-v2\nsource=noaa\nlayers=0,1,2,3,4,5,6,7\nbounds=%.8f,%.8f,%.8f,%.8f\nzoom=%d..%d\n",o.West,o.South,o.East,o.North,o.MinZoom,o.MaxZoom)}
  return fmt.Sprintf("SailingGo-managed-XYZ-v1\nsource=%s\nbounds=%.8f,%.8f,%.8f,%.8f\nzoom=%d..%d\n",
   o.Source,o.West,o.South,o.East,o.North,o.MinZoom,o.MaxZoom)
@@ -115,9 +120,15 @@ func requestURLWithLayers(base string,z,x,y int,layers string)(string,error){
  u.RawQuery=q.Encode()
  return u.String(),nil
 }
+func withSCAMINDisabled(target string)(string,error){
+ u,err:=url.Parse(target);if err!=nil{return "",err}
+ q:=u.Query();q.Set("Display_params",`{"ECDISParameters":{"DynamicParameters":{"Parameter":[{"name":"HonorScamin","value":1}]}}}`);u.RawQuery=q.Encode()
+ return u.String(),nil
+}
 func getTile(ctx context.Context,o options,base string,client *http.Client,z,x,y int)([]byte,error){
  if o.Source=="mock" {return mockchart.Render(z,x,y)}
  target,err:=requestURL(base,z,x,y);if err!=nil{return nil,err}
+ if o.DisableSCAMIN {target,err=withSCAMINDisabled(target);if err!=nil{return nil,err}}
  req,err:=http.NewRequestWithContext(ctx,http.MethodGet,target,nil);if err!=nil{return nil,err}
  req.Header.Set("Accept","image/png")
  req.Header.Set("User-Agent","SailingGo nautical tile manager")
@@ -174,50 +185,91 @@ type totals struct {Skipped,Created int64; Bytes int64}
 func execute(ctx context.Context,o options,base string,client *http.Client)(totals,error){
  var t totals
  p,err:=buildPlan(o);if err!=nil{return t,err}
- // Validate the entire existing managed dataset and count only genuinely new
- // XYZ paths before ANY download or cache write.
  dir,inv,err:=inspectManaged(o,p);if err!=nil{return t,err}
  o.print(p)
- if o.Dir!="" {
-  fmt.Printf("Managed dataset: existing=%d tiles (%d PNG bytes), overlap=%d, new=%d, projected-total=%d / max-tiles=%d\n",
-   inv.Count,inv.Bytes,inv.Overlap,inv.New,inv.Count+inv.New,o.MaxTiles)
- }
+ if o.Dir!="" {fmt.Printf("Managed dataset: existing=%d tiles (%d PNG bytes), overlap=%d, new=%d, projected-total=%d / max-tiles=%d\n",inv.Count,inv.Bytes,inv.Overlap,inv.New,inv.Count+inv.New,o.MaxTiles)}
  if !o.Download{return t,nil}
  if err:=createManagedRoot(dir,o);err!=nil{return t,err}
  t.Bytes=inv.Bytes
+ if o.MaxBytes>0&&t.Bytes>o.MaxBytes{return t,fmt.Errorf("existing cache exceeds -max-bytes=%d",o.MaxBytes)}
+ workers:=o.Workers
+ if workers==0{workers=1} // Backward-compatible default for direct callers.
  if client==nil{client=&http.Client{Timeout:o.Timeout}}
- // Serial and deterministic; no unbounded concurrent NOAA downloads.
- for _,row:=range p.Rows{
-  for x:=row.X0;x<=row.X1;x++{for y:=row.Y0;y<=row.Y1;y++{
-   select{case <-ctx.Done():return t,ctx.Err();default:}
-   path:=filepath.Join(dir,strconv.Itoa(row.Z),strconv.Itoa(x),strconv.Itoa(y)+".png")
-   if b,err:=os.ReadFile(path);err==nil {
-    if !validPNG(b){return t,fmt.Errorf("invalid existing tile, refusing overwrite: %s",path)}
-    t.Skipped++
-    if o.MaxBytes>0&&t.Bytes>o.MaxBytes{return t,fmt.Errorf("existing cache exceeds -max-bytes=%d",o.MaxBytes)}
-    continue
-   }else if !os.IsNotExist(err){return t,err}
-   b,err:=downloadWithRetry(ctx,o,base,client,row.Z,x,y)
-   if err!=nil{return t,fmt.Errorf("tile %d/%d/%d: %w",row.Z,x,y,err)}
-   if !validPNG(b){return t,fmt.Errorf("tile %d/%d/%d: invalid PNG",row.Z,x,y)}
-   if o.MaxBytes>0&&t.Bytes+int64(len(b))>o.MaxBytes{return t,fmt.Errorf("next tile exceeds -max-bytes=%d; resume with larger budget only if intended",o.MaxBytes)}
-   if err:=atomicPNG(path,b);err!=nil{return t,err}
-   t.Created++;t.Bytes+=int64(len(b))
-  }}
+ ctx,cancel:=context.WithCancel(ctx);defer cancel()
+ type tileJob struct{z,x,y int}
+ type tileResult struct{job tileJob;b []byte;existing bool;err error}
+ jobs:=make(chan tileJob)
+ results:=make(chan tileResult,workers)
+ var wg sync.WaitGroup
+ for i:=0;i<workers;i++{
+  wg.Add(1)
+  go func(){
+   defer wg.Done()
+   for j:=range jobs{
+    path:=filepath.Join(dir,strconv.Itoa(j.z),strconv.Itoa(j.x),strconv.Itoa(j.y)+".png")
+    var result tileResult
+    result.job=j
+    if b,e:=os.ReadFile(path);e==nil{
+     if !validPNG(b){result.err=fmt.Errorf("invalid existing tile, refusing overwrite: %s",path)}else{result.existing=true}
+    }else if !os.IsNotExist(e){result.err=e
+    }else{
+     result.b,result.err=downloadWithRetry(ctx,o,base,client,j.z,j.x,j.y)
+    }
+    results<-result
+   }
+  }()
  }
- fmt.Printf("Saved %d new tiles, verified %d existing tiles, PNG bytes=%d (acquisition restricted to native z13..14)\n",t.Created,t.Skipped,t.Bytes)
+ go func(){
+  defer close(jobs)
+  for _,row:=range p.Rows{
+   for x:=row.X0;x<=row.X1;x++{for y:=row.Y0;y<=row.Y1;y++{
+    select{case <-ctx.Done():return;case jobs<-tileJob{row.Z,x,y}:}
+   }}
+  }
+ }()
+ go func(){wg.Wait();close(results)}()
+ started:=time.Now()
+ var processed int64
+ var firstErr error
+ fmt.Printf("Acquiring %d planned tiles (new=%d, existing=%d); source=%s, SCAMIN disabled=%t, workers=%d\n",p.Total,inv.New,inv.Overlap,o.Source,o.DisableSCAMIN,workers)
+ for r:=range results{
+  if firstErr!=nil{continue} // Drain workers safely after cancellation.
+  j:=r.job
+  if r.err!=nil{firstErr=fmt.Errorf("tile %d/%d/%d: %w",j.z,j.x,j.y,r.err);cancel();continue}
+  action:="existing"
+  if r.existing{t.Skipped++}else{
+   if !validPNG(r.b){firstErr=fmt.Errorf("tile %d/%d/%d: invalid PNG",j.z,j.x,j.y);cancel();continue}
+   if o.MaxBytes>0&&t.Bytes+int64(len(r.b))>o.MaxBytes{
+    firstErr=fmt.Errorf("next tile exceeds -max-bytes=%d; resume with larger budget only if intended",o.MaxBytes);cancel();continue
+   }
+   path:=filepath.Join(dir,strconv.Itoa(j.z),strconv.Itoa(j.x),strconv.Itoa(j.y)+".png")
+   if err:=atomicPNG(path,r.b);err!=nil{firstErr=err;cancel();continue}
+   t.Created++;t.Bytes+=int64(len(r.b))
+   action=fmt.Sprintf("saved (%d bytes)",len(r.b))
+  }
+  processed++
+  elapsed:=time.Since(started)
+  eta:="calculating"
+  if processed>0{eta=time.Duration(float64(elapsed)*float64(p.Total-processed)/float64(processed)).Round(time.Second).String()}
+  fmt.Printf("[%d/%d] %.1f%% z%d/%d/%d %s | saved=%d skipped=%d | elapsed=%s ETA=%s\n",processed,p.Total,100*float64(processed)/float64(p.Total),j.z,j.x,j.y,action,t.Created,t.Skipped,elapsed.Round(time.Second),eta)
+ }
+ if firstErr!=nil{return t,firstErr}
+ if err:=ctx.Err();err!=nil{return t,err}
+ fmt.Printf("Saved %d new tiles, verified %d existing tiles, PNG bytes=%d (acquisition restricted to native z12..15)\n",t.Created,t.Skipped,t.Bytes)
  return t,nil
 }
 func main(){
  var o options
- var prune,applyPrune,compareLayers bool
- var compareDir string
+ var prune,applyPrune,compareLayers,zoomSamples,displayStudy,seamStudy bool
+ var compareDir,zoomSamplesDir,displayStudyDir,seamStudyDir string
+ var seamLon,seamLat float64
  flag.Float64Var(&o.West,"west",math.NaN(),"western longitude")
  flag.Float64Var(&o.South,"south",math.NaN(),"southern latitude")
  flag.Float64Var(&o.East,"east",math.NaN(),"eastern longitude")
  flag.Float64Var(&o.North,"north",math.NaN(),"northern latitude")
- flag.IntVar(&o.MinZoom,"min-zoom",13,"first native nautical zoom (13..14)")
- flag.IntVar(&o.MaxZoom,"max-zoom",14,"last native nautical zoom (13..14)")
+ flag.IntVar(&o.MinZoom,"min-zoom",13,"first native nautical zoom (12..15)")
+ flag.IntVar(&o.MaxZoom,"max-zoom",14,"last native nautical zoom (12..15)")
+ flag.IntVar(&o.Workers,"workers",4,"concurrent tile requests (1..8; default 4)")
  flag.IntVar(&o.MaxTiles,"max-tiles",0,"required hard ceiling on cumulative XYZ files in the managed directory")
  flag.Int64Var(&o.MaxBytes,"max-bytes",0,"optional total cached PNG bytes ceiling (0 = not configured)")
  flag.DurationVar(&o.Timeout,"timeout",30*time.Second,"NOAA request timeout for each attempt")
@@ -225,13 +277,44 @@ func main(){
  flag.StringVar(&o.Dir,"dir","","existing managed directory to extend or new managed directory (required for -download)")
  flag.StringVar(&o.Source,"source","noaa","noaa or mock")
  flag.BoolVar(&o.Download,"download",false,"explicitly enable file creation and NOAA downloads")
+ flag.BoolVar(&o.DisableSCAMIN,"disable-scamin",false,"NOAA only: render all SCAMIN-filtered features; requires separate managed -dir")
  flag.BoolVar(&compareLayers,"compare-layers",false,"save a small separate NOAA WMS 0-12 vs 0-7 diagnostic sample; never touch managed cache")
  flag.StringVar(&compareDir,"compare-dir","","NEW output directory for WMS layer comparison PNG samples")
+ flag.BoolVar(&zoomSamples,"zoom-samples",false,"fetch 12 isolated NOAA WMS z12..15 PNGs for visual study; never modify managed cache")
+ flag.StringVar(&zoomSamplesDir,"zoom-samples-dir","","NEW output directory for zoom 12..15 study PNGs")
+ flag.BoolVar(&displayStudy,"display-study",false,"save isolated NOAA default vs experimental SCAMIN comparison; never modify managed cache")
+ flag.StringVar(&displayStudyDir,"display-study-dir","","NEW output directory for NOAA display study")
+ flag.BoolVar(&seamStudy,"seam-study",false,"isolated 2x2 XYZ versus single 512px NOAA WMS seam comparison")
+ flag.StringVar(&seamStudyDir,"seam-study-dir","","NEW directory for seam comparison (outside managed cache)")
+ flag.Float64Var(&seamLon,"seam-lon",-121.94,"longitude at diagnostic seam")
+ flag.Float64Var(&seamLat,"seam-lat",38.06,"latitude at diagnostic seam")
  flag.BoolVar(&prune,"prune",false,"plan removal of NOAA cached tiles outside native zoom 13..14 (dry-run default)")
  flag.BoolVar(&applyPrune,"apply-prune",false,"with -prune, explicitly delete zooms 9..12 and 15..16 from managed NOAA dataset")
  flag.Parse()
  if flag.NArg()!=0 {fmt.Fprintln(os.Stderr,"unexpected positional arguments");os.Exit(2)}
  if applyPrune&&!prune {fmt.Fprintln(os.Stderr,"-apply-prune requires -prune");os.Exit(2)}
+ if seamStudy {
+  if prune||applyPrune||compareLayers||zoomSamples||displayStudy||o.Download||o.Dir!=""||o.Source!="noaa"||o.DisableSCAMIN||compareDir!=""||zoomSamplesDir!=""||displayStudyDir!="" {fmt.Fprintln(os.Stderr,"-seam-study is isolated from acquisition and other modes");os.Exit(2)}
+  if err:=writeSeamStudy(context.Background(),seamStudyDir,noaaURL,&http.Client{Timeout:o.Timeout},seamLon,seamLat);err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)}
+  return
+ }
+ if seamStudyDir!="" {fmt.Fprintln(os.Stderr,"-seam-study-dir requires -seam-study");os.Exit(2)}
+ if displayStudy {
+  if prune||applyPrune||compareLayers||zoomSamples||compareDir!=""||zoomSamplesDir!=""||o.Download||o.Dir!=""||o.Source!="noaa"||o.DisableSCAMIN {fmt.Fprintln(os.Stderr,"-display-study is isolated from acquisition and other diagnostics");os.Exit(2)}
+  if err:=writeDisplayStudy(context.Background(),displayStudyDir,noaaURL,&http.Client{Timeout:o.Timeout},o.Timeout,o.Retries);err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)}
+  return
+ }
+ if displayStudyDir!=""{fmt.Fprintln(os.Stderr,"-display-study-dir requires -display-study");os.Exit(2)}
+ if zoomSamples {
+  if prune||applyPrune||compareLayers||compareDir!=""||o.Download||o.Dir!=""||o.Source!="noaa"{
+   fmt.Fprintln(os.Stderr,"-zoom-samples is isolated: cannot combine with -download, -prune, -compare-layers, -dir or -source mock");os.Exit(2)
+  }
+  if err:=writeZoomSamples(context.Background(),zoomSamplesDir,noaaURL,&http.Client{Timeout:o.Timeout},o.Timeout,o.Retries);err!=nil{
+   fmt.Fprintln(os.Stderr,err);os.Exit(1)
+  }
+  return
+ }
+ if zoomSamplesDir!=""{fmt.Fprintln(os.Stderr,"-zoom-samples-dir requires -zoom-samples");os.Exit(2)}
  if compareLayers {
   if prune||applyPrune||o.Download||o.Dir!=""||o.Source!="noaa"{
    fmt.Fprintln(os.Stderr,"-compare-layers is isolated: cannot combine with -download, -prune, -dir or -source mock");os.Exit(2)

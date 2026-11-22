@@ -3,6 +3,10 @@ package main
 import (
  "bytes"
  "context"
+ "encoding/json"
+ "image"
+ "image/png"
+ "io"
  "net/http"
  "net/http/httptest"
  "os"
@@ -37,6 +41,23 @@ func TestBoundsAndLimits(t *testing.T){
   t.Fatalf("oversized plan accepted: %v",err)
  }
 }
+func TestNativeZoom12And15ManagedPlanning(t *testing.T) {
+ for _, z := range []int{12, 15} {
+  o := localPlan()
+  o.Source = "noaa"
+  o.MinZoom, o.MaxZoom = z, z
+  o.MaxTiles = 100
+  p, err := buildPlan(o)
+  if err != nil || p.Total < 1 { t.Fatalf("z%d plan: %+v %v", z, p, err) }
+ }
+ o := localPlan()
+ o.Source = "noaa"
+ o.MinZoom, o.MaxZoom = 11, 11
+ if _, err := buildPlan(o); err == nil { t.Fatal("z11 accepted") }
+ o.MinZoom, o.MaxZoom = 16, 16
+ if _, err := buildPlan(o); err == nil { t.Fatal("z16 accepted") }
+}
+
 func TestDryRunWritesNothingAndNoNetwork(t *testing.T){
  o:=localPlan();o.Dir=filepath.Join(t.TempDir(),"must-not-exist")
  var requests atomic.Int32
@@ -184,4 +205,93 @@ func TestExtendDryRunDoesNotModifyExisting(t *testing.T){
  }
  _,inv,err:=inspectManaged(o,mustPlan(t,o))
  if err!=nil||inv.Count!=first.Created||inv.New==0{t.Fatalf("dry-run inventory wrong: %+v err=%v",inv,err)}
+}
+
+func TestNOAAScaminOffManagedProvenanceAndRequest(t *testing.T) {
+ o:=localPlan();o.Source="noaa";o.DisableSCAMIN=true;o.Download=true;o.Dir=filepath.Join(t.TempDir(),"scamin-off")
+ data,err:=mockchart.Render(9,81,197);if err!=nil{t.Fatal(err)}
+ var calls atomic.Int32
+ var defaultCalls atomic.Int32
+ upstream:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
+  calls.Add(1)
+  if !r.URL.Query().Has("Display_params") {defaultCalls.Add(1)} else {
+  var v struct{ECDISParameters struct{DynamicParameters struct{Parameter []struct{Name string `json:"name"`;Value int `json:"value"`} `json:"Parameter"`} `json:"DynamicParameters"`} `json:"ECDISParameters"`}
+  if err:=json.Unmarshal([]byte(r.URL.Query().Get("Display_params")),&v);err!=nil||len(v.ECDISParameters.DynamicParameters.Parameter)!=1||v.ECDISParameters.DynamicParameters.Parameter[0].Name!="HonorScamin"||v.ECDISParameters.DynamicParameters.Parameter[0].Value!=1{t.Errorf("wrong SCAMIN-off WMS query: %v, %v",r.URL.Query(),err)}
+  }
+  w.Header().Set("Content-Type","image/png");_,_=w.Write(data)
+ }));defer upstream.Close()
+ first,err:=execute(context.Background(),o,upstream.URL,upstream.Client());if err!=nil{t.Fatal(err)}
+ if first.Created<1||calls.Load()!=int32(first.Created){t.Fatalf("unexpected acquisition %+v, calls=%d",first,calls.Load())}
+ marker,err:=os.ReadFile(filepath.Join(o.Dir,markerFile));if err!=nil||!strings.HasPrefix(string(marker),"SailingGo-managed-XYZ-v3\n")||!strings.Contains(string(marker),"\nHonorScamin=1\n"){t.Fatalf("wrong SCAMIN provenance %q %v",marker,err)}
+ again,err:=execute(context.Background(),o,upstream.URL,upstream.Client());if err!=nil||again.Created!=0||again.Skipped!=first.Created{t.Fatalf("SCAMIN resume failed %+v %v",again,err)}
+ normal:=o;normal.DisableSCAMIN=false
+ if _,err:=execute(context.Background(),normal,upstream.URL,upstream.Client());err==nil{t.Fatal("default NOAA allowed in SCAMIN-off cache")}
+ normal.Dir=filepath.Join(t.TempDir(),"default")
+ defaultResult,err:=execute(context.Background(),normal,upstream.URL,upstream.Client());if err!=nil{t.Fatal(err)}
+ if defaultCalls.Load()!=int32(defaultResult.Created){t.Fatalf("default NOAA requests missing SCAMIN isolation: %d vs %d",defaultCalls.Load(),defaultResult.Created)}
+ normal.DisableSCAMIN=true
+ if _,err:=execute(context.Background(),normal,upstream.URL,upstream.Client());err==nil{t.Fatal("SCAMIN-off allowed in default cache")}
+ mock:=localPlan();mock.DisableSCAMIN=true
+ if _,err:=buildPlan(mock);err==nil{t.Fatal("mock accepted SCAMIN override")}
+}
+
+func TestAcquisitionProgressReportsEachTileAndResume(t *testing.T) {
+ o:=localPlan();o.Download=true;o.Dir=filepath.Join(t.TempDir(),"progress")
+ capture:=func() (string,totals,error) {
+  old:=os.Stdout
+  reader,writer,err:=os.Pipe();if err!=nil{t.Fatal(err)}
+  os.Stdout=writer
+  defer func(){os.Stdout=old;_ = writer.Close();_ = reader.Close()}()
+  result,runErr:=execute(context.Background(),o,"",nil)
+  _=writer.Close()
+  output,readErr:=io.ReadAll(reader);if readErr!=nil{t.Fatal(readErr)}
+  return string(output),result,runErr
+ }
+ first,created,err:=capture();if err!=nil{t.Fatal(err)}
+ if created.Created<1||!strings.Contains(first,"100.0%")||!strings.Contains(first,"ETA=")||!strings.Contains(first,"saved ("){t.Fatalf("missing acquisition progress: %s",first)}
+ second,resumed,err:=capture();if err!=nil{t.Fatal(err)}
+ if resumed.Created!=0||resumed.Skipped!=created.Created||!strings.Contains(second,"existing")||!strings.Contains(second,"100.0%"){t.Fatalf("missing resume progress: %s",second)}
+}
+
+func TestBoundedParallelAcquisitionAndResume(t *testing.T){
+ o:=localPlan();o.Source="noaa";o.Workers=4;o.Download=true;o.Dir=filepath.Join(t.TempDir(),"parallel")
+ data,err:=mockchart.Render(9,81,197);if err!=nil{t.Fatal(err)}
+ var active,maxActive atomic.Int32
+ upstream:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
+  n:=active.Add(1)
+  for {old:=maxActive.Load();if n<=old||maxActive.CompareAndSwap(old,n){break}}
+  time.Sleep(20*time.Millisecond)
+  active.Add(-1)
+  w.Header().Set("Content-Type","image/png");_,_=w.Write(data)
+ }));defer upstream.Close()
+ p,err:=buildPlan(o);if err!=nil{t.Fatal(err)}
+ first,err:=execute(context.Background(),o,upstream.URL,upstream.Client());if err!=nil{t.Fatal(err)}
+ if first.Created!=p.Total||maxActive.Load()<2||maxActive.Load()>4{t.Fatalf("parallel result %+v max concurrency=%d",first,maxActive.Load())}
+ second,err:=execute(context.Background(),o,upstream.URL,upstream.Client());if err!=nil||second.Created!=0||second.Skipped!=p.Total{t.Fatalf("resume %+v %v",second,err)}
+ o.Workers=9
+ if _,err:=buildPlan(o);err==nil{t.Fatal("accepted excessive workers")}
+}
+
+
+func TestSeamStudySameExtentAndIsolation(t *testing.T) {
+ png256,err:=mockchart.Render(13,1300,3150);if err!=nil{t.Fatal(err)}
+ var seen atomic.Int32
+ server:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
+  q:=r.URL.Query()
+  if q.Get("LAYERS")!="0,1,2,3,4,5,6,7"||!strings.Contains(q.Get("Display_params"),"\"HonorScamin\"") {t.Errorf("missing provenance: %v",q)}
+  if q.Get("WIDTH")=="512"{
+   seen.Add(1)
+   im:=image.NewRGBA(image.Rect(0,0,512,512))
+   var b bytes.Buffer
+   if e:=png.Encode(&b,im);e!=nil{t.Error(e)}
+   w.Header().Set("Content-Type","image/png");_,_=w.Write(b.Bytes());return
+  }
+  if q.Get("WIDTH")!="256"{t.Errorf("unexpected width: %v",q)}
+  seen.Add(1);w.Header().Set("Content-Type","image/png");_,_=w.Write(png256)
+ }));defer server.Close()
+ out:=filepath.Join(t.TempDir(),"seam")
+ if err:=writeSeamStudy(context.Background(),out,server.URL,server.Client(),-121.94,38.06);err!=nil{t.Fatal(err)}
+ if seen.Load()!=5{t.Fatalf("expected 5 requests, got %d",seen.Load())}
+ for _,name:=range []string{"mosaic-4x256.png","single-512.png","requests.txt"}{if _,e:=os.Stat(filepath.Join(out,name));e!=nil{t.Fatal(e)}}
+ if err:=writeSeamStudy(context.Background(),out,server.URL,server.Client(),-121.94,38.06);err==nil{t.Fatal("overwriting study accepted")}
 }

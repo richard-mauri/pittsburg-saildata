@@ -43,11 +43,18 @@ func inspectManaged(o options,p plan) (string,managedInventory,error) {
  lines:=string(marker)
  legacy:=strings.HasPrefix(lines,"SailingGo-managed-XYZ-v1\n")
  clean:=strings.HasPrefix(lines,"SailingGo-managed-XYZ-v2\n")
- if (!legacy&&!clean)||!strings.Contains(lines,"\nsource="+o.Source+"\n"){
+ scaminOff:=strings.HasPrefix(lines,"SailingGo-managed-XYZ-v3\n")
+ if (!legacy&&!clean&&!scaminOff)||!strings.Contains(lines,"\nsource="+o.Source+"\n"){
   return "",inv,errors.New("managed directory marker has a different source or unknown format")
  }
+ if o.Source=="noaa" && o.DisableSCAMIN && (!scaminOff||!strings.Contains(lines,"\nHonorScamin=1\n")) {
+  return "",inv,errors.New("SCAMIN-disabled tiles require a NEW managed directory with HonorScamin=1 provenance")
+ }
+ if o.Source=="noaa" && !o.DisableSCAMIN && scaminOff {
+  return "",inv,errors.New("SCAMIN-disabled dataset cannot be mixed with default NOAA tiles")
+ }
  if o.Source=="noaa" && !o.AllowLegacyNOAA {
-  if !clean||!strings.Contains(lines,"\nlayers=0,1,2,3,4,5,6,7\n"){
+  if (!clean&&!scaminOff)||!strings.Contains(lines,"\nlayers=0,1,2,3,4,5,6,7\n"){
    return "",inv,errors.New("legacy NOAA cache was rendered with layers 0-12; do not mix imagery; choose a NEW -dir for layers 0-7")
   }
  }

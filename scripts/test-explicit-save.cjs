@@ -154,7 +154,7 @@ function testMapTileFallback(){
   preferredMapLayerName:'nautical',activeMapLayerName:'map',
   nauticalUnavailable:false,nauticalCheckTimer:null,nauticalAdvisory:false,nauticalTileLoads:0,
   nauticalLoading:false,
-  nauticalAutomaticFallback:false,nauticalFailureNotice:false,nauticalStatusMessage:'',minimumNauticalZoom:13,maximumNauticalZoom:14,
+  nauticalAutomaticFallback:false,nauticalFailureNotice:false,nauticalStatusMessage:'',minimumNauticalZoom:12,maximumNauticalZoom:15,
   nauticalMockInspection:false,
   mapState:{cloudOverlayVisible:false,radarOverlayVisible:false},
   cloudLayer:null,radarLayer:null,marineZoneHaloLayer:null,
@@ -261,7 +261,7 @@ function testNauticalResponseDiagnostics(){
   project(point){return {x:point.x*256,y:point.y*256};}};
  const context={nauticalLayer,preferredMapLayerName:'nautical',
   nauticalZoomNote:note,nauticalStatusText:statusText,nauticalTypeInput:typeInput,
-  nauticalTypeLabel:label,minimumNauticalZoom:13,maximumNauticalZoom:14,nauticalMockInspection:false,map,
+  nauticalTypeLabel:label,minimumNauticalZoom:12,maximumNauticalZoom:15,nauticalMockInspection:false,map,
   setTimeout(fn,ms){const id=++timerId;timers.set(id,{fn,ms});return id;},
   clearTimeout(id){timers.delete(id);},
   updateNauticalZoomUI(){return context.realUpdateNauticalZoomUI();},
@@ -355,9 +355,15 @@ function testNauticalResponseDiagnostics(){
  assert.ok(statusText.textContent.includes('Chart tiles visible'));
  assert.equal(note.state,'ready');
  assert.equal(tileContainer.style.visibility,'');
- assert.ok(source.includes('minZoom: 13,') && source.includes('maxZoom: 14,') &&
-  source.includes('maxNativeZoom: 14,'),
-  'accepted NOAA chart interval is native zoom 13-14 only, without overzoom');
+ assert.ok(source.includes('(Zoom 12–15)') &&
+  source.includes('var minimumNauticalZoom = 12;') &&
+  source.includes('var maximumNauticalZoom = 15;') &&
+  source.includes('Nautical chart is available only at zooms 12 through 15.') &&
+  source.includes('Nautical · Available at zooms 12–15; Street Map displayed.'),
+  'nautical menu, enabled zoom range, and fallback notice must match native 12–15');
+ assert.ok(source.includes('minZoom: 12,') && source.includes('maxZoom: 15,') &&
+  source.includes('maxNativeZoom: 15,'),
+  'owner-acquired NOAA chart interval is native zoom 12-15 only, without overzoom');
 }
 
 async function run(){
