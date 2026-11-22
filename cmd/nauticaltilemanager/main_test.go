@@ -18,7 +18,7 @@ import (
 
 func localPlan()options{
  return options{West:-122.42,South:37.75,East:-122.41,North:37.76,
-  MinZoom:9,MaxZoom:9,MaxTiles:20,Source:"mock",Timeout:30*time.Second,Retries:2}
+  MinZoom:13,MaxZoom:13,MaxTiles:20,Source:"mock",Timeout:30*time.Second,Retries:2}
 }
 func TestBoundsAndLimits(t *testing.T){
  o:=localPlan()
@@ -32,7 +32,7 @@ func TestBoundsAndLimits(t *testing.T){
  if _,err:=buildPlan(o);err==nil{t.Fatal("backward bounds accepted")}
  o=localPlan();o.West=-125
  if _,err:=buildPlan(o);err==nil{t.Fatal("mock outside region accepted")}
- o=localPlan();o.MaxTiles=1;o.MinZoom=9;o.MaxZoom=16
+ o=localPlan();o.MaxTiles=1;o.MinZoom=13;o.MaxZoom=14
  if _,err:=buildPlan(o);err==nil||!strings.Contains(err.Error(),"exceeds"){
   t.Fatalf("oversized plan accepted: %v",err)
  }
@@ -90,7 +90,7 @@ func TestNOAAWMSAndAtomicOutput(t *testing.T){
   t.Fatalf("resume requested NOAA unexpectedly: %+v",second)
  }
  p,_:=buildPlan(o);r:=p.Rows[0]
- path:=filepath.Join(o.Dir,"9",itoa(r.X0),itoa(r.Y0)+".png")
+ path:=filepath.Join(o.Dir,"13",itoa(r.X0),itoa(r.Y0)+".png")
  b,err:=os.ReadFile(path);if err!=nil||!bytes.Equal(b,png){t.Fatal("wrong saved NOAA bytes",err)}
 }
 func itoa(n int)string{return strings.TrimSpace(strconv.Itoa(n))}
@@ -114,23 +114,23 @@ func TestExtendManagedDatasetWithNewZoomAndOverlappingPlan(t *testing.T){
  if err!=nil{t.Fatal(err)}
  if initial.Created<1{t.Fatal("no original tiles")}
  markerBefore,err:=os.ReadFile(filepath.Join(o.Dir,markerFile));if err!=nil{t.Fatal(err)}
- z10:=o;z10.MinZoom=10;z10.MaxZoom=10
- p,err:=buildPlan(z10);if err!=nil{t.Fatal(err)}
- _,inv,err:=inspectManaged(z10,p);if err!=nil{t.Fatal(err)}
+ z14:=o;z14.MinZoom=14;z14.MaxZoom=14
+ p,err:=buildPlan(z14);if err!=nil{t.Fatal(err)}
+ _,inv,err:=inspectManaged(z14,p);if err!=nil{t.Fatal(err)}
  if inv.Count!=initial.Created||inv.New!=p.Total||inv.Overlap!=0{t.Fatalf("unexpected initial extension inventory: %+v",inv)}
  // Preflight the cumulative file count before downloading anything.
- reject:=z10;reject.MaxTiles=int(initial.Created+p.Total-1)
+ reject:=z14;reject.MaxTiles=int(initial.Created+p.Total-1)
  if _,err:=execute(context.Background(),reject,"",nil);err==nil||!strings.Contains(err.Error(),"cumulative"){
   t.Fatalf("cumulative tile cap not enforced: %v",err)
  }
- if _,err:=os.Stat(filepath.Join(o.Dir,"10"));!os.IsNotExist(err){t.Fatal("rejected plan created zoom-10 directory")}
- extended,err:=execute(context.Background(),z10,"",nil)
+ if _,err:=os.Stat(filepath.Join(o.Dir,"14"));!os.IsNotExist(err){t.Fatal("rejected plan created zoom-14 directory")}
+ extended,err:=execute(context.Background(),z14,"",nil)
  if err!=nil{t.Fatal(err)}
  if extended.Created!=p.Total||extended.Skipped!=0{t.Fatalf("extension failed: %+v",extended)}
  markerAfter,err:=os.ReadFile(filepath.Join(o.Dir,markerFile))
  if err!=nil||!bytes.Equal(markerAfter,markerBefore){t.Fatal("extension modified original marker/provenance",err)}
  // Re-running original bounding box must recognize all original paths as
- // overlaps; neither the original nor the newly added z10 paths are replaced.
+ // overlaps; neither the original nor the newly added z14 paths are replaced.
  again,err:=execute(context.Background(),o,"",nil)
  if err!=nil{t.Fatal(err)}
  if again.Created!=0||again.Skipped!=initial.Created{t.Fatalf("original plan did not resume: %+v",again)}
@@ -140,12 +140,12 @@ func TestExtendManagedDatasetWithNewZoomAndOverlappingPlan(t *testing.T){
  }
  // A full directory byte cap cannot be bypassed by requesting a different
  // zoom or bounding box.
- tooSmall:=z10;tooSmall.MaxBytes=inv.Bytes-1
+ tooSmall:=z14;tooSmall.MaxBytes=inv.Bytes-1
  if _,err:=execute(context.Background(),tooSmall,"",nil);err==nil||!strings.Contains(err.Error(),"max-bytes"){
   t.Fatalf("cumulative byte cap bypassed: %v",err)
  }
  // Never append mock imagery into a NOAA managed root or vice versa.
- wrongSource:=z10;wrongSource.Source="noaa"
+ wrongSource:=z14;wrongSource.Source="noaa"
  if _,err:=execute(context.Background(),wrongSource,"",nil);err==nil||!strings.Contains(err.Error(),"different source"){
   t.Fatalf("mixed chart sources accepted: %v",err)
  }
@@ -162,9 +162,9 @@ func TestExtendRejectsUnexpectedEntriesAndSymlinks(t *testing.T){
   t.Fatal("unmanaged extra file accepted")
  }
  if err:=os.Remove(bad);err!=nil{t.Fatal(err)}
- if err:=os.Symlink(filepath.Join(o.Dir,"9"),filepath.Join(o.Dir,"10"));err!=nil{t.Skipf("symlink test unavailable: %v",err)}
- z10:=o;z10.MinZoom=10;z10.MaxZoom=10
- if _,err:=execute(context.Background(),z10,"",nil);err==nil{
+ if err:=os.Symlink(filepath.Join(o.Dir,"13"),filepath.Join(o.Dir,"14"));err!=nil{t.Skipf("symlink test unavailable: %v",err)}
+ z14:=o;z14.MinZoom=14;z14.MaxZoom=14
+ if _,err:=execute(context.Background(),z14,"",nil);err==nil{
   t.Fatal("managed tile tree symlink accepted")
  }
 }
@@ -172,9 +172,9 @@ func TestExtendDryRunDoesNotModifyExisting(t *testing.T){
  o:=localPlan();o.Dir=filepath.Join(t.TempDir(),"managed");o.Download=true
  first,err:=execute(context.Background(),o,"",nil)
  if err!=nil{t.Fatal(err)}
- o.MinZoom=10;o.MaxZoom=10;o.Download=false
+ o.MinZoom=14;o.MaxZoom=14;o.Download=false
  if _,err:=execute(context.Background(),o,"",nil);err!=nil{t.Fatal(err)}
- if _,err:=os.Stat(filepath.Join(o.Dir,"10"));!os.IsNotExist(err){
+ if _,err:=os.Stat(filepath.Join(o.Dir,"14"));!os.IsNotExist(err){
   t.Fatal("dry-run extension created new zoom dir")
  }
  _,inv,err:=inspectManaged(o,mustPlan(t,o))
