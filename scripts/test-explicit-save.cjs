@@ -355,9 +355,9 @@ function testNauticalResponseDiagnostics(){
  assert.ok(statusText.textContent.includes('Chart tiles visible'));
  assert.equal(note.state,'ready');
  assert.equal(tileContainer.style.visibility,'');
- assert.ok(source.includes('minZoom: 13,') && source.includes('maxZoom: 14,') &&
-  source.includes('maxNativeZoom: 14,'),
-  'accepted NOAA chart interval is native zoom 13-14 only, without overzoom');
+ assert.ok(source.includes('minZoom: 12,') && source.includes('maxZoom: 15,') &&
+  source.includes('maxNativeZoom: 15,'),
+  'owner-acquired NOAA chart interval is native zoom 12-15 only, without overzoom');
 }
 
 async function run(){
