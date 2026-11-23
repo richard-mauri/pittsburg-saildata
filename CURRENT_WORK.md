@@ -1,21 +1,28 @@
-# CURRENT_WORK — SailingGo Issue #39 / PR #40 (2026-11-22)
+# CURRENT_WORK — Issue #41 mobile GPS marker POC
 
-## Status and scope
+## Active scope
+Issue [#41](https://github.com/richard-mauri/pittsburg-saildata/issues/41); branch `feature/41-iphone-gps-marker-poc` based on GitHub `main`. Separate related draft PR #42 concerns the offline chart installer and remains independent. This phase introduces an opt-in foreground GPS marker for iPhone-width Leaflet map; no offline chart install or track recording. Exact PR URL/head/checks are authoritative on GitHub after creation.
 
-Issue [#39](https://github.com/richard-mauri/pittsburg-saildata/issues/39), [draft PR #40](https://github.com/richard-mauri/pittsburg-saildata/pull/40), branch `charts/39-clean-wms-zoom12-15-samples`, base `main`. PR is **not merged**; no FINISH authorization. Confirm current GitHub head SHA and exact-head CI after any edit. This document is the **pre-merge handoff**; on FINISH, record merge/Issue/branch results rather than leaving the work labeled active. Prior merged Issue #37 / PR #38 is the baseline.
+## Files and behavior
+- `web/static/gps_marker_poc.js`: mobile-only permissioned watchPosition, blue position marker and reported accuracy, follow/pan toggle and Stop GPS.
+- `ui_templates.go`: embed and inject the isolated script after the existing Leaflet map constructor in the Conditions Now page; other pages unchanged.
+- `gps_marker_poc_test.go`: checks embedded module exists only in Conditions Now map page.
+- `docs/iphone-gps-marker-poc.md`: Safari field acceptance and limitations.
+- `CURRENT_WORK.md`: this current handoff.
 
-## Delivered implementation
+The selected sailing/weather location is never modified by GPS or follow. No server GPS upload, track persistence, chart acquisition, account/token change, Cloudflare modification or operational cache write. Existing offline installer draft PR #42 is not merged into this branch. Mac owner-local working tree and private data are inaccessible through GitHub.
 
-The standalone Nautical Tile Manager supports bounded dry-run-first NOAA WMS layers 0–7 at native z12–15; opt-in `-disable-scamin` sends `HonorScamin=1` and creates separate v3 managed provenance, incompatible with v2/default NOAA imagery. Worker count defaults to 4 (allowed 1–8), with bounded fetches, atomic validated PNG writes, resumption, byte/tile limits and progress/ETA. Isolated WMS display/zoom and z15 seam diagnostics are included; they do not modify the runtime chart cache. Runtime Go chart delivery is read-only; SailingGo runs on the owner's Mac behind Cloudflare Tunnel, not Render.
+## Validation and authority
+Review exact-head CI and run the root `./devbuild.sh` on Mac after clean checkout. iPhone Safari/HTTPS GPS and chart field tests remain unverified until owner tests. Do not run `./sailgo.sh`, restart a service/tunnel, merge, close Issue #41, delete branches, bump versions, tag or release without separate owner approval. Homepage `main` suite policy v1.1.0 governs.
 
-## Owner acceptance and local data
-
-Owner downloaded, inventoried and installed the **12,499** SCAMIN-disabled tiles for west -122.70, south 37.65, east -121.45, north 38.35: z12=176, z13=630, z14=2,378, z15=9,315; **75,173,427 PNG bytes**, about 104 MB on disk. The active `cache/nautical_tiles` has v3 `HonorScamin=1` provenance, and owner confirmed exactly 12,499 PNGs with no unexpected files or `*.bak` files. After explicitly approved cleanup, `cache/` contains only `marineplaces` and `nautical_tiles`; the old 99 MB rollback and named experiments were deleted. **Do not assume a rollback copy exists.** This is owner-reported Mac state, not verified by GitHub.
-
-Owner's Safari screenshots confirm depth soundings at native z13, z14 and z15. Zoom 12 remains installed but owner considers it unusable. A horizontal greenish/yellow land-color boundary persists at the star's geographic location; cause unproven. Two sampled z15 four-256-versus-one-512 WMS comparisons were near-identical and did not establish tile requests as the cause. Do not claim the discontinuity resolved or the chart navigation-authoritative. No production restart or tunnel change was authorized.
-
-## Verification and remaining authority
-
-Earlier exact-head GitHub Actions **#539 passed** on `70cef23c828ba0785c1d9bf2b7c9911f27ab8765`; that is **not** evidence for later documentation commits. Verify new exact-head CI before owner handoff/FINISH. Local Mac/Safari sounding checks and cleanup were owner-reported; no full application regression suite, independent decoded-PNG integrity audit or live tunnel validation is claimed. Homepage merged-main `SUITE_DEVELOPMENT_POLICY.md` v1.1.0 governs. `AGENTS.md` unchanged; README user-facing, ARCHITECTURE contract, DEVELOPMENT procedures, CURRENT_WORK current status.
-
-Next: verify latest PR head/base, checks, reviews, and doc consistency. Only owner `FINISH` authorizes merge, Issue closure and remote branch cleanup. No deployment, service/tunnel restart, semantic/build version change, tag or release authorized. Owner-local uncommitted/unpushed state is inaccessible through GitHub.
+## Owner Mac handoff (after passing exact-head CI)
+```sh
+cd ~/projects/sailing-go
+git status --short --branch
+# Stop if uncommitted changes appear.
+git fetch origin
+git checkout feature/41-iphone-gps-marker-poc
+git pull --ff-only origin feature/41-iphone-gps-marker-poc
+./devbuild.sh
+./sailing-go -version
+```
