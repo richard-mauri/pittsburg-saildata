@@ -13,7 +13,7 @@ import (
 // Browser page templates are embedded at build time so local and deployed
 // binaries retain their original self-contained behavior.
 //
-//go:embed web/templates/*.html web/static/theme.css web/static/account.js web/static/unit_refresh.js assets/tanner.jpg
+//go:embed web/templates/*.html web/static/theme.css web/static/account.js web/static/unit_refresh.js web/static/gps_marker_poc.js assets/tanner.jpg
 var sailingUIFiles embed.FS
 
 func sailingBanner() string {
@@ -52,6 +52,13 @@ func readSailingUITemplate(path string) string {
 		// Hide only unit-sensitive content until account preferences are applied.
 		// The client always releases this brief mask, including on network errors.
 		const bootstrap = `<style>html.sailing-units-pending .page-preferences,html.sailing-units-pending #bottom-line-card .metrics,html.sailing-units-pending #bottom-line-card .planning-period-cause,html.sailing-units-pending .wind-card .metrics,html.sailing-units-pending .wind-card .wind-summary,html.sailing-units-pending .wind-card .wind-readings,html.sailing-units-pending .wind-card .wind-distance-warning{visibility:hidden}</style><script>document.documentElement.classList.add("sailing-units-pending");setTimeout(function(){document.documentElement.classList.remove("sailing-units-pending")},4000)</script>`
+		// Inject the GPS POC into the existing Leaflet map's lexical scope.
+		// It is opt-in, mobile-only and does not alter report location state.
+		gpsPOC, err := sailingUIFiles.ReadFile("web/static/gps_marker_poc.js")
+		if err != nil { panic(err) }
+		const mapInit = "var map = L.map(el, {scrollWheelZoom:true}).setView([centerLat, centerLon], initialZoom);"
+		if !strings.Contains(page, mapInit) { panic("GPS POC: Leaflet map initialization anchor missing") }
+		page = strings.Replace(page, mapInit, mapInit+"\\n"+string(gpsPOC), 1)
 		page = strings.Replace(page, "</head>", bootstrap+"</head>", 1)
 		page = strings.Replace(page, "</body>", "<script>"+string(banner.ScriptJS())+"</script><script>"+string(units)+"</script><script>"+string(account)+"</script></body>", 1)
 	}
