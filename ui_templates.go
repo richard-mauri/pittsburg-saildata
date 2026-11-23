@@ -58,7 +58,7 @@ func readSailingUITemplate(path string) string {
 		if err != nil { panic(err) }
 		const mapInit = "var map = L.map(el, {scrollWheelZoom:true}).setView([centerLat, centerLon], initialZoom);"
 		if !strings.Contains(page, mapInit) { panic("GPS POC: Leaflet map initialization anchor missing") }
-		page = strings.Replace(page, mapInit, mapInit+"\\n"+string(gpsPOC), 1)
+		page = strings.Replace(page, mapInit, mapInit+"\n"+string(gpsPOC), 1)
 		page = strings.Replace(page, "</head>", bootstrap+"</head>", 1)
 		page = strings.Replace(page, "</body>", "<script>"+string(banner.ScriptJS())+"</script><script>"+string(units)+"</script><script>"+string(account)+"</script></body>", 1)
 	}
