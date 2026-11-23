@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>SailingGo offline chart installer — design prototype</title>
+<style>
+:root{font:16px system-ui;color:#eaf1f5;background:#102332}body{margin:0;padding:env(safe-area-inset-top) 16px env(safe-area-inset-bottom)}main{max-width:440px;margin:20px auto}h1{font-size:1.4rem}fieldset{border:1px solid #537184;border-radius:12px;margin:14px 0;padding:14px}label{display:block;margin:10px 0}input,select,button{font:inherit;box-sizing:border-box;width:100%;padding:12px;border-radius:8px;border:1px solid #7292a3;background:#fff;color:#142734}button{background:#d7f3ff;cursor:pointer;font-weight:700}button:disabled{opacity:.5}output,pre{display:block;white-space:pre-wrap;overflow-wrap:anywhere}small{color:#c7d6df}#status{min-height:3em}input[type=number]{max-width:100%}
+</style>
+<main><h1>Offline nautical charts</h1><p><small>Phase 0 design prototype. Does not install offline maps or access GPS. Requires a separately running POC API, and is not integrated into SailingGo.</small></p>
+<fieldset><legend>Selected region</legend>
+<label>West longitude<input id="west" type="number" step=".001" value="-121.99"></label>
+<label>South latitude<input id="south" type="number" step=".001" value="38.02"></label>
+<label>East longitude<input id="east" type="number" step=".001" value="-121.90"></label>
+<label>North latitude<input id="north" type="number" step=".001" value="38.08"></label>
+<label>Chart zoom<select id="zoom"><option>13</option><option selected>14</option><option>15</option></select></label>
+</fieldset>
+<button id="preview">Preview available tiles</button>
+<p id="status" role="status" aria-live="polite">Enter a small rectangle, then preview.</p>
+<pre id="details"></pre>
+<button id="install" disabled>Install offline chart — future phase</button>
+<p><small>Production design must use the existing authenticated HTTPS origin, an offline-capable app shell, bounded package delivery, quota checks and complete-install verification. The local HTTP POC is for Mac API inspection only; it cannot exercise iPhone geolocation or service workers.</small></p>
+</main>
+<script>
+const ids=["west","south","east","north","zoom"],$=id=>document.getElementById(id);
+$("preview").onclick=async()=>{
+ $("status").textContent="Checking existing cached tiles…";$("details").textContent="";
+ const params=new URLSearchParams(ids.map(id=>[id==="zoom"?"z":id,$(id).value]));
+ try{
+  const response=await fetch("/api/offline-charts/manifest?"+params,{cache:"no-store"});
+  if(!response.ok)throw Error("HTTP "+response.status+": "+(await response.text()).slice(0,200));
+  const data=await response.json();
+  $("status").textContent=data.complete?"All requested tiles available":"Coverage incomplete; no installation permitted";
+  $("details").textContent=`Zoom: ${data.zoom}\nAvailable tiles: ${data.tiles.length}\nMissing tiles: ${data.missing}\nPNG bytes: ${data.totalBytes.toLocaleString()}\nEstimated MB: ${(data.totalBytes/1e6).toFixed(2)}`;
+ }catch(err){$("status").textContent="Preview failed: "+err.message}
+};
+</script></html>
