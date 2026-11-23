@@ -20,7 +20,7 @@
       watchId = null;
     }
     if (button) button.textContent = "Show My Position";
-    if (followButton) followButton.hidden = true;
+    if (followButton) followButton.style.display = "none";
     setStatus("GPS off");
   }
   function errorMessage(error) {
@@ -62,10 +62,10 @@
     try {
       watchId = navigator.geolocation.watchPosition(update, function (err) {
         setStatus(errorMessage(err));
-        if (err && err.code === 1) stop();
+        if (err && err.code === 1) { stop(); setStatus(errorMessage(err)); }
       }, { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 });
       button.textContent = "Stop GPS";
-      followButton.hidden = false;
+      followButton.style.display = "block";
     } catch (err) { setStatus("Unable to start GPS"); stop(); }
   }
   control.onAdd = function () {
@@ -75,9 +75,9 @@
     button.type = "button"; button.textContent = "Show My Position";
     button.style.cssText = "display:block;width:100%;padding:9px;border-radius:6px;border:1px solid #147a9b;background:#e7f6fb;color:#153242;font:600 13px system-ui";
     followButton = L.DomUtil.create("button", "", panel);
-    followButton.type = "button"; followButton.textContent = "Following"; followButton.hidden = true;
+    followButton.type = "button"; followButton.textContent = "Following";
     followButton.style.cssText = "display:block;width:100%;margin-top:5px;padding:7px;border-radius:6px;border:1px solid #aac0c9;background:#fff;color:#153242;font:13px system-ui";
-    // Inline display overrides hidden on some browsers; explicit visibility is set below.
+    // Keep this button hidden until tracking begins.
     followButton.style.display = "none";
     status = L.DomUtil.create("div", "", panel);
     status.setAttribute("role", "status");
