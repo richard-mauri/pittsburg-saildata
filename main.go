@@ -34,8 +34,8 @@ import (
 )
 
 const (
-	appVersion                      = "1.16.0"
-	buildVersion                    = "v439"
+	appVersion                      = "1.17.0"
+	buildVersion                    = "v443"
 	defaultWindStation              = "PSBC1"
 	windDistanceWarningNM           = 10.0
 	defaultCurrentDistanceWarningNM = 15.0
@@ -2140,6 +2140,7 @@ func runServer(
  // All browser chart requests terminate at SailingGo. An operator may later
  // configure a local XYZ chart directory; no NOAA network fetch occurs here.
  mux.Handle("/api/charts/tiles/", nauticalTileHandler(defaultNauticalCacheDir()))
+ mux.Handle(streetTilePrefix, newStreetTileHandler(os.Getenv("SAILING_STREET_TILE_UPSTREAM")))
  if reporter!=nil {
   mux.HandleFunc("/api/activity/ping",reporter.ping)
   mux.HandleFunc("/api/activity/identity",reporter.identity)

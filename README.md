@@ -41,9 +41,13 @@ Choose **Nautical Chart** in the map controls to view locally served NOAA nautic
 
 These charts and overlays are **supplemental planning context, not authoritative navigation charts**. Always use current official navigation products and notices.
 
+## Public street tile API
+
+The provider-independent `GET /api/maps/street/{z}/{x}/{y}.png` interface returns 256×256 PNG street tiles for XYZ zooms 0–19 without Homepage authentication. It is intended only for interactive viewing; clients must display visible [© OpenStreetMap contributors](https://www.openstreetmap.org/copyright) attribution and honor caching headers. Do not use this API to prefetch, download regions, create offline archives or bulk scrape. Interactive bursts can wait for both an upstream slot and a rate token in one bounded queue. Upstream availability is best-effort; clients must still handle throttling and errors. For diagnostics, inspect X-Sailing-Street-Source and X-Sailing-Street-Result response headers (see DEVELOPMENT.md). Existing SailingGo Street Map rendering is unchanged. Public availability depends on the running SailingGo version; GPS Map integration is separate.
+
 ## Sign-in and preferences
 
-Launch Sailing Outlook from [Homepage](https://home.themauris.org/). Verified personal and Guest sessions use Homepage authentication; weather reports, map/chart data served by SailingGo and API requests require verified access. The public welcome/sign-in entry does not expose protected data. Guest access is not anonymous access. Personal settings and Guest browser-local settings remain separate. Changes to supported preferences, including units, map type and overlays, are staged until you choose **Save Changes**; use **Discard Changes** to restore the last saved selections. Reversing the only change clears the unsaved state. A pending change may trigger a warning when leaving the page. An expired session or unavailable authentication service can prevent protected weather requests; return to Homepage to sign in again.
+Launch Sailing Outlook from [Homepage](https://home.themauris.org/). Verified personal and Guest sessions use Homepage authentication; weather reports, nautical chart data and other protected API requests require verified access. The public street tile endpoint described above is the narrow exception. The public welcome/sign-in entry does not expose protected data. Guest access is not anonymous access. Personal settings and Guest browser-local settings remain separate. Changes to supported preferences, including units, map type and overlays, are staged until you choose **Save Changes**; use **Discard Changes** to restore the last saved selections. Reversing the only change clears the unsaved state. A pending change may trigger a warning when leaving the page. An expired session or unavailable authentication service can prevent protected weather requests; return to Homepage to sign in again.
 
 ## Development documentation
 
