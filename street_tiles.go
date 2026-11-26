@@ -209,6 +209,9 @@ func streetFreshness(h http.Header, now time.Time) (time.Time, time.Duration, bo
 		} else { revalidate = true }
 	} else if h.Get("Cache-Control") == "" {
 		h.Set("Cache-Control", "public, max-age=604800")
+	} else {
+		// An explicit policy without a freshness lifetime is not permission to invent one.
+		revalidate = true
 	}
 	if revalidate { lifetime = 0 }
 	remaining := lifetime-age
