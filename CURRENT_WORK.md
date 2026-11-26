@@ -1,21 +1,21 @@
-# CURRENT_WORK — SailingGo Issue #39 / PR #40 (2026-11-22)
+# CURRENT_WORK — SailingGo baseline housekeeping
 
-## Status and scope
+## Current scope
 
-Issue [#39](https://github.com/richard-mauri/pittsburg-saildata/issues/39), [draft PR #40](https://github.com/richard-mauri/pittsburg-saildata/pull/40), branch `charts/39-clean-wms-zoom12-15-samples`, base `main`. PR is **not merged**; no FINISH authorization. Confirm current GitHub head SHA and exact-head CI after any edit. This document is the **pre-merge handoff**; on FINISH, record merge/Issue/branch results rather than leaving the work labeled active. Prior merged Issue #37 / PR #38 is the baseline.
+Merged runtime baseline: protected main at `999a3041906c9d86112fddfe99777fe6061fde4a`, app v1.16.0 / build v439. PR [#40](https://github.com/richard-mauri/pittsburg-saildata/pull/40) is merged. Exact baseline Go CI [#551](https://github.com/richard-mauri/pittsburg-saildata/actions/runs/45181073371) passed. This is not candidate CI evidence.
 
-## Delivered implementation
+Owner-authorized housekeeping closed Issues #32, #41 and #44 as not planned (not fixed), and abandoned draft PRs #42 and #43 without merge. The owner deleted obsolete remote branches, including the squash-integrated Issue #19 branch; GitHub confirmed only main remained before this cleanup branch. Owner reported clean synchronized main; current Mac state must be rechecked before checkout.
 
-The standalone Nautical Tile Manager supports bounded dry-run-first NOAA WMS layers 0–7 at native z12–15; opt-in `-disable-scamin` sends `HonorScamin=1` and creates separate v3 managed provenance, incompatible with v2/default NOAA imagery. Worker count defaults to 4 (allowed 1–8), with bounded fetches, atomic validated PNG writes, resumption, byte/tile limits and progress/ETA. Isolated WMS display/zoom and z15 seam diagnostics are included; they do not modify the runtime chart cache. Runtime Go chart delivery is read-only; SailingGo runs on the owner's Mac behind Cloudflare Tunnel, not Render.
+Active scope: documentation-only [Issue #46](https://github.com/richard-mauri/pittsburg-saildata/issues/46), branch `docs/46-baseline-cleanup`, targeting main. Reconcile AGENTS, README, ARCHITECTURE, DEVELOPMENT and CURRENT_WORK with the merged runtime; no code, version, cache or operational change. The draft PR and exact-head CI are the authoritative candidate records. Verify them before FINISH; do not infer candidate acceptance from this file.
 
-## Owner acceptance and local data
+Next runtime project after cleanup FINISH: [Issue #45](https://github.com/richard-mauri/pittsburg-saildata/issues/45), public street tile proxy; dependent [GPS Map Issue #46](https://github.com/richard-mauri/sailing-gps-map/issues/46). Not implemented or authorized by this documentation task.
 
-Owner downloaded, inventoried and installed the **12,499** SCAMIN-disabled tiles for west -122.70, south 37.65, east -121.45, north 38.35: z12=176, z13=630, z14=2,378, z15=9,315; **75,173,427 PNG bytes**, about 104 MB on disk. The active `cache/nautical_tiles` has v3 `HonorScamin=1` provenance, and owner confirmed exactly 12,499 PNGs with no unexpected files or `*.bak` files. After explicitly approved cleanup, `cache/` contains only `marineplaces` and `nautical_tiles`; the old 99 MB rollback and named experiments were deleted. **Do not assume a rollback copy exists.** This is owner-reported Mac state, not verified by GitHub.
+## Operational constraints
 
-Owner's Safari screenshots confirm depth soundings at native z13, z14 and z15. Zoom 12 remains installed but owner considers it unusable. A horizontal greenish/yellow land-color boundary persists at the star's geographic location; cause unproven. Two sampled z15 four-256-versus-one-512 WMS comparisons were near-identical and did not establish tile requests as the cause. Do not claim the discontinuity resolved or the chart navigation-authoritative. No production restart or tunnel change was authorized.
+SailingGo is Mac-hosted behind Cloudflare Tunnel, not Render. Production listener enforces Homepage authentication on nonpublic routes; explicit-save preferences preserve per-user and Guest isolation. Existing direct OSM street layer and authenticated local NOAA XYZ delivery remain unchanged.
 
-## Verification and remaining authority
+Owner-reported NOAA cache: `cache/nautical_tiles`, SCAMIN-disabled v3 provenance, 12,499 PNGs (z12=176, z13=630, z14=2,378, z15=9,315), 75,173,427 PNG bytes; bounds west -122.70, south 37.65, east -121.45, north 38.35. Cache root also contains marineplaces. Old rollback and experiments deleted; **no retained old-cache rollback**. Owner Safari screenshots confirmed soundings z13–15; z12 limited and horizontal land-color boundary unresolved. No independent integrity/live verification in this task.
 
-Earlier exact-head GitHub Actions **#539 passed** on `70cef23c828ba0785c1d9bf2b7c9911f27ab8765`; that is **not** evidence for later documentation commits. Verify new exact-head CI before owner handoff/FINISH. Local Mac/Safari sounding checks and cleanup were owner-reported; no full application regression suite, independent decoded-PNG integrity audit or live tunnel validation is claimed. Homepage merged-main `SUITE_DEVELOPMENT_POLICY.md` v1.1.0 governs. `AGENTS.md` unchanged; README user-facing, ARCHITECTURE contract, DEVELOPMENT procedures, CURRENT_WORK current status.
+## Verification and approval
 
-Next: verify latest PR head/base, checks, reviews, and doc consistency. Only owner `FINISH` authorizes merge, Issue closure and remote branch cleanup. No deployment, service/tunnel restart, semantic/build version change, tag or release authorized. Owner-local uncommitted/unpushed state is inaccessible through GitHub.
+Current Homepage merged-main policy v1.2.2 retrieved; follow its live authority, not this snapshot. Documentation candidate requires content/link review and exact-head Go CI. No Mac build, Safari test, live tunnel test or deployment required for Markdown-only edits. Owner-local files inaccessible remotely; preserve all local changes. No merge, issue closure, branch deletion, version change, deployment, restart, tag or release authorized except subsequent scoped FINISH for documentation closeout.
