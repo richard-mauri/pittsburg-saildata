@@ -26,6 +26,8 @@ const (
 	streetCacheEntries = 512
 	streetRate = 8.0
 	streetBurst = 16.0
+	streetQueueCapacity = 32
+	streetQueueWait = time.Second
 )
 
 var streetPathPattern = regexp.MustCompile(`^/api/maps/street/([0-9]{1,9})/([0-9]{1,9})/([0-9]{1,9})\.png$`)
@@ -57,6 +59,8 @@ type streetProxy struct {
 	upstream string
 	client *http.Client
 	slots chan struct{}
+	waiters chan struct{}
+	queueWait time.Duration
 	mu sync.Mutex
 	cache map[string]*list.Element
 	lru *list.List
@@ -89,7 +93,7 @@ func makeStreetProxy(upstream string, transport http.RoundTripper, timeout time.
 	return &streetProxy{
 		upstream: upstream,
 		client: &http.Client{Transport: transport, Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-		slots: make(chan struct{}, 8), cache: make(map[string]*list.Element), lru: list.New(),
+		slots: make(chan struct{}, 8), waiters: make(chan struct{}, streetQueueCapacity), queueWait: streetQueueWait, cache: make(map[string]*list.Element), lru: list.New(),
 		tokens: streetBurst, last: time.Now(), inflight: make(map[string]bool),
 	}
 }
@@ -136,32 +140,87 @@ func (p *streetProxy) store(e *streetEntry, allowed bool) {
 	p.bytes += len(e.data)
 }
 
-// Only upstream misses consume the global token bucket and concurrency slots.
-// Concurrent requests for the same missing tile are rejected rather than
-// spawning duplicate fetches or unbounded waiters.
-// Empty result means admitted; otherwise report the first rejecting guard.
-func (p *streetProxy) acquire(key string) string {
+// Wait only when all upstream slots are occupied. Bound both the number
+// of waiting handlers and their wait time; no background workers or retries.
+// A canceled/expired waiter cannot consume a slot or an upstream rate token.
+func (p *streetProxy) acquireSlot(ctx context.Context) string {
+	if ctx.Err() != nil {
+		return "request-cancelled"
+	}
 	select {
 	case p.slots <- struct{}{}:
-	default: return "concurrency-limit"
+		if ctx.Err() != nil {
+			<-p.slots
+			return "request-cancelled"
+		}
+		return ""
+	default:
 	}
+	select {
+	case p.waiters <- struct{}{}:
+		defer func() { <-p.waiters }()
+	default:
+		return "queue-full"
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, p.queueWait)
+	defer cancel()
+	select {
+	case p.slots <- struct{}{}:
+		// Both the slot and the deadline can be ready at once.
+		if waitCtx.Err() == nil {
+			return ""
+		}
+		<-p.slots
+	case <-waitCtx.Done():
+	}
+	if ctx.Err() != nil {
+		return "request-cancelled"
+	}
+	return "queue-timeout"
+}
+
+// Called with an acquired slot. Recheck the cache under the same lock as
+// token/duplicate admission so a queued request for a now-fresh tile
+// neither contacts upstream nor consumes a rate token. On a cache hit
+// or rejection the caller releases only its slot, not another request's key.
+func (p *streetProxy) admitUpstream(ctx context.Context, key string) (string, *streetEntry) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if ctx.Err() != nil {
+		return "request-cancelled", nil
+	}
 	now := time.Now()
+	if el := p.cache[key]; el != nil {
+		e := el.Value.(*streetEntry)
+		if now.Before(e.freshUntil) {
+			p.lru.MoveToFront(el)
+			return "", e
+		}
+	}
 	p.tokens += now.Sub(p.last).Seconds()*streetRate
-	if p.tokens > streetBurst { p.tokens = streetBurst }
+	if p.tokens > streetBurst {
+		p.tokens = streetBurst
+	}
 	p.last = now
 	if p.tokens < 1 {
-		<-p.slots
-		return "rate-limit"
+		return "rate-limit", nil
 	}
 	if p.inflight[key] {
-		<-p.slots
-		return "duplicate-inflight"
+		return "duplicate-inflight", nil
 	}
 	p.tokens--
 	p.inflight[key] = true
-	return ""
+	return "", nil
+}
+
+func streetAdmissionError(w http.ResponseWriter, reason string) {
+	streetDiagnostics(w, "proxy", reason)
+	if reason == "request-cancelled" {
+		streetError(w, http.StatusRequestTimeout)
+		return
+	}
+	w.Header().Set("Retry-After", "1")
+	streetError(w, http.StatusTooManyRequests)
 }
 
 func (p *streetProxy) release(key string) {
@@ -279,22 +338,30 @@ func (p *streetProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		streetWrite(w, r, cached)
 		return
 	}
-	if reason := p.acquire(key); reason != "" {
-		streetDiagnostics(w, "proxy", reason)
-		w.Header().Set("Retry-After", "1")
-		streetError(w, http.StatusTooManyRequests)
+	admissionStarted := time.Now()
+	reason := p.acquireSlot(r.Context())
+	// Origin-side admission time (including any queue wait). Not an upstream
+	// header and not stored in the origin cache.
+	w.Header().Set("X-Sailing-Street-Admission-Ms", strconv.FormatInt(time.Since(admissionStarted).Milliseconds(), 10))
+	if reason != "" {
+		streetAdmissionError(w, reason)
+		return
+	}
+	reason, fresh := p.admitUpstream(r.Context(), key)
+	if reason != "" {
+		<-p.slots
+		streetAdmissionError(w, reason)
+		return
+	}
+	if fresh != nil {
+		<-p.slots
+		streetDiagnostics(w, "cache", "cache-hit")
+		streetWrite(w, r, fresh)
 		return
 	}
 	defer p.release(key)
-	// Recheck after acquiring to avoid re-fetching a just-completed tile.
-	if e := p.lookup(key); e != nil {
-		cached = e
-		if time.Now().Before(e.freshUntil) {
-			streetDiagnostics(w, "cache", "cache-hit")
-			streetWrite(w, r, e)
-			return
-		}
-	}
+	// Refresh the stale entry for conditional requests after waiting.
+	cached = p.lookup(key)
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, p.upstream+"/"+key, nil)
 	if err != nil {
 		streetDiagnostics(w, "proxy", "request-error")

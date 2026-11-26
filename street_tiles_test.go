@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"image"
 	"image/png"
 	"net/http"
@@ -222,11 +224,15 @@ func TestStreetTileUpstreamFailuresAndBounds(t *testing.T) {
 		t.Fatalf("timeout: %d", w.Code)
 	}
 	p = makeStreetProxy(up.URL, up.Client().Transport, time.Second)
+	p.queueWait = 10 * time.Millisecond
 	for i := 0; i < cap(p.slots); i++ {
 		p.slots <- struct{}{}
 	}
-	if w := streetTestGet(p, "GET", streetTestPath, nil); w.Code != 429 {
-		t.Fatalf("concurrency: %d", w.Code)
+	if w := streetTestGet(p, "GET", streetTestPath, nil); w.Code != 429 || w.Header().Get("X-Sailing-Street-Result") != "queue-timeout" {
+		t.Fatalf("concurrency wait deadline: %d %v", w.Code, w.Header())
+	}
+	if len(p.waiters) != 0 || len(p.slots) != cap(p.slots) {
+		t.Fatal("queue timeout leaked capacity")
 	}
 	p = makeStreetProxy(up.URL, up.Client().Transport, time.Second)
 	p.tokens = -1
@@ -287,8 +293,13 @@ func TestStreetTileDiagnosticAdmissionReasons(t *testing.T) {
 		name string
 		setup func(*streetProxy)
 	}{
-		{"concurrency-limit", func(p *streetProxy) {
+		{"queue-timeout", func(p *streetProxy) {
+			p.queueWait = 10 * time.Millisecond
 			for i := 0; i < cap(p.slots); i++ { p.slots <- struct{}{} }
+		}},
+		{"queue-full", func(p *streetProxy) {
+			for i := 0; i < cap(p.slots); i++ { p.slots <- struct{}{} }
+			for i := 0; i < cap(p.waiters); i++ { p.waiters <- struct{}{} }
 		}},
 		{"rate-limit", func(p *streetProxy) { p.tokens = -16 }},
 		{"duplicate-inflight", func(p *streetProxy) { p.inflight["3/2/4.png"] = true }},
@@ -303,13 +314,13 @@ func TestStreetTileDiagnosticAdmissionReasons(t *testing.T) {
 			defer up.Close()
 			p := makeStreetProxy(up.URL, up.Client().Transport, time.Second)
 			tc.setup(p)
-			slots := len(p.slots)
+			slots, waiters := len(p.slots), len(p.waiters)
 			w := streetTestGet(p, "GET", streetTestPath, nil)
 			if w.Code != 429 || w.Header().Get("Retry-After") != "1" ||
 				w.Header().Get("Cache-Control") != "no-store" ||
 				w.Header().Get("X-Sailing-Street-Source") != "proxy" ||
 				w.Header().Get("X-Sailing-Street-Result") != tc.name ||
-				calls.Load() != 0 || len(p.slots) != slots {
+				calls.Load() != 0 || len(p.slots) != slots || len(p.waiters) != waiters {
 				t.Fatalf("admission: status=%d headers=%v upstream=%d slots=%d", w.Code, w.Header(), calls.Load(), len(p.slots))
 			}
 		})
