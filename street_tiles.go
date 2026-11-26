@@ -72,6 +72,7 @@ func newStreetTileHandler(config string) http.Handler {
 	config = strings.TrimSpace(config)
 	if config == "" { config = streetOSM }
 	if config != streetOSM { return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		streetDiagnostics(w, "proxy", "provider-unavailable")
 		streetError(w, http.StatusServiceUnavailable)
 	}) }
 	transport := &http.Transport{
@@ -91,6 +92,12 @@ func makeStreetProxy(upstream string, transport http.RoundTripper, timeout time.
 		slots: make(chan struct{}, 8), cache: make(map[string]*list.Element), lru: list.New(),
 		tokens: streetBurst, last: time.Now(), inflight: make(map[string]bool),
 	}
+}
+
+// Match nautical tile diagnostics; never forward or persist these labels.
+func streetDiagnostics(w http.ResponseWriter, source, result string) {
+	w.Header().Set("X-Sailing-Street-Source", source)
+	w.Header().Set("X-Sailing-Street-Result", result)
 }
 
 func streetError(w http.ResponseWriter, status int) {
@@ -132,10 +139,11 @@ func (p *streetProxy) store(e *streetEntry, allowed bool) {
 // Only upstream misses consume the global token bucket and concurrency slots.
 // Concurrent requests for the same missing tile are rejected rather than
 // spawning duplicate fetches or unbounded waiters.
-func (p *streetProxy) acquire(key string) bool {
+// Empty result means admitted; otherwise report the first rejecting guard.
+func (p *streetProxy) acquire(key string) string {
 	select {
 	case p.slots <- struct{}{}:
-	default: return false
+	default: return "concurrency-limit"
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -143,13 +151,17 @@ func (p *streetProxy) acquire(key string) bool {
 	p.tokens += now.Sub(p.last).Seconds()*streetRate
 	if p.tokens > streetBurst { p.tokens = streetBurst }
 	p.last = now
-	if p.tokens < 1 || p.inflight[key] {
+	if p.tokens < 1 {
 		<-p.slots
-		return false
+		return "rate-limit"
+	}
+	if p.inflight[key] {
+		<-p.slots
+		return "duplicate-inflight"
 	}
 	p.tokens--
 	p.inflight[key] = true
-	return true
+	return ""
 }
 
 func (p *streetProxy) release(key string) {
@@ -251,20 +263,24 @@ func streetTimeout(err error) bool {
 func (p *streetProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
+		streetDiagnostics(w, "proxy", "invalid-method")
 		streetError(w, http.StatusMethodNotAllowed)
 		return
 	}
 	key, ok := streetTileKey(r.URL.Path)
 	if !ok || r.URL.RawQuery != "" || r.URL.EscapedPath() != r.URL.Path {
+		streetDiagnostics(w, "proxy", "invalid-coordinates-or-query")
 		streetError(w, http.StatusBadRequest)
 		return
 	}
 	cached := p.lookup(key)
 	if cached != nil && time.Now().Before(cached.freshUntil) {
+		streetDiagnostics(w, "cache", "cache-hit")
 		streetWrite(w, r, cached)
 		return
 	}
-	if !p.acquire(key) {
+	if reason := p.acquire(key); reason != "" {
+		streetDiagnostics(w, "proxy", reason)
 		w.Header().Set("Retry-After", "1")
 		streetError(w, http.StatusTooManyRequests)
 		return
@@ -273,10 +289,18 @@ func (p *streetProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Recheck after acquiring to avoid re-fetching a just-completed tile.
 	if e := p.lookup(key); e != nil {
 		cached = e
-		if time.Now().Before(e.freshUntil) { streetWrite(w, r, e); return }
+		if time.Now().Before(e.freshUntil) {
+			streetDiagnostics(w, "cache", "cache-hit")
+			streetWrite(w, r, e)
+			return
+		}
 	}
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, p.upstream+"/"+key, nil)
-	if err != nil { streetError(w, http.StatusBadGateway); return }
+	if err != nil {
+		streetDiagnostics(w, "proxy", "request-error")
+		streetError(w, http.StatusBadGateway)
+		return
+	}
 	req.Header.Set("User-Agent", "SailingGo-StreetTiles/"+appVersion+" (+https://github.com/richard-mauri/pittsburg-saildata)")
 	req.Header.Set("Accept", "image/png")
 	if ref := streetReferer(r.Referer()); ref != "" { req.Header.Set("Referer", ref) }
@@ -292,15 +316,26 @@ func (p *streetProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := p.client.Do(req)
 	if err != nil {
-		if streetTimeout(err) { streetError(w, http.StatusGatewayTimeout) } else { streetError(w, http.StatusBadGateway) }
+		if streetTimeout(err) {
+			streetDiagnostics(w, "upstream", "upstream-timeout")
+			streetError(w, http.StatusGatewayTimeout)
+		} else {
+			streetDiagnostics(w, "upstream", "upstream-transport-error")
+			streetError(w, http.StatusBadGateway)
+		}
 		return
 	}
 	defer resp.Body.Close()
 	now := time.Now()
 	h := streetHeaders(resp.Header)
 	if resp.StatusCode == http.StatusNotModified {
-		if req.Header.Get("If-None-Match") == "" && req.Header.Get("If-Modified-Since") == "" { streetError(w, http.StatusBadGateway); return }
+		if req.Header.Get("If-None-Match") == "" && req.Header.Get("If-Modified-Since") == "" {
+			streetDiagnostics(w, "upstream", "unexpected-304")
+			streetError(w, http.StatusBadGateway)
+			return
+		}
 		if cached == nil {
+			streetDiagnostics(w, "upstream", "upstream-not-modified")
 			for name, values := range h { for _, value := range values { w.Header().Add(name, value) } }
 			w.WriteHeader(http.StatusNotModified)
 			return
@@ -312,6 +347,7 @@ func (p *streetProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fresh, age, allowed := streetFreshness(merged, now)
 		e := &streetEntry{key, cached.data, merged, now, age, fresh}
 		p.store(e, allowed)
+		streetDiagnostics(w, "cache", "cache-revalidated")
 		streetWrite(w, r, e)
 		return
 	}
@@ -319,24 +355,42 @@ func (p *streetProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		status := resp.StatusCode
 		if status < 400 || status > 599 { status = http.StatusBadGateway }
 		if v := resp.Header.Get("Retry-After"); v != "" && (status == 429 || status == 503) { w.Header().Set("Retry-After", v) }
+		streetDiagnostics(w, "upstream", "upstream-"+strconv.Itoa(resp.StatusCode))
 		streetError(w, status)
 		return
 	}
 	typ, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if err != nil || typ != "image/png" || resp.ContentLength > streetMaxBytes {
+		streetDiagnostics(w, "upstream", "invalid-tile-type-or-size")
 		streetError(w, http.StatusBadGateway); return
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, streetMaxBytes+1))
 	if err != nil {
-		if streetTimeout(err) { streetError(w, http.StatusGatewayTimeout) } else { streetError(w, http.StatusBadGateway) }
+		if streetTimeout(err) {
+			streetDiagnostics(w, "upstream", "upstream-timeout")
+			streetError(w, http.StatusGatewayTimeout)
+		} else {
+			streetDiagnostics(w, "upstream", "upstream-read-error")
+			streetError(w, http.StatusBadGateway)
+		}
 		return
 	}
-	if len(data) > streetMaxBytes { streetError(w, http.StatusBadGateway); return }
+	if len(data) > streetMaxBytes {
+		streetDiagnostics(w, "upstream", "invalid-tile-size")
+		streetError(w, http.StatusBadGateway); return
+	}
 	cfg, err := png.DecodeConfig(bytes.NewReader(data))
-	if err != nil || cfg.Width != 256 || cfg.Height != 256 { streetError(w, http.StatusBadGateway); return }
-	if _, err := png.Decode(bytes.NewReader(data)); err != nil { streetError(w, http.StatusBadGateway); return }
+	if err != nil || cfg.Width != 256 || cfg.Height != 256 {
+		streetDiagnostics(w, "upstream", "invalid-png")
+		streetError(w, http.StatusBadGateway); return
+	}
+	if _, err := png.Decode(bytes.NewReader(data)); err != nil {
+		streetDiagnostics(w, "upstream", "invalid-png")
+		streetError(w, http.StatusBadGateway); return
+	}
 	fresh, age, allowed := streetFreshness(h, now)
 	e := &streetEntry{key, data, h, now, age, fresh}
 	p.store(e, allowed)
+	streetDiagnostics(w, "upstream", "upstream-tile")
 	streetWrite(w, r, e)
 }

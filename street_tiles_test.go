@@ -145,6 +145,10 @@ func TestStreetTileRevalidation(t *testing.T) {
 		if w.Code != 200 || !bytes.Equal(w.Body.Bytes(), data) {
 			t.Fatalf("revalidated tile %d: %d", i, w.Code)
 		}
+		want := []string{"upstream-tile", "cache-revalidated", "cache-hit"}[i]
+		if w.Header().Get("X-Sailing-Street-Result") != want {
+			t.Fatalf("revalidation result %d: %v", i, w.Header())
+		}
 	}
 	if calls.Load() != 2 {
 		t.Fatalf("want initial and revalidation only, got %d", calls.Load())
@@ -214,7 +218,7 @@ func TestStreetTileUpstreamFailuresAndBounds(t *testing.T) {
 	}))
 	defer up.Close()
 	p := makeStreetProxy(up.URL, up.Client().Transport, 30*time.Millisecond)
-	if w := streetTestGet(p, "GET", streetTestPath, nil); w.Code != 504 {
+	if w := streetTestGet(p, "GET", streetTestPath, nil); w.Code != 504 || w.Header().Get("X-Sailing-Street-Result") != "upstream-timeout" {
 		t.Fatalf("timeout: %d", w.Code)
 	}
 	p = makeStreetProxy(up.URL, up.Client().Transport, time.Second)
@@ -276,4 +280,79 @@ func TestStreetTileCachePolicyAndCapacity(t *testing.T) {
 	if p.lru.Len() != streetCacheEntries || p.lookup(string(rune(0))) != nil {
 		t.Fatal("cache entry bound/LRU eviction failed")
 	}
+}
+
+func TestStreetTileDiagnosticAdmissionReasons(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		setup func(*streetProxy)
+	}{
+		{"concurrency-limit", func(p *streetProxy) {
+			for i := 0; i < cap(p.slots); i++ { p.slots <- struct{}{} }
+		}},
+		{"rate-limit", func(p *streetProxy) { p.tokens = -16 }},
+		{"duplicate-inflight", func(p *streetProxy) { p.inflight["3/2/4.png"] = true }},
+		{"rate-limit", func(p *streetProxy) { p.tokens = -16; p.inflight["3/2/4.png"] = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				w.WriteHeader(500)
+			}))
+			defer up.Close()
+			p := makeStreetProxy(up.URL, up.Client().Transport, time.Second)
+			tc.setup(p)
+			slots := len(p.slots)
+			w := streetTestGet(p, "GET", streetTestPath, nil)
+			if w.Code != 429 || w.Header().Get("Retry-After") != "1" ||
+				w.Header().Get("Cache-Control") != "no-store" ||
+				w.Header().Get("X-Sailing-Street-Source") != "proxy" ||
+				w.Header().Get("X-Sailing-Street-Result") != tc.name ||
+				calls.Load() != 0 || len(p.slots) != slots {
+				t.Fatalf("admission: status=%d headers=%v upstream=%d slots=%d", w.Code, w.Header(), calls.Load(), len(p.slots))
+			}
+		})
+	}
+}
+
+func TestStreetTileDiagnosticUpstreamAndCache(t *testing.T) {
+	data := streetTestPNG(t, 256)
+	var calls atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		w.Header().Set("X-Sailing-Street-Source", "spoofed")
+		w.Header().Set("X-Sailing-Street-Result", "concurrency-limit")
+		if n == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(429)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+		w.Header().Set("ETag", "\"diag-v1\"")
+		w.Write(data)
+	}))
+	defer up.Close()
+	p := makeStreetProxy(up.URL, up.Client().Transport, time.Second)
+	for _, tc := range []struct{
+		status int
+		source, result string
+		headers map[string]string
+	}{
+		{429, "upstream", "upstream-429", nil},
+		{200, "upstream", "upstream-tile", nil},
+		{200, "cache", "cache-hit", nil},
+		{304, "cache", "cache-hit", map[string]string{"If-None-Match": "\"diag-v1\""}},
+	} {
+		w := streetTestGet(p, "GET", streetTestPath, tc.headers)
+		if w.Code != tc.status || w.Header().Get("X-Sailing-Street-Source") != tc.source ||
+			w.Header().Get("X-Sailing-Street-Result") != tc.result {
+			t.Fatalf("want %d %s/%s; got %d %v", tc.status, tc.source, tc.result, w.Code, w.Header())
+		}
+		if tc.status == 429 && (w.Header().Get("Retry-After") != "1" || w.Header().Get("Cache-Control") != "no-store") {
+			t.Fatal("upstream error contract changed")
+		}
+	}
+	if calls.Load() != 2 { t.Fatalf("upstream calls %d", calls.Load()) }
 }
