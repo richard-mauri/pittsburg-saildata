@@ -19,3 +19,5 @@ Mac-hosted behind Cloudflare Tunnel; owner-local state inaccessible, verify clea
 Implementation write audit: initial v442 commit 9fc32024 omitted the new burst/cancellation test function bodies (imports and existing diagnostic assertions were present); correction adds the intended tests, without changing runtime or build. Verify the exact corrected head CI in PR #48.
 
 CI 45859956335 failed at e9847b7e solely on a Go local-name collision (`fresh` entry pointer versus freshness timestamp). Renamed the admission result `freshEntry`; no behavior or test weakening. Recheck corrected exact head.
+
+Post-write audit: initial v443 commit 56d247e lacked new sustained/rate-wait tests; added them in street_admission_test.go before final CI. Verify terminal exact-head CI in PR #48.
