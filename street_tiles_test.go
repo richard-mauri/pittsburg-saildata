@@ -235,10 +235,12 @@ func TestStreetTileUpstreamFailuresAndBounds(t *testing.T) {
 		t.Fatal("queue timeout leaked capacity")
 	}
 	p = makeStreetProxy(up.URL, up.Client().Transport, time.Second)
-	p.tokens = -1
-	if w := streetTestGet(p, "GET", streetTestPath, nil); w.Code != 429 {
-		t.Fatalf("rate: %d", w.Code)
+	p.tokens = -16
+	p.queueWait = 10 * time.Millisecond
+	if w := streetTestGet(p, "GET", streetTestPath, nil); w.Code != 429 || w.Header().Get("X-Sailing-Street-Result") != "rate-wait-timeout" {
+		t.Fatalf("rate wait deadline: %d %v", w.Code, w.Header())
 	}
+	if len(p.slots) != 0 || len(p.waiters) != 0 { t.Fatal("rate deadline leaked capacity") }
 	if w := streetTestGet(newStreetTileHandler("https://unapproved.invalid"), "GET", streetTestPath, nil); w.Code != 503 {
 		t.Fatalf("unapproved provider: %d", w.Code)
 	}
@@ -301,9 +303,9 @@ func TestStreetTileDiagnosticAdmissionReasons(t *testing.T) {
 			for i := 0; i < cap(p.slots); i++ { p.slots <- struct{}{} }
 			for i := 0; i < cap(p.waiters); i++ { p.waiters <- struct{}{} }
 		}},
-		{"rate-limit", func(p *streetProxy) { p.tokens = -16 }},
+		{"rate-wait-timeout", func(p *streetProxy) { p.tokens = -16; p.queueWait = 10*time.Millisecond }},
 		{"duplicate-inflight", func(p *streetProxy) { p.inflight["3/2/4.png"] = true }},
-		{"rate-limit", func(p *streetProxy) { p.tokens = -16; p.inflight["3/2/4.png"] = true }},
+		{"rate-wait-timeout", func(p *streetProxy) { p.tokens = -16; p.queueWait = 10*time.Millisecond; p.inflight["3/2/4.png"] = true }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var calls atomic.Int32
@@ -400,7 +402,7 @@ func TestStreetTileInteractiveBurstQueuesAndDrains(t *testing.T) {
 	}))
 	defer up.Close()
 	p := makeStreetProxy(up.URL, up.Client().Transport, 4*time.Second)
-	if cap(p.slots) != 8 || cap(p.waiters) != 32 || p.queueWait != time.Second || streetRate != 8 || streetBurst != 16 {
+	if cap(p.slots) != 8 || cap(p.waiters) != 32 || p.queueWait != 4*time.Second || streetRequestBudget != 11*time.Second || streetRate != 8 || streetBurst != 16 {
 		t.Fatal("unexpected production admission bounds")
 	}
 	// Longer mock deadline protects synchronization from CI scheduling noise.
@@ -467,7 +469,10 @@ func TestStreetTileQueueCancellationAndCacheRecheck(t *testing.T) {
 	streetTestAwait(t, func() bool { return len(p.waiters) == 1 })
 	now := time.Now()
 	p.store(&streetEntry{key: "3/2/4.png", data: data, header: http.Header{"Cache-Control": {"public, max-age=3600"}}, stored: now, freshUntil: now.Add(time.Hour)}, true)
+	p.mu.Lock()
 	<-p.slots
+	p.signalAdmissionLocked()
+	p.mu.Unlock()
 	select {
 	case w := <-result:
 		if w.Code != 200 || !bytes.Equal(w.Body.Bytes(), data) || w.Header().Get("X-Sailing-Street-Result") != "cache-hit" { t.Fatalf("queued cache hit: %d %v", w.Code, w.Header()) }
