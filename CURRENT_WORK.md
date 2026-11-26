@@ -15,3 +15,5 @@ Verified candidate diff against integration base: isolated route, new handler/te
 ## Safety and operating constraints
 
 Mac-hosted behind Cloudflare Tunnel; owner-local state inaccessible, verify clean synchronized checkout before local work. Preserve preferences, sessions, credentials, caches, private counters and configuration. Existing direct OSM street UI and protected local NOAA XYZ delivery unchanged. Operational NOAA cache `cache/nautical_tiles`: owner-reported SCAMIN-disabled v3, 12,499 PNGs (z12=176, z13=630, z14=2,378, z15=9,315); 75,173,427 PNG bytes; bounds west -122.70, south 37.65, east -121.45, north 38.35; cache root also contains marineplaces. No old-cache rollback; horizontal land-color boundary unresolved, z12 limited, soundings z13–15 owner accepted. No merge, closure, semantic version increment, release/tag, restart or deployment authorized.
+
+Implementation write audit: initial v442 commit 9fc32024 omitted the new burst/cancellation test function bodies (imports and existing diagnostic assertions were present); correction adds the intended tests, without changing runtime or build. Verify the exact corrected head CI in PR #48.

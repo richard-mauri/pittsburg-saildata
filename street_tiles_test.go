@@ -367,3 +367,111 @@ func TestStreetTileDiagnosticUpstreamAndCache(t *testing.T) {
 	}
 	if calls.Load() != 2 { t.Fatalf("upstream calls %d", calls.Load()) }
 }
+
+// Synchronize on observed mock queue occupancy, not arbitrary fixed sleeps.
+func streetTestAwait(t *testing.T, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !condition() {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for mock request state")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestStreetTileInteractiveBurstQueuesAndDrains(t *testing.T) {
+	data := streetTestPNG(t, 256)
+	var calls, active, peak atomic.Int32
+	release := make(chan struct{})
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		n := active.Add(1)
+		defer active.Add(-1)
+		for old := peak.Load(); n > old && !peak.CompareAndSwap(old, n); old = peak.Load() {}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+		w.Write(data)
+	}))
+	defer up.Close()
+	p := makeStreetProxy(up.URL, up.Client().Transport, 4*time.Second)
+	if cap(p.slots) != 8 || cap(p.waiters) != 32 || p.queueWait != time.Second || streetRate != 8 || streetBurst != 16 {
+		t.Fatal("unexpected production admission bounds")
+	}
+	// Longer mock deadline protects synchronization from CI scheduling noise.
+	// Separate expiry tests exercise a real deadline.
+	p.queueWait = 4*time.Second
+	results := make(chan *httptest.ResponseRecorder, 12)
+	send := func(i int) {
+		results <- streetTestGet(p, "GET", fmt.Sprintf("%s4/%d/4.png", streetTilePrefix, i), nil)
+	}
+	for i := 0; i < 8; i++ { go send(i) }
+	streetTestAwait(t, func() bool { return active.Load() == 8 })
+	for i := 8; i < 12; i++ { go send(i) }
+	streetTestAwait(t, func() bool { return len(p.waiters) == 4 })
+	if calls.Load() != 8 { t.Fatal("queued requests contacted upstream early") }
+	close(release)
+	for i := 0; i < 12; i++ {
+		select {
+		case w := <-results:
+			if w.Code != 200 || !bytes.Equal(w.Body.Bytes(), data) || w.Header().Get("X-Sailing-Street-Result") != "upstream-tile" || w.Header().Get("X-Sailing-Street-Admission-Ms") == "" {
+				t.Fatalf("burst tile: %d %v", w.Code, w.Header())
+			}
+		case <-time.After(5*time.Second):
+			t.Fatal("queued burst did not drain")
+		}
+	}
+	if calls.Load() != 12 || peak.Load() != 8 || len(p.slots) != 0 || len(p.waiters) != 0 {
+		t.Fatalf("burst leaked capacity or exceeded bounds: calls=%d peak=%d slots=%d waiters=%d", calls.Load(), peak.Load(), len(p.slots), len(p.waiters))
+	}
+}
+
+func TestStreetTileQueueCancellationAndCacheRecheck(t *testing.T) {
+	var calls atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(500)
+	}))
+	defer up.Close()
+	p := makeStreetProxy(up.URL, up.Client().Transport, time.Second)
+	p.queueWait = 4*time.Second
+	for i := 0; i < cap(p.slots); i++ { p.slots <- struct{}{} }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest("GET", "https://weather.themauris.org"+streetTestPath, nil).WithContext(ctx)
+		w := httptest.NewRecorder()
+		p.ServeHTTP(w, req)
+		result <- w
+	}()
+	streetTestAwait(t, func() bool { return len(p.waiters) == 1 })
+	cancel()
+	select {
+	case w := <-result:
+		if w.Code != 408 || w.Header().Get("X-Sailing-Street-Result") != "request-cancelled" { t.Fatalf("cancel: %d %v", w.Code, w.Header()) }
+	case <-time.After(2*time.Second): t.Fatal("cancel did not wake waiter")
+	}
+	if len(p.waiters) != 0 || len(p.slots) != 8 || calls.Load() != 0 || p.tokens != streetBurst {
+		t.Fatal("cancellation consumed capacity, tokens or upstream")
+	}
+	// A tile becoming fresh while waiting must not consume a rate token.
+	data := streetTestPNG(t, 256)
+	p.tokens = -16
+	go func() { result <- streetTestGet(p, "GET", streetTestPath, nil) }()
+	streetTestAwait(t, func() bool { return len(p.waiters) == 1 })
+	now := time.Now()
+	p.store(&streetEntry{key: "3/2/4.png", data: data, header: http.Header{"Cache-Control": {"public, max-age=3600"}}, stored: now, freshUntil: now.Add(time.Hour)}, true)
+	<-p.slots
+	select {
+	case w := <-result:
+		if w.Code != 200 || !bytes.Equal(w.Body.Bytes(), data) || w.Header().Get("X-Sailing-Street-Result") != "cache-hit" { t.Fatalf("queued cache hit: %d %v", w.Code, w.Header()) }
+	case <-time.After(2*time.Second): t.Fatal("cache waiter did not drain")
+	}
+	if len(p.waiters) != 0 || len(p.slots) != 7 || p.tokens != -16 || calls.Load() != 0 { t.Fatal("queued cache hit consumed upstream capacity or tokens") }
+}
