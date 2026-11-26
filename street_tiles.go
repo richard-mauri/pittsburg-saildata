@@ -347,16 +347,16 @@ func (p *streetProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		streetAdmissionError(w, reason)
 		return
 	}
-	reason, fresh := p.admitUpstream(r.Context(), key)
+	reason, freshEntry := p.admitUpstream(r.Context(), key)
 	if reason != "" {
 		<-p.slots
 		streetAdmissionError(w, reason)
 		return
 	}
-	if fresh != nil {
+	if freshEntry != nil {
 		<-p.slots
 		streetDiagnostics(w, "cache", "cache-hit")
-		streetWrite(w, r, fresh)
+		streetWrite(w, r, freshEntry)
 		return
 	}
 	defer p.release(key)
