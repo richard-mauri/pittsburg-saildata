@@ -7,7 +7,7 @@ A sailing-planning dashboard for the San Francisco Bay–Delta corridor and othe
 
 ## Getting started
 
-Open the dashboard, click the map where you want to sail, and generate conditions. Read the **Bottom Line** summary, then use **Conditions Now** and **Planning and Details** for observations, current timing, forecast context and overlays. You need not know NOAA station numbers: the application can select a nearby station with recent usable wind, or you can override it manually when you know a station is more representative.
+Launch from Homepage with verified personal or Guest access, click the map where you want to sail, and generate conditions. Read the **Bottom Line** summary, then use **Conditions Now** and **Planning and Details** for observations, current timing, forecast context and overlays. You need not know NOAA station numbers: the application can select a nearby station with recent usable wind, or you can override it manually when you know a station is more representative.
 
 Moving or zooming the map changes the view; **clicking a location** changes the selected sailing position. These actions are intentionally different.
 
@@ -27,7 +27,7 @@ Moving or zooming the map changes the view; **clicking a location** changes the 
 - **Station selection:** automatic nearby-usable choice or explicit manual override.
 - **Maps:** environmental context and map overlays.
 
-The Go service supports browser, text and JSON outputs where available. Documented routes include `/report`, `/planning`, `/wind-readings`, `/wind-stations`, `/point-weather` and `/marine-forecast`; parameters and formats depend on the endpoint.
+The Go service supports authenticated browser, text and JSON outputs where available; CLI requests can use a verified Homepage bearer. Documented routes include `/report`, `/planning`, `/wind-readings`, `/wind-stations`, `/point-weather` and `/marine-forecast`; parameters and formats depend on the endpoint.
 
 ## Operating limits
 
@@ -43,7 +43,7 @@ These charts and overlays are **supplemental planning context, not authoritative
 
 ## Sign-in and preferences
 
-Launch Sailing Outlook from [Homepage](https://home.themauris.org/). Verified personal and Guest sessions use Homepage authentication. Personal settings and Guest browser-local settings remain separate. Changes to supported preferences, including units, map type and overlays, are staged until you choose **Save Changes**; use **Discard Changes** to restore the last saved selections. Reversing the only change clears the unsaved state. A pending change may trigger a warning when leaving the page. An expired session or unavailable authentication service can prevent protected weather requests; return to Homepage to sign in again.
+Launch Sailing Outlook from [Homepage](https://home.themauris.org/). Verified personal and Guest sessions use Homepage authentication; weather reports, map/chart data served by SailingGo and API requests require verified access. The public welcome/sign-in entry does not expose protected data. Guest access is not anonymous access. Personal settings and Guest browser-local settings remain separate. Changes to supported preferences, including units, map type and overlays, are staged until you choose **Save Changes**; use **Discard Changes** to restore the last saved selections. Reversing the only change clears the unsaved state. A pending change may trigger a warning when leaving the page. An expired session or unavailable authentication service can prevent protected weather requests; return to Homepage to sign in again.
 
 ## Development documentation
 

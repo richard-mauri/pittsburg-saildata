@@ -4,14 +4,7 @@ Read [AGENTS.md](AGENTS.md) and [Homepage's authoritative suite development poli
 
 ## GitHub Actions and limitations
 
-For Issue #33, compare all four HTML pages with Homepage, NewsGo, ScraperGo and
-MauriStocks at identical Safari widths. The embedded Homepage banner and
-`.suite-content` must share the left/right boundaries, top spacing and
-responsive breakpoints. Confirm one locally served Tanner portrait, one
-Homepage return link, no app-specific banner offsets, and an unsuffixed verified
-identity. Check that preference conflict/guest warnings remain visible outside
-the banner. Preserve all NOAA, map and preferences behavior. Run the documented
-`./devbuild.sh` once; do not add standalone `go test`/`go build` owner commands.
+For suite UI changes, compare the four HTML pages at identical Safari widths with the shared Homepage banner and controls in companion apps. Verify matching responsive gutters, one local portrait and return link, verified identity without suffix, and separate preference status. Preserve NOAA, map and preferences behavior.
 
 SailingGo has its own `.github/workflows/go-ci.yml`: non-blocking formatting report, root Go tests and a root build on PRs targeting `main`. Verify its actual outcome on the exact PR head. The root `go.mod` now declares Go 1.22 because Homepage's pinned shared UI module requires it; CI uses Go 1.23. The nested `ui/` module remains independent and requires separate testing when edited. The shared Homepage policy does not replace app-specific CI.
 
@@ -38,7 +31,7 @@ git pull --ff-only origin ACTUAL-PR-BRANCH
 
 After the owner intentionally installs/launches a candidate, verify Conditions Now and Planning and Details, History time windows including 1h and 24h, mph/knots switching, wind recency and station overrides, predicted-current semantics, map click versus pan/zoom, overlays, and text/JSON endpoints. The `/wind-readings?station=PSBC1&wind_hours=4&wind_unit=mph` response should maintain its documented schema when upstream NOAA data are available. Record pass/fail/not-performed for every claimed check. Browser and live-weather results are separate from Linux CI.
 
-Follow the fresh-status/diff/staging audit in AGENTS.md before commits. For development source regenerations increment `buildVersion` but do not bump `appVersion` except for owner-approved release preparation. Never include local binaries, credentials, private counters, archives or tunnel configuration in the PR.
+Follow the current Homepage policy's fresh-status/diff/staging audit before commits. For runtime source regenerations follow the documented buildVersion convention; semantic appVersion changes occur at authorized FINISH. Documentation-only work changes neither version nor build counter. Never include local binaries, credentials, private counters, archives or tunnel configuration in the PR.
 
 ## NOAA nautical chart manager — current operating procedure
 
@@ -50,4 +43,4 @@ Owner Safari acceptance established visible depth soundings at zooms 13–15. Zo
 
 ## Pre-merge documentation and verification
 
-Review all five repository Markdown documents and the current merged Homepage policy. Keep README user-facing, ARCHITECTURE implementation-focused, DEVELOPMENT procedural and CURRENT_WORK a single factual handoff. Verify GitHub CI against the **latest** PR head after documentation edits. Before FINISH, check PR base/head/reviews, Issue status and outstanding owner-local divergence. The `./devbuild.sh` workflow above is for runtime changes; documentation-only edits require content/link/path review and GitHub CI, not a service restart.
+Review all five repository Markdown documents and the current merged Homepage policy. Keep README user-facing, ARCHITECTURE implementation-focused, DEVELOPMENT procedural and CURRENT_WORK a single factual handoff. Verify GitHub CI against the **latest** PR head after documentation edits. Before FINISH, check PR base/head/reviews, Issue status and outstanding owner-local divergence. For authentication changes verify signed-out data denial, verified personal and Guest handoff, expired/revoked credentials, 401 vs 503, same-origin cookie writes, and separate personal/Guest preference storage; never copy tokens into diagnostics. The `./devbuild.sh` workflow above is for runtime changes; documentation-only edits require content/link/path review and GitHub CI, not a service restart.
