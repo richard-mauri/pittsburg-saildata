@@ -65,6 +65,12 @@ jobs:
         run: |
           go test -count=1 -v ./cmd/poimarineexport ./cmd/poiovertureinventory
           go run ./cmd/poimarineexport
+      - name: Test bounded Overture pilot (synthetic only)
+        run: |
+          go test -count=1 -v ./cmd/poioverturesample
+          go run ./cmd/poioverturesample download
+          docker pull duckdb/duckdb:1.4.2
+          POI_DUCKDB_TEST=1 go test -count=1 -v ./cmd/poioverturesample -run TestDockerFixture
       - name: Test root application package
         run: go test -count=1 .
       - name: Build root application
