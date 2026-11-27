@@ -1,0 +1,26 @@
+# Marine export and Overture terrestrial source evaluation (Issue #51)
+
+Owner NEXT on 2026-11-27 supersedes the proposed immediate OSM polygon enhancement. Preserve established marine curation; evaluate Overture point data before spending effort on geometry conversion. No runtime changes or production installation.
+
+## Local marine export
+
+Read-only inspection of tracked assets/marine_places.json (asset 14, generator v32, updated 2026-09-25) shows 774 places in eight categories; 465 in initial provider scope (234 marinas, 151 launch ramps, 80 fuel docks). All 465 have coordinate provenance, 464 have upstream source IDs. The single missing ID is the explicit Antioch Marina Launch Ramp local override. The generator already applies DBW city/body-of-water discovery, OSM classification, source deduplication and manual overrides. Do not rerun it, modify its cache/asset, or expose protected endpoints. No pumpout records in this asset; region is northern/central coastal and Delta, not statewide.
+
+cmd/poimarineexport reads bounded local asset, maps the three scoped categories, retains exact coordinates and source/coordinate provenance, uses source+category+source ID SHA256 namespaced IDs (explicit stable key for the one override), rejects unknown missing IDs, duplicates and invalid names/coordinates; timestamp is asset date at UTC midnight. Strict seven native waypoint fields; source metadata outside waypoint. No geocoding or inferred navigation access. Default emits aggregate report only; -export prints local diagnostic envelope, not a public dataset. Source-specific IDs may change if generator changes preferred source; durable cross-source ID continuity needs a future design. Other categories intentionally excluded, no new restaurant curation. No file writes by utility. Public redistribution not cleared: review ODbL derivative obligations, DBW factual data and applicable terms/permission, local overrides and collective vs derivative database licensing before publishing. Do not assume public availability grants redistribution rights.
+
+## Overture catalog inventory (metadata only)
+
+[November Places guide](https://docs.overturemaps.org/guides/places/) confirms point representations, taxonomy.primary/hierarchy/alternates and basic_category; old categories removed. [Licenses](https://docs.overturemaps.org/attribution/) include CDLA Permissive 2.0, Foursquare Apache-2.0 notice, AllThePlaces CC0; preserve source provenance and notices. Keep source layers logically separate; combined derivative may have additional obligations. Compare same Delta and SF boxes as OSM. No statewide claim or source selection.
+
+[STAC catalog guide](https://docs.overturemaps.org/getting-data/cloud-sources/) and [STAC implementation](https://github.com/OvertureMaps/stac) describe per-file items with bbox and AWS/Azure assets, plus release item index. cmd/poiovertureinventory follows only pinned 2026-11-18.0 STAC JSON catalog within same host/release and places branch, 16 MiB response body budget, <=512 requests, 90-second deadline, no redirects/proxy or bulk data reads. Requires known Content-Length and uncompressed bodies; fails closed on unknown layout or missing asset size. Reports candidate Parquet paths and full object sizes intersecting either sample; candidate file extent is not feature coverage. Actual STAC layout and size fields not confirmed live; remote DNS failed for STAC/Azure on 2026-11-27. Synthetic tests only. Owner run inventory before choosing whole-file acquisition or range-budgeted isolated DuckDB extraction. No wildcard cloud scan, no new tool install or dataset transfer yet; 100 MB per small sample data budget remains unless explicitly expanded. If STAC inventory fails, return error, don't substitute an unbounded download.
+
+Run individually from safe branch checkout:
+```sh
+go run ./cmd/poimarineexport
+go run ./cmd/poiovertureinventory
+```
+Return aggregate outputs only. Optional local-only marine export (stdout, no overwrite with shell noclobber):
+```sh
+(umask 077; set -C; go run ./cmd/poimarineexport -export > private/poi-marine-export-study.json)
+```
+Do not share the raw export or install it. Compare actual terrestrial counts after bounded acquisition is available; design targeted benchmark and source-specific quality audit. No changes to existing OSM pilot or production data.

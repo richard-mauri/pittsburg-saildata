@@ -61,6 +61,10 @@ jobs:
           go run ./cmd/poisample normalize -sample delta -input "$study/delta/features.geojsonseq" -output "$study/delta/normalized"
           test "$(wc -l < "$study/delta/normalized/normalized.csv")" -eq 3
           go run ./cmd/poiprobe -input "$study/delta/normalized/normalized.csv"
+      - name: Test isolated marine export and Overture inventory (synthetic only)
+        run: |
+          go test -count=1 -v ./cmd/poimarineexport ./cmd/poiovertureinventory
+          go run ./cmd/poimarineexport
       - name: Test root application package
         run: go test -count=1 .
       - name: Build root application
