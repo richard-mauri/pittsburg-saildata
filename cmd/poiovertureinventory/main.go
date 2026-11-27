@@ -96,9 +96,12 @@ func scan(ctx context.Context,get fetcher)(result,error){
 			if overlaps(n.BBox,[]float64{-122.43,37.77,-122.39,37.81}){samples=append(samples,"sf")}
 			if len(samples)==0{continue}
 			a:=n.Assets["aws"]
-			prefix:="s3://overturemaps-us-west-2/release/"+release+"/theme=places/type=place/"
-			if !strings.HasPrefix(a.Href,prefix)||!strings.HasSuffix(a.Href,".parquet")||a.Size<=0||a.Size>100000000000||assets[a.Href]{return out,errors.New("invalid or duplicate AWS item metadata")}
-			assets[a.Href]=true
+			assetURL, err := url.Parse(a.Href)
+			prefix := "/release/"+release+"/theme=places/type=place/"
+			if err != nil || assetURL.User != nil || assetURL.RawQuery != "" || assetURL.Fragment != "" || !strings.HasPrefix(assetURL.Path,prefix) || path.Clean(assetURL.Path)!=assetURL.Path || !strings.HasSuffix(assetURL.Path,".parquet") || a.Size<=0 || a.Size>100000000000 {return out,errors.New("invalid AWS item metadata")}
+			if !((assetURL.Scheme=="https" && assetURL.Host=="overturemaps-us-west-2.s3.us-west-2.amazonaws.com") || (assetURL.Scheme=="s3" && assetURL.Host=="overturemaps-us-west-2")) {return out,errors.New("unexpected AWS asset host")}
+			if assets[assetURL.Path] {return out,errors.New("duplicate AWS item metadata")}
+			assets[assetURL.Path]=true
 			out.Candidates=append(out.Candidates,candidate{n.ID,n.BBox,a.Href,a.Size,samples})
 			out.FullFileBytes+=a.Size
 		default:return out,errors.New("unknown catalog node type")

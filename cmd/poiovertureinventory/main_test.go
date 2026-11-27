@@ -7,7 +7,7 @@ import (
 
 func TestScan(t *testing.T){
 	p:="https://stac.overturemaps.org/"+release+"/places/"
-	a:="s3://overturemaps-us-west-2/release/"+release+"/theme=places/type=place/a.parquet"
+	a:="https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com/release/"+release+"/theme=places/type=place/a.parquet"
 	nodes:=map[string]node{
 		root:{Type:"Catalog",Links:[]link{{"child","places/catalog.json"},{"child","buildings/catalog.json"}}},
 		p+"catalog.json":{Type:"Catalog",Links:[]link{{"child","place/collection.json"}}},
