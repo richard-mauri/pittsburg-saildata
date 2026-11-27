@@ -82,3 +82,5 @@ See [POI_MANAGER_PLAN.md](POI_MANAGER_PLAN.md). Owner NEXT selects Overture as p
 
 ## Read-only reader contract
 See [POI_READER.md](POI_READER.md); selected disk grid candidate, stable ID order, bounded JSON array and concurrency, provenance reconciliation. Public API envelope/authorization and full response cap not implemented. See [POI_DATA_NOTICES.md](POI_DATA_NOTICES.md) for publication gate.
+
+Owner hardened reader real-data acceptance passed; see POI_READER.md for actual timings and next proposed scoped HTTP integration. Stable-ID native category output, 500-record and complete encoded HTTP cap, exact public routes and attribution docs only; no runtime/public install yet.

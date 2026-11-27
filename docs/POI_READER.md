@@ -8,3 +8,24 @@ Owner re-run `/usr/bin/time -l go run ./cmd/poimanager verify` on existing immut
 
 ## Attribution gate
 See [POI_DATA_NOTICES.md](POI_DATA_NOTICES.md) and accompanying licenses. The source metadata license membership is checked against allowlist, but source-dataset mappings must be reviewed against actual new aggregate inventory before publication. Public API documentation must include full license/NOTICE texts, modification notice and source attribution; no assumption the records are exempt computational results. No public marine data until separate rights clearance. Release snapshot fixed; verify notices against exact release and current source obligations before any public installation. Existing local generation not modified. No runtime or GPS Map edits. Next after owner acceptance: narrowly scoped API integration under separate NEXT, operational install/restart separately approved.
+
+
+## Owner hardened reader acceptance — 2026-11-27
+
+Owner supplied aggregate verify JSON for existing schema 1 generation; same manifest, source/index/payload/provenance hashes and counts as successful build in POI_STATEWIDE_BUILD.md. 199475 indexed and 199475 provenance rows reconciled, 3660 cells, exact license totals. No actual outer time -l RSS report in this upload; Go heap allocation 762952 bytes after initialization/GC, Go Sys 62937368 bytes, not RSS or peak memory. No source transfer, data change or runtime launch.
+
+| Benchmark | Result |
+|---|---:|
+| Sequential queries, indexed vs scan full-payload parity | 17, pass |
+| Concurrent queries, 4 workers | 68, pass |
+| Sequential queries truncated | 6 |
+| Indexed batch ms | 144.859709 |
+| Scan batch ms | 1012.302833 |
+| Indexed p95 ms | 68.674875 |
+| Concurrent wall ms | 302.921042 |
+| Concurrent p95 ms | 124.213792 |
+| Returned JSON array bytes across sequential set | 1103136 |
+
+Single-worker p95 meets provisional 100ms warm target; four-worker p95 exceeds it by 24.2ms, below 1s deadline. No cold-cache or HTTP tests; no proof of <=64 MiB incremental service RSS. Prior 32-query/cell-order 1.999667ms p95 is a different workload/order and is not a directly comparable regression baseline. Retain native grid candidate, measure actual HTTP behavior before optimizing. No need to rebuild or redownload.
+
+Source dataset/license review in POI_DATA_NOTICES.md. Proposed next NEXT: integrate the read-only reader into SailingGo root package with explicit opt-in local generation configuration (default unavailable; no auto-download/installation), existing generation hash/license gate and no marine publication. Implement precisely scoped GET/OPTIONS /api/poi/status, /api/poi/categories, /api/poi/bbox and static exact-path attribution/license documentation (full texts, prominent Foursquare NOTICE, date of changes), CORS only https://gps.themauris.org; no credential forwarding or per-user telemetry for public POI. Reject malformed/duplicate/oversized query parameters, enforce reader limits, deterministic stable-ID native seven-field records, explicit unavailable categories, full encoded HTTP response <=512KiB, independent global rate/admission limit and deadline, ETag/conditional request/error behavior as designed. No wildcard auth exemption; protected routes stay protected. Test root handler/middleware, missing/corrupt generation, status, method/CORS/cache/rate/body bounds, cancellation, concurrency and other endpoint regressions. Benchmark synthetic HTTP requests; owner Mac devbuild once per runtime handoff; startup/HTTP local acceptance and production installation/restart require separately authorized operations. No launch, installation, publication, merge/tag/release or GPS Map changes in this proposed development phase. Actual dataset path is private; no public filesystem paths or raw provenance exposed. Anticipated MINOR only at FINISH.
