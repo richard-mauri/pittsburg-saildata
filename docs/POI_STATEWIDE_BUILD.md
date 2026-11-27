@@ -21,3 +21,37 @@ du -sh private/poi-california-2026-11-18.0
 Return aggregate reports, not raw records. For a failed stage return terminal error and stage path. No SailingGo rebuild/restart.
 
 Synthetic CI also tests a two-record ZIP/DBF/SHP archive with California selected by STATEFP, polygon hole and exclusion of other state, plus actual offline DuckDB SQL against a local Parquet fixture containing a casual eatery. These fixtures are not actual 2026 state data.
+
+
+## Owner statewide results — 2026-11-27
+
+Owner Mac terminal transcript shows plan, acquire -apply, build, verify and disk usage all succeeded. Northern source reused at pinned SHA256. Newly acquired:
+- South Overture object 823024945 bytes, 11.217559292 s, SHA256 0679fbe44ee8642000a73ead77d196945f17b3d12a44a5bc17bd5db95b746fc3, ETag "af3fa5bae8f9d322b7a88c7a794f2036-13", last modified Wed, 18 Nov 2026 17:04:06 GMT, downloaded 2026-11-27T22:30:35.292584Z.
+- Census TIGER2026 state ZIP 9957057 bytes, 0.447861625 s, SHA256 2e17ea40dff3e00163eec87a26efa0b0ff7e8fe364a191bf1a7754dcb49ea326, no ETag, last modified Wed, 07 Oct 2026 01:45:57 GMT, downloaded 2026-11-27T22:30:35.7455Z.
+- Total new source bytes 832982002, within approved cap; north 836166912 bytes, SHA256 be8157302e8d94b648f884ae65b10f6073960b439dd0aceda2e145c75bfe5441. ARM64 DuckDB image sha256:3e2cca396e228ba2a458a21919a83948eef637e843c35cb0cf51606465d28402. Actual archive accepted by CRS guard, California polygon 7 rings, 12095 edges. No datum transformation or independent publisher checksum.
+- Local completed generation private/poi-california-2026-11-18.0/generation; schema 1, ca-terrestrial-v1, release 2026-11-18.0, created 2026-11-18T00:00:00.000Z. Publication local study only. 12 extraction bands, 282159 prefiltered candidates, 296768951 cumulative raw CSV bytes, 199475 accepted, 82684 rejected. Rejects: confidence 15319, identity_or_name 22, operating_status 10842, outside_band 2, outside_state 47706, taxonomy 8793. No reported near-boundary quarantine, duplicate or missing/unknown-license rejects. Category prefilter means these counts are not all California Places.
+
+| Category | Accepted |
+|---|---:|
+| coffee | 15523 |
+| ev_charging | 999 |
+| fuel | 12310 |
+| grocery | 10364 |
+| lodging | 19238 |
+| parking | 3419 |
+| restaurant | 137622 |
+| Total | 199475 |
+
+License memberships (overlapping): CDLA-Permissive-2.0 199475, Apache-2.0 20789, CC0-1.0 5341. This is allowlist evidence, not complete redistribution clearance.
+
+| File | Bytes | SHA256 |
+|---|---:|---|
+| payload.bin | 56362446 | c7f24b89ac06cac0ba3eec98e3a61a1090a5fcdad432ef6962e04218aa24188b |
+| index.bin | 6383200 | 322411080c4b40a181bf2215e3e924003cf75b9f53dcebd707d7f879dbc998f6 |
+| provenance.jsonl | 185861155 | ddc65e65c393ddcf2481500b9fd7379ae758418d49cdfeb53a1e83113ecd36d2 |
+
+Payload/index combined 62745646 bytes (~59.84 MiB); three files 248606801 bytes (~237.09 MiB), excluding manifest. New study du -sh 1.0G (excludes existing northern study). Build internal 9.418391041 s, outer go run time -l 10.20 s real, max RSS 94076928 bytes, peak memory footprint 22233832 bytes, Go heap 63782008, Sys 87775512 bytes. Verify outer 2.54 s real, max RSS 60751872 bytes, peak memory footprint 21709544 bytes. These process metrics include go run/toolchain effects, not isolated runtime server or Docker VM RSS. Verification after GC heap 695536 bytes, Sys 58153240 bytes; not total process memory.
+
+32 deterministic full-JSON queries, 3660 cells, 8 truncated, parity pass, 2267953 bytes returned across query set. Grid batch 16.523 ms, sequential disk scan 1776.501627 ms (~107.52x for this workload), grid p95 1.999667 ms. Warm sequential local benchmark, not HTTP latency, cold-cache or concurrent workload. Both commands reported identical manifest and hashes; index/payload validation passed. Provenance individual cross-reconciliation remains pending. No unique real-world establishment, completeness, access, or hours guarantee; actual border positional accuracy and taxonomy still subject to quality review.
+
+Recommendation for next NEXT: adopt native disk-backed grid as leading runtime candidate; harden generation validation and provenance reconciliation, preserve authoritative source notice texts and release-specific attribution for all accepted licenses, investigate missing bbox/coverage and boundary tolerance limitations, separate reusable read-only grid package from CLI and test corruption, bounded concurrency, deterministic result/byte caps and full-payload parity under representative dense/sparse workload. Use existing local generation read-only (no new bulk downloads or rebuild unless explicitly needed); add synthetic tests/CI. Marine remains separate/local-only pending rights. Proposed subsequent API integration phase after owner acceptance; no public routes, production dataset install, restart, merge or release authorized by this checkpoint.
