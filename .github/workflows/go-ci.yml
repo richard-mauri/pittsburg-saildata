@@ -35,6 +35,15 @@ jobs:
         run: go test -count=1 ./cmd/nauticaltilemanager
       - name: Build standalone Nautical Tile Manager
         run: go build ./cmd/nauticaltilemanager
+      - name: Test isolated POI index probe (synthetic only)
+        run: go test -count=1 -v ./cmd/poiprobe
+      - name: Measure synthetic POI index parity and performance
+        run: |
+          if command -v sqlite3 >/dev/null 2>&1; then
+            go run ./cmd/poiprobe -synthetic 100000 -sqlite
+          else
+            go run ./cmd/poiprobe -synthetic 100000
+          fi
       - name: Test root application package
         run: go test -count=1 .
       - name: Build root application
