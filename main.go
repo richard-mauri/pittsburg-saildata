@@ -2141,6 +2141,9 @@ func runServer(
  // configure a local XYZ chart directory; no NOAA network fetch occurs here.
  mux.Handle("/api/charts/tiles/", nauticalTileHandler(defaultNauticalCacheDir()))
  mux.Handle(streetTilePrefix, newStreetTileHandler(os.Getenv("SAILING_STREET_TILE_UPSTREAM")))
+ poi := openPOIService(os.Getenv("SAILING_POI_GENERATION"))
+ defer poi.close()
+ for _, path := range poiPaths { mux.Handle(path, poi) }
  if reporter!=nil {
   mux.HandleFunc("/api/activity/ping",reporter.ping)
   mux.HandleFunc("/api/activity/identity",reporter.identity)
@@ -4170,6 +4173,7 @@ func runServer(
  handler:=http.Handler(mux)
  if reporter!=nil {
   handler=http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
+   if poiPublicRequest(r) { mux.ServeHTTP(w,r); return }
    switch r.URL.Path {
    case "/health","/api/activity/ping","/api/activity/identity","/activity.js","/assets/hero.jpg","/assets/tanner.jpg","/assets/marine_places.json":
     mux.ServeHTTP(w,r);return
