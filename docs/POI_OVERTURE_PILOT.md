@@ -30,3 +30,40 @@ CI Go unit tests + synthetic local Parquet DuckDB fixture using same extraction 
 ## Owner acquisition and nullable CSV correction — 2026-11-27
 
 Download verified exact 836166912 bytes in 11.059865958 seconds, SHA256 be8157302e8d94b648f884ae65b10f6073960b439dd0aceda2e145c75bfe5441, ETag "4deda9314cbe9252124f6c0967072f1a-13", last modified Wed, 18 Nov 2026 17:01:59 GMT, downloaded 2026-11-27T22:04:46.895873Z. ARM64 local DuckDB image sha256:3e2cca396e228ba2a458a21919a83948eef637e843c35cb0cf51606465d28402. Delta extraction finished; Go failed on hierarchy JSON. Owner read-only diagnostic found 56 literal uppercase NULL hierarchy values, not valid JSON. Normalize SQL NULL sentinels across nullable columns (including status, confidence, source metadata); missing names and IDs still rejected, malformed non-null JSON still errors. Added regression fixture. For this owner-confirmed completed CSV only, run `go run ./cmd/poioverturesample normalize -sample delta` after guarded pull. Rehashes source, reads bounded regular existing CSV, refuses existing normalized/report files, no download or Docker. Legacy CSV has no extraction-complete marker, so resume relies on owner evidence; original extraction timing not captured, no independent completeness assertion. Then probe if nonempty, proceed to SF using normal sample command. No production changes.
+
+
+## Completed owner real-data measurements — 2026-11-27
+
+Both samples successfully normalized and passed exact grid/scan/SQLite parity (100 queries each) on Darwin arm64 Go 1.27.3. Source manifest and ARM64 image ID above. SF actual extraction 0.6445015 s, normalization 0.094660416 s, raw CSV 44753371 bytes; Delta normalization-only retry 0.004168541 s, raw CSV 1916427 bytes, extraction duration unavailable. Total study du -sh 846M; no peak RSS or cold-cache measurement. No publisher checksum independent of recorded local SHA256.
+
+| Category | Delta OSM accepted | Delta Overture raw/accepted | SF OSM accepted | SF Overture raw/accepted |
+|---|---:|---:|---:|---:|
+| coffee | 4 | 8/8 | 328 | 556/504 |
+| ev_charging | 0 | 1/1 | 5 | 13/11 |
+| fuel | 3 | 19/19 | 0 | 17/17 |
+| grocery | 3 | 24/24 | 32 | 171/163 |
+| lodging | 0 | 9/9 | 60 | 695/683 |
+| parking | 0 | 0/0 | 23 | 399/382 |
+| restaurant | 16 | 121/117 | 756 | 2485/2291 |
+| Total terrestrial | 26 | 182/178 | 1204 | 4336/4051 |
+
+Delta 1790 candidates, 1 outside, 1607 unclassified, 4 permanently closed. SF 41505 candidates, 3 outside, 37166 unclassified, 283 permanently closed, 2 unnamed/invalid. Delta 56 missing taxonomy; SF 1002. Status across exact-bound candidates: Delta 403 missing/1349 open/37 permanently closed; SF 7077 missing/31949 open/2474 permanently closed/2 temporarily closed. Confidence bins across scoped rows BEFORE subsequent rejection: Delta 15 below 0.5/24 from 0.5 to below 0.8/143 at least 0.8; SF 293/745/3298. Nonzero low confidence permitted in pilot, not verified existence. Accepted source license memberships (overlapping): Delta CDLA-Permissive-2.0 178, Apache-2.0 14, CC0-1.0 3; SF 4051/646/64 respectively. Accepted dataset memberships Delta AllThePlaces 3, BrightQuery 26, DAC 1, Foursquare 14, Microsoft 12, Overture 178, Overture-signals 135, Uberall 1, meta 122; SF AllThePlaces 64, Birdeye 3, BrightQuery 1042, DAC 1, Foursquare 646, Microsoft 273, OpenTravel 1, Overture 4051, Overture-signals 3083, Uberall 5, meta 2038. No license clearance for publication yet. Raw samples retained locally, no raw business rows committed.
+
+| Probe metric | Delta | SF |
+|---|---:|---:|
+| Rows | 178 | 4051 |
+| Grid file bytes | 4272 | 97224 |
+| Grid cells | 3 | 4 |
+| Grid build ms | 7.565167 | 8.307625 |
+| Grid single batch ms | 0.097791 | 1.556834 |
+| Grid single p50/p95/p99 ms | 0.000042/0.002875/0.007458 | 0.000042/0.09475/0.187041 |
+| Grid four batch ms | 0.080167 | 0.663208 |
+| Grid four p50/p95/p99 ms | 0.000042/0.005417/0.010875 | 0.000042/0.116792/0.160792 |
+| Scan batch ms | 0.159875 | 0.786166 |
+| SQLite bytes | 40960 | 331776 |
+| SQLite build ms | 5.100667 | 19.2735 |
+| SQLite batch ms | 4.245583 | 11.295333 |
+
+Overture 4229 accepted terrestrial records versus point-only OSM 1230 (3.44x); sample ratios 6.85x and 3.36x. No inference of completeness, unique establishments, accuracy or statewide coverage. OSM geometry rejection biases comparison. Parking absent in Delta Overture output; present in SF. Taxonomy audit needed for broad lodging and cafe mapping, ambiguous fueling_station, convenience stores (not currently included), public vs restricted parking, duplicate identities/establishments and low-confidence records. SF scan faster than single-worker grid; SQLite includes CLI overhead, grid excludes in-memory directory and payload, many queries miss sample; no final index performance guarantee.
+
+Recommendation for next NEXT: provisionally select Overture for terrestrial and existing curated marine export for marine, subject to owner approval, licensing and quality audit. Use existing local Parquet/CSV only for targeted category/name/coordinate and duplicate audit, assess California boundary and all catalog item extents (this one file does not cover southern CA), design bounded statewide builder, full-payload spatial benchmark and stable native category IDs aligned to GPS Map 2.2.0. Do not acquire another object without separate bounded scope. No runtime API, production dataset, service change, merge or release yet.
