@@ -1,4 +1,4 @@
-# CURRENT_WORK — SailingGo baseline
+# CURRENT_WORK — SailingGo Issue #51
 
 ## Current baseline
 
@@ -18,4 +18,13 @@ Dependent [GPS Map PR #47](https://github.com/richard-mauri/sailing-gps-map/pull
 
 Preserve Mac working tree, preferences, sessions, credentials, private counters, caches and configuration. Operational NOAA cache cache/nautical_tiles: owner-reported SCAMIN-disabled v3, 12,499 PNGs (z12=176, z13=630, z14=2,378, z15=9,315); 75,173,427 PNG bytes; bounds west -122.70 south 37.65 east -121.45 north 38.35. No old-cache rollback; horizontal land-color boundary unresolved, z12 limited, soundings z13–15 owner accepted. No tag/release, tunnel/configuration or data changes; deployment is separate from Git merge. No changes to dependent PR without owner authorization.
 
-Documentation-only reconciliation of this baseline is recorded in [PR #50](https://github.com/richard-mauri/pittsburg-saildata/pull/50) and [Issue #49](https://github.com/richard-mauri/pittsburg-saildata/issues/49). Consult PR #50 for its exact final-head CI and integration evidence. No semantic version, build increment or runtime change. No active SailingGo runtime development is authorized; the next phase requires owner approval.
+Documentation-only reconciliation of this baseline is recorded in [PR #50](https://github.com/richard-mauri/pittsburg-saildata/pull/50) and [Issue #49](https://github.com/richard-mauri/pittsburg-saildata/issues/49). Consult PR #50 for its exact final-head CI and integration evidence. No semantic version, build increment or runtime change. No active SailingGo runtime development is authorized.
+
+
+## Active Issue #51 — California POI provider
+
+Owner BEGIN then NEXT authorized Phase 1 source evaluation and API contract design only on 2026-11-27. [Issue #51](https://github.com/richard-mauri/pittsburg-saildata/issues/51), [development branch](https://github.com/richard-mauri/pittsburg-saildata/tree/feature/issue-51-california-poi), draft PR to be created after initial checkpoint (see Issue bootstrap for actual link). Base main `75d6f170f835a76d38217f0c89bcdb0a6f2b6735`, exact base [Go CI passed](https://github.com/richard-mauri/pittsburg-saildata/actions/runs/45869964729). Full current Homepage policy v1.3.0 and five docs reviewed; verified main tree, current source, relevant PRs #48/#50 and GPS Map #55, GPS Map merged contract. Owner-local state and current binary not independently accessible.
+
+Phase 1 findings and proposed contract: [docs/CALIFORNIA_POI_DESIGN.md](docs/CALIFORNIA_POI_DESIGN.md). Overture 2026-11-18.0 current taxonomy (old categories removed); California Geofabrik PBF 1.2 GB listed, ODbL derivative obligations; provisional Overture terrestrial/OSM marine comparison, no source committed. Actual samples, California category counts, index size/RSS, latency and refresh costs not measured: shell DNS failure, Taginfo unavailable, no installed extraction/index tools; no dependency changes or downloads. Need owner-approved isolated sampling/tool selection before source choice. Three proposed endpoints, versioned registry, strict native waypoint envelope with separate provider metadata, bounded read-only CORS and auth design; numerical limits provisional pending measurement. No runtime, data, credentials, caches, UI, workflow or version changes. No changes outside this repository. Source v1.17.0/v443 unchanged. Final exact-head CI evidence belongs in draft PR; do not inherit base CI.
+
+Next action: review proposed Phase 1 design, reconcile exact PR head CI, then propose owner NEXT for isolated source sampling/index comparison with explicit tool/byte/disk approval and owner execution where remote network is unavailable. No new implementation, production dataset install, restart, merge, deployment, tag/release or cross-repo work authorized. Preserve existing operational constraints above.
