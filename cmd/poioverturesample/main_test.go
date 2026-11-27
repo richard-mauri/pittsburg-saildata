@@ -51,3 +51,16 @@ func TestDockerFixture(t *testing.T){
  if e=extract(ctx,filepath.Join(dir,"places.parquet"),"sailinggo-ovt-ci-"+filepath.Base(dir),id,boxes["delta"],&raw);e!=nil{t.Fatal(e)}
  rows,r,e:=normalize(&raw,"delta");if e!=nil||len(rows)!=1||r.AcceptedCategories["coffee"]!=1{t.Fatalf("%+v %v",r,e)}
 }
+
+func TestNullableCSV(t *testing.T){
+ var b bytes.Buffer;w:=csv.NewWriter(&b);_ = w.Write(strings.Split("id,name,basic_category,primary_category,hierarchy,operating_status,confidence,wkb,sources",","))
+ for _,r:=range [][]string{
+ {"a","Cafe","cafe","NULL","NULL","NULL","NULL",wkb(38.02,-121.9),"NULL"},
+ {"b","NULL","cafe","NULL","NULL","NULL","NULL",wkb(38.02,-121.9),"NULL"},
+ {"c","Unknown","NULL","NULL","NULL","NULL","NULL",wkb(38.02,-121.9),"NULL"},
+ {"NULL","Cafe","cafe","NULL","NULL","NULL","NULL",wkb(38.02,-121.9),"NULL"},
+ {"d","Cafe","cafe","NULL","null","NULL","NULL",wkb(38.02,-121.9),"null"},
+ }{_ = w.Write(r)};w.Flush()
+ rows,r,e:=normalize(&b,"delta")
+ if e!=nil||len(rows)!=2||r.Rejected["unnamed_or_invalid_name"]!=1||r.Rejected["unclassified"]!=1||r.Rejected["invalid_id"]!=1||r.SourceDatasets["(missing)"]!=2||r.Confidence["missing"]!=3{t.Fatalf("%+v %v",r,e)}
+}

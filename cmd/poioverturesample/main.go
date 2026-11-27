@@ -166,6 +166,10 @@ func normalize(in io.Reader,sample string)([]row,report,error){
   f,e:=c.Read();if e==io.EOF{break};if e!=nil{return nil,r,e};r.Features++
   if r.Features>maxRows||c.InputOffset()>rawCap{return nil,r,errors.New("sample cap exceeded")}
   for _,v:=range f{if !utf8.ValidString(v)||len(v)>1<<20{return nil,r,errors.New("invalid or oversized CSV field")}}
+  // DuckDB CLI CSV uses uppercase NULL for SQL null. Normalize only the
+  // nullable fields; ambiguous literal NULL names/IDs are rejected, not invented.
+  for _,i:=range []int{1,2,3,4,5,6,8}{if f[i]=="NULL"{f[i]=""}}
+  if f[0]=="NULL"{r.Rejected["invalid_id"]++;continue}
   lat,lon,ok:=point(f[7]);if !ok{r.Rejected["invalid_point"]++;continue}
   if lon<b.W||lon>b.E||lat<b.S||lat>b.N{r.Rejected["outside_sample"]++;continue}
   r.BasicCategories[counter(f[2])]++;r.PrimaryCategories[counter(f[3])]++;r.OperatingStatus[counter(f[5])]++
@@ -219,13 +223,30 @@ func sample(name string)error{
  rep.ImageID,rep.Architecture,rep.ExtractSeconds,rep.NormalizeSeconds,rep.RawBytes=id,arch,elapsed,time.Since(start).Seconds(),info.Size()
  if e=writeCSV(filepath.Join(dir,"normalized.csv"),rows);e!=nil{return e};if e=saveJSON(filepath.Join(dir,"report.json"),rep);e!=nil{return e};return printJSON(rep)
 }
+// resumeNormalizing reuses the owner's completed extraction after a parser
+// failure. It cannot independently certify that an older CSV was complete.
+func resumeNormalizing(name string)error{
+ if _,ok:=boxes[name];!ok{return errors.New("sample must be delta or sf")}
+ if e:=verifySource();e!=nil{return e}
+ dir:=filepath.Join(studyPath,name);if e:=realDir(dir);e!=nil{return e}
+ raw:=filepath.Join(dir,"features.csv");st,e:=os.Lstat(raw)
+ if e!=nil||!st.Mode().IsRegular()||st.Size()<=0||st.Size()>rawCap{return errors.New("invalid saved CSV")}
+ for _,p:=range []string{"normalized.csv","report.json"}{if _,e:=os.Lstat(filepath.Join(dir,p));!os.IsNotExist(e){return errors.New("normalization outputs must not exist; preserve existing files")}}
+ in,e:=os.Open(raw);if e!=nil{return e};defer in.Close()
+ start:=time.Now();rows,rep,e:=normalize(in,name);if e!=nil{return e}
+ rep.RawBytes=st.Size();rep.NormalizeSeconds=time.Since(start).Seconds()
+ rep.Note+=" Reused owner-confirmed completed extraction; original image/time not measured by this command, blank image/zero extraction seconds are unavailable, not new extraction measurements."
+ if e=writeCSV(filepath.Join(dir,"normalized.csv"),rows);e!=nil{return e}
+ if e=saveJSON(filepath.Join(dir,"report.json"),rep);e!=nil{return e}
+ return printJSON(rep)
+}
 func printJSON(v any)error{e:=json.NewEncoder(os.Stdout);e.SetIndent("","  ");return e.Encode(v)}
 func run(args []string)error{
- if len(args)==0{return errors.New("use download [-apply] or sample -sample delta|sf")}
+ if len(args)==0{return errors.New("use download [-apply], sample -sample delta|sf or normalize -sample delta|sf")}
  fs:=flag.NewFlagSet(args[0],flag.ContinueOnError)
  switch args[0]{
  case "download":a:=fs.Bool("apply",false,"perform bounded download");if e:=fs.Parse(args[1:]);e!=nil{return e};if fs.NArg()!=0{return errors.New("unexpected argument")};return download(*a)
- case "sample":n:=fs.String("sample","","delta or sf");if e:=fs.Parse(args[1:]);e!=nil{return e};if fs.NArg()!=0{return errors.New("unexpected argument")};return sample(*n)
+ case "sample","normalize":n:=fs.String("sample","","delta or sf");if e:=fs.Parse(args[1:]);e!=nil{return e};if fs.NArg()!=0{return errors.New("unexpected argument")};if args[0]=="normalize"{return resumeNormalizing(*n)};return sample(*n)
  };return errors.New("unknown subcommand")
 }
 func main(){if e:=run(os.Args[1:]);e!=nil{fmt.Fprintln(os.Stderr,e);os.Exit(1)}}
