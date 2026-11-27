@@ -61,3 +61,5 @@ After merging and separately authorized owner launch, verify the actual binary v
 ## POI API verification
 
 See [POI API](docs/POI_API.md) for owner opt-in in-process real-generation HTTP diagnostic after the normal `./devbuild.sh`. This is not service installation or launch. `SAILING_POI_GENERATION` is operator-only and defaults disabled. Separate approval for any production generation configuration or restart. No automatic data refresh.
+
+The separately owner-approved disposable Mac listener acceptance command is documented in [POI API](docs/POI_API.md#isolated-listener-acceptance-owner-next). It uses the verified freshly built executable and never the production launcher or tunnel. No production burst tests.
