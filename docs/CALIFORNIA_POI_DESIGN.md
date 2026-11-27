@@ -75,3 +75,7 @@ References: [Issue #51](https://github.com/richard-mauri/pittsburg-saildata/issu
 
 ## Current consumer category contract (2026-11-27)
 GPS Map PR #61 merged at 80ad1032510fbff3c71b683e6c9b30e02c3ef504, v2.2.0, with static 15-category browser/Worker allowlists and a future provider mapping helper. Owner explicitly prefers static consumer-owned icons/colors and General fallback for future unknown provider keys. This supersedes earlier general/marina-only mapping and dynamic consumer registry proposal: provider metadata may remain available separately, but recognized native category keys should be preserved directly in future provider API; unknown valid categories map to general at consumer boundary with source category notes when space permits. No dynamic saved category synchronization, no schema change or GPS Map edits in SailingGo #51. Existing local marine adapter output is pilot-only and will need alignment before final provider API. Owner Worker deployment reported; live CRUD not independently verified.
+
+
+## Statewide builder quality gate
+See [POI_MANAGER_PLAN.md](POI_MANAGER_PLAN.md). Owner NEXT selects Overture as primary terrestrial candidate; OSM terrestrial expansion deferred. Curated marine remains local-only pending dataset-specific rights. Statewide envelope inventory and read-only quality audit before exact boundary acquisition and staged builder implementation; no public API or final index format selected.

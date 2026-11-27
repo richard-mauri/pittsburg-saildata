@@ -242,10 +242,11 @@ func resumeNormalizing(name string)error{
 }
 func printJSON(v any)error{e:=json.NewEncoder(os.Stdout);e.SetIndent("","  ");return e.Encode(v)}
 func run(args []string)error{
- if len(args)==0{return errors.New("use download [-apply], sample -sample delta|sf or normalize -sample delta|sf")}
+ if len(args)==0{return errors.New("use download [-apply], sample|normalize|audit -sample delta|sf")}
  fs:=flag.NewFlagSet(args[0],flag.ContinueOnError)
  switch args[0]{
  case "download":a:=fs.Bool("apply",false,"perform bounded download");if e:=fs.Parse(args[1:]);e!=nil{return e};if fs.NArg()!=0{return errors.New("unexpected argument")};return download(*a)
+ case "audit":n:=fs.String("sample","","delta or sf");review:=fs.Bool("review",false,"include deterministic local-only record examples; do not share raw output");if e:=fs.Parse(args[1:]);e!=nil{return e};if fs.NArg()!=0{return errors.New("unexpected argument")};return runAudit(*n,*review)
  case "sample","normalize":n:=fs.String("sample","","delta or sf");if e:=fs.Parse(args[1:]);e!=nil{return e};if fs.NArg()!=0{return errors.New("unexpected argument")};if args[0]=="normalize"{return resumeNormalizing(*n)};return sample(*n)
  };return errors.New("unknown subcommand")
 }

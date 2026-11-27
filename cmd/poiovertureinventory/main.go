@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -69,7 +70,12 @@ func validBox(b []float64)bool{
 	return len(b)==4 && b[0]>=-180&&b[2]<=180&&b[1]>=-90&&b[3]<=90&&b[0]<=b[2]&&b[1]<=b[3]
 }
 
-func scan(ctx context.Context,get fetcher)(result,error){
+func scan(ctx context.Context,get fetcher)(result,error){return scanRegion(ctx,get,false)}
+
+// Broad candidate envelope, not a political boundary or a coverage proof.
+var californiaEnvelope=[]float64{-125,32,-114,42.1}
+
+func scanRegion(ctx context.Context,get fetcher,california bool)(result,error){
 	out:=result{Release:release,Note:"Metadata only; whole-file byte estimate is not feature download or coverage."}
 	queue:=[]string{root}
 	seen:=map[string]bool{}
@@ -94,6 +100,7 @@ func scan(ctx context.Context,get fetcher)(result,error){
 			var samples []string
 			if overlaps(n.BBox,[]float64{-121.94,38,-121.84,38.06}){samples=append(samples,"delta")}
 			if overlaps(n.BBox,[]float64{-122.43,37.77,-122.39,37.81}){samples=append(samples,"sf")}
+			if california && overlaps(n.BBox,californiaEnvelope){samples=append(samples,"california_envelope")}
 			if len(samples)==0{continue}
 			a:=n.Assets["aws"]
 			assetURL, err := url.Parse(a.Href)
@@ -139,7 +146,8 @@ func readMetadata(resp *http.Response, remaining int64) ([]byte, error) {
 }
 
 func run()error{
-	if len(os.Args)!=1{return errors.New("no arguments: fixed release and pilot boxes")}
+	california:=flag.Bool("california",false,"include all Places objects overlapping conservative California envelope; metadata only")
+	flag.Parse();if flag.NArg()!=0{return errors.New("unexpected arguments")}
 	ctx,cancel:=context.WithTimeout(context.Background(),90*time.Second);defer cancel()
 	tr:=&http.Transport{DisableCompression:true}
 	client:=&http.Client{Transport:tr,CheckRedirect:func(*http.Request,[]*http.Request)error{return errors.New("redirect refused")}}
@@ -160,7 +168,8 @@ func run()error{
 		if err:=json.Unmarshal(raw,&n);err!=nil{return n,fmt.Errorf("%s: invalid catalog JSON: %w",u,err)}
 		return n,nil
 	}
-	out,err:=scan(ctx,get)
+	out,err:=scanRegion(ctx,get,*california)
+	if *california {out.Note+=" California envelope [-125,32,-114,42.1] selects candidate objects only; exact state polygon and actual POI counts not evaluated."}
 	if err!=nil{return fmt.Errorf("metadata inventory stopped after %d requests, %d body bytes: %w",requests,total,err)}
 	out.Requests,out.CatalogBytes=requests,total
 	e:=json.NewEncoder(os.Stdout);e.SetIndent("","  ");return e.Encode(out)
