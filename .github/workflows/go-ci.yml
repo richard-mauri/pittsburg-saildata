@@ -44,6 +44,23 @@ jobs:
           else
             go run ./cmd/poiprobe -synthetic 100000
           fi
+      - name: Test bounded POI acquisition and normalization
+        run: |
+          go test -count=1 -v ./cmd/poisample
+          go run ./cmd/poisample download
+      - name: Smoke test Docker Osmium extraction (synthetic only)
+        run: |
+          docker build -t sailinggo-poi-osmium:ci tools/poi-osmium
+          study="$(mktemp -d)"
+          trap 'rm -rf "$study"' EXIT
+          cp tools/poi-osmium/fixture.osm "$study/fixture.osm"
+          printf '{}\n' > "$study/source.json"
+          docker run --rm --network none --user "$(id -u):$(id -g)" --mount "type=bind,source=$study,target=/study" --entrypoint osmium sailinggo-poi-osmium:ci cat /study/fixture.osm -o /study/norcal-261126.osm.pbf
+          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --memory 2g --cpus 2 --pids-limit 128 --tmpfs /tmp:rw,noexec,nosuid,size=64m --user "$(id -u):$(id -g)" --mount "type=bind,source=$study,target=/study" sailinggo-poi-osmium:ci delta
+          test -f "$study/delta/complete.txt"
+          go run ./cmd/poisample normalize -sample delta -input "$study/delta/features.geojsonseq" -output "$study/delta/normalized"
+          test "$(wc -l < "$study/delta/normalized/normalized.csv")" -eq 3
+          go run ./cmd/poiprobe -input "$study/delta/normalized/normalized.csv"
       - name: Test root application package
         run: go test -count=1 .
       - name: Build root application
