@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -21,5 +24,34 @@ func TestScan(t *testing.T){
 func TestLink(t *testing.T){
 	for _,u:=range []string{"https://example.com/a.json","../catalog.json","https://stac.overturemaps.org/other/catalog.json","places/a.json?x=1"}{
 		if _,e:=catalogURL(root,u);e==nil{t.Fatalf("accepted %s",u)}
+	}
+}
+
+func TestReadMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, encoding string
+		status int
+		length, remaining int64
+		wantBytes int
+		wantError bool
+	}{
+		{"streamed", "{}", "", 200, -1, 10, 2, false},
+		{"known", "{}", "", 200, 2, 2, 2, false},
+		{"identity", "{}", "identity", 200, -1, 10, 2, false},
+		{"stream exact cap", "{}", "", 200, -1, 2, 2, true},
+		{"stream exceeds cap", "abcdef", "", 200, -1, 3, 3, true},
+		{"declared exceeds cap", "abcdef", "", 200, 6, 3, 0, true},
+		{"truncated", "{}", "", 200, 3, 10, 2, true},
+		{"gzip", "{}", "gzip", 200, -1, 10, 0, true},
+		{"http error", "{}", "", 503, -1, 10, 0, true},
+		{"budget spent", "{}", "", 200, -1, 0, 0, true},
+	}{
+		t.Run(tc.name,func(t *testing.T){
+			body := strings.NewReader(tc.body)
+			resp := &http.Response{StatusCode:tc.status,ContentLength:tc.length,Header:make(http.Header),Body:io.NopCloser(body)}
+			resp.Header.Set("Content-Encoding",tc.encoding)
+			raw,err:=readMetadata(resp,tc.remaining)
+			if (err!=nil)!=tc.wantError || len(raw)!=tc.wantBytes || len(tc.body)-body.Len()!=tc.wantBytes {t.Fatalf("got %d bytes, error %v, remaining source %d",len(raw),err,body.Len())}
+		})
 	}
 }

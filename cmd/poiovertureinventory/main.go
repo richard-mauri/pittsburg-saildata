@@ -112,6 +112,32 @@ func scan(ctx context.Context,get fetcher)(result,error){
 	return out,nil
 }
 
+// readMetadata consumes at most the remaining response-body budget. A streamed
+// response exactly filling the budget is rejected because EOF is not proven.
+// Transport framing and read-ahead are not included in the body-byte budget.
+func readMetadata(resp *http.Response, remaining int64) ([]byte, error) {
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("metadata HTTP status %d", resp.StatusCode)
+	}
+	if encoding := resp.Header.Get("Content-Encoding"); encoding != "" && !strings.EqualFold(encoding, "identity") {
+		return nil, fmt.Errorf("unsupported metadata Content-Encoding %q", encoding)
+	}
+	if remaining <= 0 || resp.ContentLength > remaining {
+		return nil, fmt.Errorf("metadata body length %d exceeds remaining budget %d", resp.ContentLength, remaining)
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, remaining))
+	if err != nil {
+		return raw, fmt.Errorf("metadata body read: %w", err)
+	}
+	if resp.ContentLength >= 0 && int64(len(raw)) != resp.ContentLength {
+		return raw, errors.New("incomplete or inconsistent metadata response")
+	}
+	if resp.ContentLength < 0 && int64(len(raw)) == remaining {
+		return raw, errors.New("streamed metadata exhausted remaining body budget before EOF")
+	}
+	return raw, nil
+}
+
 func run()error{
 	if len(os.Args)!=1{return errors.New("no arguments: fixed release and pilot boxes")}
 	ctx,cancel:=context.WithTimeout(context.Background(),90*time.Second);defer cancel()
@@ -124,15 +150,15 @@ func run()error{
 		if _,err:=catalogURL(root,u);err!=nil{return n,err}
 		if requests>=maxRequests||total>=capBytes{return n,errors.New("metadata budget exhausted")}
 		req,err:=http.NewRequestWithContext(ctx,http.MethodGet,u,nil);if err!=nil{return n,err}
+		req.Header.Set("Accept-Encoding", "identity")
 		requests++
 		resp,err:=client.Do(req);if err!=nil{return n,err}
 		defer resp.Body.Close()
-		remaining:=int64(capBytes)-total
-		if resp.StatusCode!=200||resp.ContentLength<0||resp.ContentLength>remaining||resp.Header.Get("Content-Encoding")!=""{return n,errors.New("unexpected or oversized metadata response")}
-		raw,err:=io.ReadAll(io.LimitReader(resp.Body,resp.ContentLength))
+		raw,err:=readMetadata(resp,int64(capBytes)-total)
 		total+=int64(len(raw))
-		if err!=nil||int64(len(raw))!=resp.ContentLength{return n,errors.New("incomplete metadata response")}
-		return n,json.Unmarshal(raw,&n)
+		if err!=nil{return n,fmt.Errorf("%s: %w",u,err)}
+		if err:=json.Unmarshal(raw,&n);err!=nil{return n,fmt.Errorf("%s: invalid catalog JSON: %w",u,err)}
+		return n,nil
 	}
 	out,err:=scan(ctx,get)
 	if err!=nil{return fmt.Errorf("metadata inventory stopped after %d requests, %d body bytes: %w",requests,total,err)}
