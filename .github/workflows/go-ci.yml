@@ -71,6 +71,10 @@ jobs:
           go run ./cmd/poioverturesample download
           docker pull duckdb/duckdb:1.4.2
           POI_DUCKDB_TEST=1 go test -count=1 -v ./cmd/poioverturesample -run TestDockerFixture
+      - name: Test staged California POI manager (synthetic only)
+        run: |
+          go test -count=1 -v ./cmd/poimanager
+          go run ./cmd/poimanager plan
       - name: Test root application package
         run: go test -count=1 .
       - name: Build root application
