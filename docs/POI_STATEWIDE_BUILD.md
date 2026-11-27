@@ -19,3 +19,5 @@ go run ./cmd/poimanager acquire -apply
 du -sh private/poi-california-2026-11-18.0
 ```
 Return aggregate reports, not raw records. For a failed stage return terminal error and stage path. No SailingGo rebuild/restart.
+
+Synthetic CI also tests a two-record ZIP/DBF/SHP archive with California selected by STATEFP, polygon hole and exclusion of other state, plus actual offline DuckDB SQL against a local Parquet fixture containing a casual eatery. These fixtures are not actual 2026 state data.

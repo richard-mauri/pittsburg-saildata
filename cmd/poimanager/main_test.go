@@ -1,7 +1,12 @@
 package main
 
 import(
+ "archive/zip"
  "bytes"
+ "context"
+ "fmt"
+ "os/exec"
+ "time"
  "encoding/binary"
  "encoding/csv"
  "encoding/hex"
@@ -23,4 +28,36 @@ func TestBuildAndGrid(t *testing.T){
  dir:=t.TempDir();if e=os.WriteFile(filepath.Join(dir,"payload.bin"),p.Bytes(),0600);e!=nil{t.Fatal(e)};if e=writeIndex(filepath.Join(dir,"index.bin"),b.entries);e!=nil{t.Fatal(e)}
  g,e:=openGrid(dir,generation{Stats:b.stats,PayloadBytes:int64(p.Len())});if e!=nil{t.Fatal(e)};defer g.close()
  q:=query{-123,37,-121,38,-1};a,tr,e:=g.search(q,false);z,ts,ee:=g.search(q,true);if e!=nil||ee!=nil||tr||ts||len(a)!=2||len(z)!=2||!bytes.Equal(a[0],z[0])||!bytes.Equal(a[1],z[1]){t.Fatal("parity",e,ee)}
+}
+
+func TestBoundaryArchive(t *testing.T){
+ // Two DBF records, California is second; two Polygon SHP records.
+ dbf:=make([]byte,65+6);dbf[0]=3;binary.LittleEndian.PutUint32(dbf[4:8],2);binary.LittleEndian.PutUint16(dbf[8:10],65);binary.LittleEndian.PutUint16(dbf[10:12],3);copy(dbf[32:43],"STATEFP");dbf[43]='C';dbf[48]=2;dbf[64]=13;copy(dbf[65:]," 32 06")
+ polygon:=func(rings [][]xy)[]byte{
+  count:=0;for _,r:=range rings{count+=len(r)}
+  p:=make([]byte,44+4*len(rings)+16*count);binary.LittleEndian.PutUint32(p[:4],5);binary.LittleEndian.PutUint32(p[36:40],uint32(len(rings)));binary.LittleEndian.PutUint32(p[40:44],uint32(count))
+  idx:=0;for j,r:=range rings{binary.LittleEndian.PutUint32(p[44+4*j:],uint32(idx));for _,v:=range r{k:=44+4*len(rings)+16*idx;binary.LittleEndian.PutUint64(p[k:],math.Float64bits(v.X));binary.LittleEndian.PutUint64(p[k+8:],math.Float64bits(v.Y));idx++}}
+  return p
+ }
+ a:=polygon([][]xy{square(-119,36,-115,39)});b:=polygon([][]xy{square(-123,36,-120,39),square(-122,37,-121,38)})
+ shp:=make([]byte,100+8+len(a)+8+len(b));binary.BigEndian.PutUint32(shp[:4],9994);binary.BigEndian.PutUint32(shp[24:28],uint32(len(shp)/2));binary.LittleEndian.PutUint32(shp[28:32],1000);binary.LittleEndian.PutUint32(shp[32:36],5)
+ off:=100;for j,p:=range [][]byte{a,b}{binary.BigEndian.PutUint32(shp[off:],uint32(j+1));binary.BigEndian.PutUint32(shp[off+4:],uint32(len(p)/2));copy(shp[off+8:],p);off+=8+len(p)}
+ path:=filepath.Join(t.TempDir(),"state.zip");f,e:=os.Create(path);if e!=nil{t.Fatal(e)};z:=zip.NewWriter(f)
+ for n,p:=range map[string][]byte{"tl_2026_us_state.shp":shp,"tl_2026_us_state.dbf":dbf,"tl_2026_us_state.prj":[]byte(`GEOGCS["GCS_North_American_1983",DATUM["D_North_American_1983",SPHEROID["GRS_1980",6378137,298.257222101]],PRIMEM["Greenwich",0],UNIT["Degree",0.0174532925199433]]`)}{w,e:=z.Create(n);if e!=nil{t.Fatal(e)};if _,e=w.Write(p);e!=nil{t.Fatal(e)}}
+ if e=z.Close();e!=nil{t.Fatal(e)};if e=f.Close();e!=nil{t.Fatal(e)}
+ state,e:=loadBoundary(path);if e!=nil{t.Fatal(e)}
+ if in,_:=state.contains(-122.5,37.5);!in{t.Fatal("California missing")};if in,_:=state.contains(-121.5,37.5);in{t.Fatal("hole included")};if in,_:=state.contains(-117,37.5);in{t.Fatal("other state included")}
+}
+func TestManagerDockerFixture(t *testing.T){
+ if os.Getenv("POI_DUCKDB_TEST")!="1"{t.Skip("requires explicitly pulled image")}
+ ctx,cancel:=context.WithTimeout(context.Background(),2*time.Minute);defer cancel()
+ id,_,e:=localImage(ctx);if e!=nil{t.Fatal(e)}
+ dir:=t.TempDir()
+ fixture:=fmt.Sprintf("COPY (SELECT 'fixture-id' AS id, {'primary':'Example Eatery'} AS names, 'casual_eatery' AS basic_category, {'primary':'casual_eatery','hierarchy':['food_and_drink','casual_eatery']} AS taxonomy, 'open' AS operating_status, 0.9 AS confidence, unhex('%s') AS geometry, [{'dataset':'fixture','license':'CDLA-Permissive-2.0'}] AS sources, {'xmin':-121.9,'xmax':-121.9,'ymin':38.02,'ymax':38.02} AS bbox) TO '/fixture/places.parquet' (FORMAT PARQUET);",wkb(-121.9,38.02))
+ cmd:=exec.CommandContext(ctx,"docker","run","--rm","--pull=never","--network","none","--read-only","--cap-drop","ALL","--security-opt","no-new-privileges","--memory","4g","--cpus","2","--user",fmt.Sprintf("%d:%d",os.Getuid(),os.Getgid()),"--mount","type=bind,source="+dir+",target=/fixture","--entrypoint","/duckdb",id,"-batch","-bail","-c",fixture)
+ if o,e:=cmd.CombinedOutput();e!=nil{t.Fatalf("%s %v",o,e)}
+ var raw,p,v bytes.Buffer
+ if e=extract(ctx,filepath.Join(dir,"places.parquet"),"sailinggo-ca-ci-"+filepath.Base(dir),id,38,39,&raw);e!=nil{t.Fatal(e)}
+ state,e:=newBoundary([][]xy{square(-123,37,-120,40)});if e!=nil{t.Fatal(e)}
+ b:=newBuilder(state,&p,&v);if e=b.consume(&raw,38,39);e!=nil{t.Fatal(e)};if b.stats.Rows!=1||b.stats.Categories["restaurant"]!=1{t.Fatalf("%+v",b.stats)}
 }

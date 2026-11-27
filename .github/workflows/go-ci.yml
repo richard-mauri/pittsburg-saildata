@@ -75,6 +75,7 @@ jobs:
         run: |
           go test -count=1 -v ./cmd/poimanager
           go run ./cmd/poimanager plan
+          POI_DUCKDB_TEST=1 go test -count=1 -v ./cmd/poimanager -run TestManagerDockerFixture
       - name: Test root application package
         run: go test -count=1 .
       - name: Build root application

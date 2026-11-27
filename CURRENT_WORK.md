@@ -46,3 +46,5 @@ Owner NEXT accepted Overture as primary terrestrial candidate, OSM terrestrial e
 
 
 Owner NEXT approved first staged statewide builder and acquisition limits. Added cmd/poimanager plan/acquire/build/verify with fixed south object + Census archive, reuses verified northern object; bounded ZIP/DBF/SHP state polygon, 5m near-border quarantine, banded offline extraction, reviewed confidence/taxonomy/licenses, native waypoint payload + source provenance, staged disk grid and full-payload parity benchmark. Tests synthetic, actual archive/CRS and statewide counts/resources unverified. No public install, API, marine redistribution, production or runtime changes. See docs/POI_STATEWIDE_BUILD.md, exact-head CI in PR #52. Owner guarded pull, plan and acquire, report source manifest before build if acquisition fails; build/verify owner only. No source file overwrites, preserve failed stage.
+
+Added synthetic ZIP/DBF/SHP archive and offline statewide DuckDB SQL regression tests to validate actual parsing/extraction interfaces; exact latest CI evidence in PR #52.
