@@ -35,3 +35,21 @@ SAILING_POI_LOOPBACK_TEST=1 SAILING_POI_TEST_GENERATION="$PWD/private/poi-califo
 ```
 
 Checks disabled no-store and 503, reviewed 199475-row enabled status/category counts, real HTTP body/CORS/preflight/ETag/304/attribution/invalid viewport, exact public vs protected routes and independent street fail-closed mode, eight sequential/32 concurrent full response parity queries (rate bucket refills naturally), bounded 32-request local rate-limit burst. RSS snapshots via macOS ps for each actual child (not peak or controlled incremental RSS; startup/heap/cache differences may vary); readiness timings include lsof/probe, p95 nearest rank. No true cold cache, live Cloudflare/Safari, authenticated weather regression or public activation. Do not run the burst against production. Return aggregate test transcript only, no raw records or private logs. Production install, restart, FINISH and GPS Map changes remain separate approvals.
+
+## Owner actual loopback acceptance — 2026-11-27
+
+Owner terminal reports TestPOILoopbackOwner PASS (13.43 s, package 13.571 s), both disposable children stopped; no live service changes. Disabled and enabled actual executable HTTP listener checks passed, including reviewed 199475-row availability, category registry, bounds, exact auth boundary, CORS/preflight, ETag/304, embedded full attribution, independent disabled street provider, and rate limit. Eight sequential and 32 concurrent query results passed byte-for-byte response parity; aggregate sequential bytes 529909. Bounded 32-request local status burst returned 16 HTTP 200 and 16 HTTP 429, expected retry/no-store headers. No burst against production.
+
+| Measurement | Result |
+|---|---:|
+| Disabled readiness ms | 219.270 |
+| Enabled readiness ms | 2084.123 |
+| Disabled RSS KiB | 19712 |
+| Enabled initial RSS KiB | 68320 |
+| Enabled initial delta KiB | 48608 |
+| Enabled after queries RSS KiB | 68784 |
+| Enabled after queries delta KiB | 49072 |
+| Sequential p95 ms (8) | 78.163 |
+| Concurrent p95 ms (32) | 157.654 |
+
+Readiness includes socket-owner/health probe; incremental RSS snapshots about 47.47 MiB initial and 47.92 MiB after queries, below provisional 64 MiB target; not peak, controlled incremental RSS or production memory guarantee. Sequential p95 below provisional 100 ms, four-worker p95 above target by 57.654 ms; not waived silently. Recommend accept as documented performance limitation for initial additive release rather than optimize further without actual consumer workload, subject to owner FINISH acceptance. Query deadline remains 1s. Actual local HTTP passed; no authenticated live weather/Safari/Cloudflare or true cold-cache testing, no publication/production install. Owner devbuild output not separately supplied; actual executable demonstrated expected new routes and reviewed generation. Source version unchanged 1.17.0/v443. Exact implementation/test head PR/push CI passed; see PR #52. Next proposed FINISH: owner explicitly accepts local results and concurrent latency limitation, consolidate checkpoint, MINOR 1.17.0 -> 1.18.0 with appropriate build lineage/version declarations, exact-head CI, merge completed scoped work and branch cleanup. Production dataset opt-in, launch, public attribution/tunnel and authenticated regression validation are separate operational approval; GPS Map consumer separate issue. Marine publication still excluded.
