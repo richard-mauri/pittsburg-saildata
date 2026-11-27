@@ -79,3 +79,6 @@ GPS Map PR #61 merged at 80ad1032510fbff3c71b683e6c9b30e02c3ef504, v2.2.0, with 
 
 ## Statewide builder quality gate
 See [POI_MANAGER_PLAN.md](POI_MANAGER_PLAN.md). Owner NEXT selects Overture as primary terrestrial candidate; OSM terrestrial expansion deferred. Curated marine remains local-only pending dataset-specific rights. Statewide envelope inventory and read-only quality audit before exact boundary acquisition and staged builder implementation; no public API or final index format selected.
+
+## Read-only reader contract
+See [POI_READER.md](POI_READER.md); selected disk grid candidate, stable ID order, bounded JSON array and concurrency, provenance reconciliation. Public API envelope/authorization and full response cap not implemented. See [POI_DATA_NOTICES.md](POI_DATA_NOTICES.md) for publication gate.

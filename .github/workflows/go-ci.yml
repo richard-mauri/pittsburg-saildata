@@ -76,6 +76,8 @@ jobs:
           go test -count=1 -v ./cmd/poimanager
           go run ./cmd/poimanager plan
           POI_DUCKDB_TEST=1 go test -count=1 -v ./cmd/poimanager -run TestManagerDockerFixture
+      - name: Test reusable POI reader with race detection
+        run: go test -race -count=1 -v ./internal/poigrid
       - name: Test root application package
         run: go test -count=1 .
       - name: Build root application

@@ -14,6 +14,7 @@ import(
  "os"
  "path/filepath"
  "testing"
+ "pittsburg-saildata/internal/poigrid"
 )
 func square(w,s,e,n float64)[]xy{return []xy{{w,s},{e,s},{e,n},{w,n},{w,s}}}
 func TestBoundary(t *testing.T){b,e:=newBoundary([][]xy{square(-123,36,-120,39),square(-122,37,-121,38),square(-119,34,-118,35)});if e!=nil{t.Fatal(e)}
@@ -26,8 +27,16 @@ func TestBuildAndGrid(t *testing.T){
  b:=newBuilder(boundary,&p,&v);if e=b.consume(&csvbuf,37,38);e!=nil{t.Fatal(e)};_=b.payload.Flush();_=b.prov.Flush()
  if b.stats.Rows!=2||b.stats.Rejected["taxonomy"]!=1||b.stats.Rejected["confidence"]!=1||b.stats.Rejected["missing_or_unknown_license"]!=1{t.Fatalf("%+v",b.stats)}
  dir:=t.TempDir();if e=os.WriteFile(filepath.Join(dir,"payload.bin"),p.Bytes(),0600);e!=nil{t.Fatal(e)};if e=writeIndex(filepath.Join(dir,"index.bin"),b.entries);e!=nil{t.Fatal(e)}
- g,e:=openGrid(dir,generation{Stats:b.stats,PayloadBytes:int64(p.Len())});if e!=nil{t.Fatal(e)};defer g.close()
- q:=query{-123,37,-121,38,-1};a,tr,e:=g.search(q,false);z,ts,ee:=g.search(q,true);if e!=nil||ee!=nil||tr||ts||len(a)!=2||len(z)!=2||!bytes.Equal(a[0],z[0])||!bytes.Equal(a[1],z[1]){t.Fatal("parity",e,ee)}
+ if e=os.WriteFile(filepath.Join(dir,"provenance.jsonl"),v.Bytes(),0600);e!=nil{t.Fatal(e)}
+ m:=generation{Schema:1,Release:release,Mapping:mapping,Created:created,Rings:1,Edges:4,Stats:b.stats,Sources:[]source{{Release:release,URL:northURL,SHA256:northHash,Bytes:northBytes},{Release:release,URL:southURL,SHA256:northHash,Bytes:southBytes},{Release:"TIGER2026",URL:boundaryURL,SHA256:northHash,Bytes:1}}}
+ m.PayloadSHA256,m.PayloadBytes,e=digest(filepath.Join(dir,"payload.bin"),fileCap);if e!=nil{t.Fatal(e)}
+ m.IndexSHA256,m.IndexBytes,e=digest(filepath.Join(dir,"index.bin"),fileCap);if e!=nil{t.Fatal(e)}
+ m.ProvenanceSHA256,m.ProvenanceBytes,e=digest(filepath.Join(dir,"provenance.jsonl"),fileCap);if e!=nil{t.Fatal(e)}
+ if e=saveJSON(filepath.Join(dir,"manifest.json"),m);e!=nil{t.Fatal(e)}
+ g,_,ev,e:=poigrid.Open(dir);if e!=nil{t.Fatal(e)};defer g.Close()
+ q:=poigrid.Query{West:-122.1,South:37.1,East:-121.9,North:37.4,Categories:[]string{"coffee","restaurant"},Limit:500,ByteLimit:poigrid.MaxArrayBytes}
+ a,e:=g.Search(context.Background(),q);z,ee:=g.ScanForVerification(context.Background(),q)
+ if e!=nil||ee!=nil||a.Truncated||z.Truncated||len(a.Records)!=2||ev.ProvenanceRows!=2||!same(a,z){t.Fatal("parity",e,ee)}
 }
 
 func TestBoundaryArchive(t *testing.T){
