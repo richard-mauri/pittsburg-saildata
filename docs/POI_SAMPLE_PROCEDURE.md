@@ -42,3 +42,7 @@ Once normalized independently, export a CSV header exactly id,lat,lon,category,n
 /usr/bin/time -l go run ./cmd/poiprobe -input private/poi-study-YYYYMMDD/normalized.csv -sqlite
 ```
 Omit -sqlite if unavailable; report as not measured. Use actual path, no placeholder execution. Record measurements in PR discussion, then choose source and index only after coverage, licenses, boundary quality, build/index size and latency are compared. Real source normalization, acquisition adapter, persisted index format and production API remain separate approved work.
+
+## Owner synthetic measurement — 2026-11-27
+
+Owner-reported Mac probe 2026-11-27 (Darwin arm64, Go 1.27.3; probe test package passed in 0.407 s; expected checkout eac357a27cf0b705013d1d52e42a9bc47dd0d143, actual local SHA not supplied): 100,000 synthetic rows/100 queries, parity pass; grid 2,400,000 bytes plus 18,217 memory-only cell entries, build 46.741 ms, one-worker total 18.498 ms (p50/p95/p99 0.127/0.598/0.663 ms), four-worker total 6.416 ms (0.150/0.751/0.872 ms), scan 25.071 ms. SQLite CLI present and successful: 8,228,864 bytes, build 366.246 ms, 100-query batch 153.169 ms. No RSS, cold-cache, full payload, actual geographic coverage or refresh measurements. Other extraction-tool paths and free disk were not included in owner output. SQLite batch includes CLI overhead; do not infer embedded SQLite timings. This supports retaining the standard-library grid as leading candidate, not final selection. No source chosen.
