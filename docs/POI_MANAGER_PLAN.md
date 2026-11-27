@@ -30,3 +30,32 @@ Use existing Go/CLI/Docker acquisition path; no new Go dependency or native inst
 5. verify: manifest with schema/release, generator revision, source hashes and license/notice set, boundary checksum, mapping revision, counts/rejections, payload/index hashes, creation time, explicit scope/available categories, integrity tests and bounded query smoke. Staging directory fsync, immutable generation only; verify files and offsets, corruption fails POI only. No current-pointer update until separate owner install approval; atomic same-filesystem pointer replacement, retain prior generation/rollback, no auto-deletion. Runtime reads validated generation without download; separate API implementation/restart approval.
 
 Next phase after audit: owner approves reviewed taxonomy/quality thresholds and exact boundary/source acquisition budget informed by statewide inventory; implement staged statewide builder and full-payload benchmark. No public data/license clearance, runtime/API or production modification here. GPS Map 2.2.0 static known categories, fallback General at consumer boundary only; no cross-repo changes.
+
+
+## Owner audit and statewide inventory — 2026-11-27
+
+Owner clean checkout fast-forwarded to 2e948fe2ea0c18368f615a251aded75e04cd039c; both read-only audits and metadata-only inventory succeeded. No files modified by audits. Per-category accepted and retained counts (missing confidence zero throughout):
+
+| Category | Delta accepted / >=0.5 / >=0.8 | SF accepted / >=0.5 / >=0.8 |
+|---|---:|---:|
+| coffee | 8 / 6 / 5 | 504 / 467 / 376 |
+| ev_charging | 1 / 1 / 1 | 11 / 11 / 10 |
+| fuel | 19 / 18 / 15 | 17 / 16 / 13 |
+| grocery | 24 / 22 / 19 | 163 / 143 / 108 |
+| lodging | 9 / 8 / 6 | 683 / 633 / 539 |
+| parking | 0 / 0 / 0 | 382 / 356 / 215 |
+| restaurant | 117 / 108 / 93 | 2291 / 2143 / 1854 |
+| Total | 178 / 163 / 139 | 4051 / 3769 / 3115 |
+
+Combined 4229 accepted, 3932 at >=0.5 (93.0%, 297 removed), 3254 at >=0.8 (76.9%, 975 removed). Status missing 35 Delta / 707 SF, known open 143 / 3344; open status is source status not live hours. Duplicate review 1 pair/2 records/1 comparison Delta; 13 pairs/26 records/92 comparisons SF, combined 14 pairs/28 records. Candidate review only, not confirmed duplicates. Excluded review token counts Delta/SF: casual_eatery 28/515, fast_food_restaurant 16/69, convenience_store 14/81, fueling_station 2/2, marina 1/4, superstore 1/2, warehouse_club_store 2/12; SF food_truck_stand 60 and market 10. Token counts may overlap; not eligible counts, closure/confidence not applied. SF accepted coffee includes 4 internet cafes and 1 animal cafe; lodging includes 4 campgrounds, 10 holiday rentals and 8 service apartments. No individual manual verification performed.
+
+Recommended first builder rules (subject to next owner NEXT): confidence >=0.5, reject missing confidence, closed/unknown nonempty status, invalid/unnamed points and unknown licenses; keep missing status with explicit unverified-access/operating-status note. Include explicit fast_food_restaurant and casual_eatery as restaurant, exclude mobile food trucks, internet/animal cafes, private holiday rentals and campgrounds from initial scoped categories (review general lodging/service apartments separately; do not assert availability). Retain only explicit gas_station for terrestrial fuel rather than ambiguous fueling_station; no convenience-store/warehouse/market expansion yet. Keep parking records informational, access not guaranteed. Reconcile all actual accepted licenses; no auto-merge proximity pairs. Preserve source IDs and reject conflicting duplicate identity. Threshold not calibrated against ground truth; remeasure after mapping changes.
+
+Statewide STAC inventory 51685 body bytes, 19 requests, 16 items, 2 candidate objects for broad envelope:
+- 00001 bbox [-120.6488037109375,28.452560424804688,-76.39349365234375,34.78193283081055], 823024945 bytes, https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com/release/2026-11-18.0/theme=places/type=place/part-00001-43e455e5-5fd3-50ee-8b56-2de40da4223e-c000.zstd.parquet
+- 00002 bbox [-179.81707763671875,34.78193664550781,-87.87828826904297,81.75200653076172], 836166912 bytes already acquired; verified source manifest and SHA256 as in pilot doc.
+- Combined 1659191857 bytes, additional Parquet 823024945 bytes. Extents overlap California envelope, not proof of complete coverage.
+
+Verified official 2026 TIGER/Line release October 14 2026 (https://www.census.gov/geographies/mapping-files/time-series/geo/tiger-line-file.html); directory https://www2.census.gov/geo/tiger/TIGER2026/STATE/ lists tl_2026_us_state.zip at 9.5M. Proposed exact boundary URL https://www2.census.gov/geo/tiger/TIGER2026/STATE/tl_2026_us_state.zip, 32 MiB compressed/256 MiB expanded cap, exact response length if advertised, SHA256, safe archive member validation, STATEFP 06, validate NAD83 CRS and explicit WGS84-equivalence tolerance or documented transformation before using near-border points. Actual archive bytes and checksum not yet acquired. Prefer Go standard library bounded fixed-format ZIP/DBF/SHP parser, reject unsupported schema/CRS, synthetic holes/multipolygons/edge tests; no native install or new dependency approved.
+
+Proposed next NEXT: implement standalone poimanager plan/acquire/build/verify staging candidate and full-payload grid benchmark, with exactly one additional pinned Overture object and one Census archive, combined new source body cap 1 GB, 15 min per download/30 min total network deadline, 8 GiB isolated disk allowance (not OS quota), reuse verified northern object, existing DuckDB ARM64 image offline 4 GiB/2 CPUs. Propose conservative fail-closed tile/global row and byte bounds, no production installation, API, restart or redistribution. Owner executes acquisition/build after exact-head CI; measure actual statewide data and resource use before runtime index selection. Marine remains local-only until rights established; no new bulk transfer in this report checkpoint.

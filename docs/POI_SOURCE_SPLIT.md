@@ -35,3 +35,5 @@ Publisher STAC file:size 836166912 bytes (797.4 MiB); candidate extent is not ac
 Owner NEXT approved the pinned full-object acquisition described above; see docs/POI_OVERTURE_PILOT.md. Owner download and both terrestrial samples completed (178 Delta, 4051 SF; both parity pass). See measured results and provisional recommendation in POI_OVERTURE_PILOT.md. Overture preferred for terrestrial, existing curated marine for marine subject to rights and owner approval; no final selection/publication or statewide coverage established.
 
 Owner NEXT provisionally selected Overture for terrestrial acquisition; curated marine local-only pending rights. See POI_MANAGER_PLAN.md for audit, statewide envelope inventory and builder design. No additional bulk transfer or production publication.
+
+Owner statewide metadata inventory identified exactly two candidate files for the California envelope, one already acquired and one additional 823024945-byte file. Both quality audits passed. See POI_MANAGER_PLAN.md for measured counts, exact URL and next proposed builder scope; no new source bytes acquired.
