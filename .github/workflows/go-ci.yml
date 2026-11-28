@@ -35,6 +35,51 @@ jobs:
         run: go test -count=1 ./cmd/nauticaltilemanager
       - name: Build standalone Nautical Tile Manager
         run: go build ./cmd/nauticaltilemanager
+      - name: Test isolated POI index probe (synthetic only)
+        run: go test -count=1 -v ./cmd/poiprobe
+      - name: Measure synthetic POI index parity and performance
+        run: |
+          if command -v sqlite3 >/dev/null 2>&1; then
+            go run ./cmd/poiprobe -synthetic 100000 -sqlite
+          else
+            go run ./cmd/poiprobe -synthetic 100000
+          fi
+      - name: Test bounded POI acquisition and normalization
+        run: |
+          go test -count=1 -v ./cmd/poisample
+          go run ./cmd/poisample download
+      - name: Smoke test Docker Osmium extraction (synthetic only)
+        run: |
+          docker build -t sailinggo-poi-osmium:ci tools/poi-osmium
+          study="$(mktemp -d)"
+          trap 'rm -rf "$study"' EXIT
+          cp tools/poi-osmium/fixture.osm "$study/fixture.osm"
+          printf '{}\n' > "$study/source.json"
+          docker run --rm --network none --user "$(id -u):$(id -g)" --mount "type=bind,source=$study,target=/study" --entrypoint osmium sailinggo-poi-osmium:ci cat /study/fixture.osm -o /study/norcal-261126.osm.pbf
+          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --memory 2g --cpus 2 --pids-limit 128 --tmpfs /tmp:rw,noexec,nosuid,size=64m --user "$(id -u):$(id -g)" --mount "type=bind,source=$study,target=/study" sailinggo-poi-osmium:ci delta
+          test -f "$study/delta/complete.txt"
+          go run ./cmd/poisample normalize -sample delta -input "$study/delta/features.geojsonseq" -output "$study/delta/normalized"
+          test "$(wc -l < "$study/delta/normalized/normalized.csv")" -eq 3
+          go run ./cmd/poiprobe -input "$study/delta/normalized/normalized.csv"
+      - name: Test isolated marine export and Overture inventory (synthetic only)
+        run: |
+          go test -count=1 -v ./cmd/poimarineexport ./cmd/poiovertureinventory
+          go run ./cmd/poimarineexport
+      - name: Test bounded Overture pilot (synthetic only)
+        run: |
+          go test -count=1 -v ./cmd/poioverturesample
+          go run ./cmd/poioverturesample download
+          docker pull duckdb/duckdb:1.4.2
+          POI_DUCKDB_TEST=1 go test -count=1 -v ./cmd/poioverturesample -run TestDockerFixture
+      - name: Test staged California POI manager (synthetic only)
+        run: |
+          go test -count=1 -v ./cmd/poimanager
+          go run ./cmd/poimanager plan
+          POI_DUCKDB_TEST=1 go test -count=1 -v ./cmd/poimanager -run TestManagerDockerFixture
+      - name: Test optional website index
+        run: go test -race -count=1 ./internal/poiweb
+      - name: Test reusable POI reader with race detection
+        run: go test -race -count=1 -v ./internal/poigrid
       - name: Test root application package
         run: go test -count=1 .
       - name: Build root application

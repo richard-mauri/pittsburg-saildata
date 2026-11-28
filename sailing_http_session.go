@@ -174,7 +174,7 @@ func (a *SailingHTTPAuth) ProtectWeather(next http.Handler) http.Handler {
    w.WriteHeader(http.StatusNoContent)
    return
   }
-  if sailingPublicRoute(r.URL.Path) || (r.URL.EscapedPath() == r.URL.Path && streetTileRoute(r.URL.Path)) {
+  if sailingPublicRoute(r.URL.Path) || poiPublicRequest(r) || (r.URL.EscapedPath() == r.URL.Path && streetTileRoute(r.URL.Path)) {
    next.ServeHTTP(w,r)
    return
   }

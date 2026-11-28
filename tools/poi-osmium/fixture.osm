@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6" generator="SailingGo synthetic">
+  <node id="1" version="1" lat="38.02" lon="-121.9"><tag k="amenity" v="fuel"/><tag k="name" v="Fixture Fuel"/></node>
+  <node id="2" version="1" lat="38.03" lon="-121.9"><tag k="leisure" v="marina"/><tag k="name" v="Fixture Marina"/></node>
+  <node id="3" version="1" lat="38.02" lon="-121.89"/>
+  <node id="4" version="1" lat="38.021" lon="-121.89"/>
+  <node id="5" version="1" lat="38.021" lon="-121.891"/>
+  <way id="10" version="1"><nd ref="3"/><nd ref="4"/><nd ref="5"/><nd ref="3"/><tag k="amenity" v="parking"/><tag k="name" v="Fixture Parking"/></way>
+</osm>
