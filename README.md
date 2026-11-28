@@ -56,3 +56,5 @@ Launch Sailing Outlook from [Homepage](https://home.themauris.org/). Verified pe
 ## Development documentation
 
 For architecture and contributors, see [ARCHITECTURE.md](ARCHITECTURE.md), [DEVELOPMENT.md](DEVELOPMENT.md), [CURRENT_WORK.md](CURRENT_WORK.md), and [AGENTS.md](AGENTS.md). The README describes user-facing behavior rather than PR status or cache maintenance.
+
+Regional nautical categories are available only in an explicitly isolated development preview; public marine coverage remains unavailable until source rights are resolved.

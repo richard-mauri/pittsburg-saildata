@@ -109,6 +109,7 @@ type poiService struct {
  manifest poigrid.Manifest
  websites map[string]string
  websiteDigest string
+ marine *marineLayer
  unavailable atomic.Bool
  slots chan struct{}
  mu sync.Mutex
@@ -145,6 +146,10 @@ func openPOIService(dir string)*poiService{
  if digest:=os.Getenv("SAILING_POI_WEBSITES_SHA256");digest!=""{
   sites,e:=poiweb.Load(filepath.Join(filepath.Dir(dir),poiweb.Filename),digest)
   if e!=nil{log.Print("Sailing POI website enrichment disabled: validation failed")}else{p.websites=sites;p.websiteDigest=digest;log.Print("Sailing POI website enrichment validated")}
+ }
+ if path:=os.Getenv("SAILING_POI_MARINE_PREVIEW_ASSET");path!=""{
+  layer,e:=loadMarinePreview(path,os.Getenv("SAILING_ACTIVITY_TEST_LISTEN"),os.Getenv("SAILING_POI_MARINE_PREVIEW_TOKEN"))
+  if e!=nil{log.Print("Sailing POI marine preview disabled: validation failed")}else{p.marine=layer;log.Print("Sailing POI regional marine preview validated")}
  }
  return p
 }
@@ -227,6 +232,7 @@ func(p *poiService)status()poiStatus{
   at:=p.manifest.Created;v.DatasetVersion=&version;v.SnapshotAt=&at
   for k,n:=range p.manifest.Stats.Categories{v.CategoryCounts[k]=n}
   v.Sources=poiSources()
+  if p.marine!=nil{version+="-marine-"+marinePreviewDigest;v.Coverage="California terrestrial and regional marine local study";v.Notice=marinePreviewNotice;for k,n:=range p.marine.counts{v.CategoryCounts[k]=n};v.Sources=append(v.Sources,marinePreviewSources()...)}
  }
  return v
 }
@@ -275,6 +281,7 @@ func(p *poiService)ServeHTTP(w http.ResponseWriter,r *http.Request){
  w.Header().Set("X-Content-Type-Options","nosniff")
  w.Header().Set("Referrer-Policy","no-referrer")
  w.Header().Set("Cache-Control","no-store")
+ if p.marine!=nil&&!p.marine.allowed(r){poiError(w,403,"local preview only");return}
  if r.URL.RawPath!=""||r.URL.EscapedPath()!=r.URL.Path{poiError(w,404,"not found");return}
  known:=false;for _,path:=range poiPaths{if r.URL.Path==path{known=true;break}}
  if !known{poiError(w,404,"not found");return}
@@ -292,44 +299,56 @@ func(p *poiService)ServeHTTP(w http.ResponseWriter,r *http.Request){
  controller:=http.NewResponseController(w)
  if controller.SetWriteDeadline(time.Now().Add(3*time.Second))==nil{defer controller.SetWriteDeadline(time.Time{})}
  if r.Method==http.MethodOptions{w.WriteHeader(204);return}
- if r.URL.Path==poiAttributionPath{poiSend(w,r,poiAttribution,"text/plain; charset=utf-8",true);return}
+ if r.URL.Path==poiAttributionPath{
+  body:=poiAttribution
+  if p.marine!=nil{body=append(append([]byte(nil),body...),[]byte("\n\nLOCAL MARINE STUDY ONLY (asset 14 / 2026-09-25): © OpenStreetMap contributors, ODbL https://www.openstreetmap.org/copyright ; California State Parks/DBW https://dbw.parks.ca.gov/ConditionsOfUse ; curated override. Public redistribution not cleared. The terrestrial notices above apply to the separate terrestrial layer.\n")...)}
+  poiSend(w,r,body,"text/plain; charset=utf-8",p.marine==nil);return
+ }
  status:=p.status()
  switch r.URL.Path{
- case poiStatusPath:poiJSON(w,r,status,status.Available)
- case poiCategoriesPath:poiJSON(w,r,poiCategoriesResponse{1,poiRegistry,status.DatasetVersion,poiRegistryEntries(status.CategoryCounts,status.Available),poiAttributionPath},status.Available)
+ case poiStatusPath:poiJSON(w,r,status,status.Available&&p.marine==nil)
+ case poiCategoriesPath:poiJSON(w,r,poiCategoriesResponse{1,poiRegistry,status.DatasetVersion,poiRegistryEntries(status.CategoryCounts,status.Available),poiAttributionPath},status.Available&&p.marine==nil)
  case poiBBoxPath:
   if !status.Available{poiError(w,503,"POI dataset unavailable");return}
   requested:=append([]string(nil),q.Categories...)
   q.Categories=nil
   unavailable:=[]string{}
   for _,c:=range requested{if status.CategoryCounts[c]>0{q.Categories=append(q.Categories,c)}else{unavailable=append(unavailable,c)}}
-  out:=poiBBoxResponse{Version:1,DatasetVersion:status.DatasetVersion,RegistryRevision:poiRegistry,Categories:requested,UnavailableCategories:unavailable,Records:[]poiRecord{},Sources:status.Sources,AttributionURL:poiAttributionPath,Notice:poiNotice}
+  out:=poiBBoxResponse{Version:1,DatasetVersion:status.DatasetVersion,RegistryRevision:poiRegistry,Categories:requested,UnavailableCategories:unavailable,Records:[]poiRecord{},Sources:status.Sources,AttributionURL:poiAttributionPath,Notice:status.Notice}
   if len(q.Categories)>0{
    ctx,cancel:=context.WithTimeout(r.Context(),time.Second);defer cancel()
-   result,e:=p.reader.Search(ctx,q)
-   if e!=nil{
-    if errors.Is(e,poigrid.ErrBusy){poiError(w,429,"POI request limit");return}
-    if !errors.Is(e,context.DeadlineExceeded)&&!errors.Is(e,context.Canceled)&&!errors.Is(e,poigrid.ErrQuery){p.unavailable.Store(true)}
-    poiError(w,503,"POI query unavailable");return
+   // Marine IDs sort before terrestrial IDs; retain a deterministic prefix
+   // under the existing global record and encoded body caps.
+   combined,e:=p.marine.search(ctx,q)
+   if e!=nil{poiError(w,503,"POI query unavailable");return}
+   land:=q;land.Categories=nil
+   for _,k:=range q.Categories{if !marineCategory(k){land.Categories=append(land.Categories,k)}}
+   if len(land.Categories)>0{
+    result,e:=p.reader.Search(ctx,land)
+    if e!=nil{
+     if errors.Is(e,poigrid.ErrBusy){poiError(w,429,"POI request limit");return}
+     if !errors.Is(e,context.DeadlineExceeded)&&!errors.Is(e,context.Canceled)&&!errors.Is(e,poigrid.ErrQuery){p.unavailable.Store(true)}
+     poiError(w,503,"POI query unavailable");return
+    }
+    out.Truncated=result.Truncated
+    for _,raw:=range result.Records{
+     var wp struct{Category string `json:"category"`; ID string `json:"id"`}
+     if json.Unmarshal(raw,&wp)!=nil||!containsPOICategory(land.Categories,wp.Category){p.unavailable.Store(true);poiError(w,503,"POI query unavailable");return}
+     combined=append(combined,poiRecord{ProviderCategories:[]string{wp.Category},Waypoint:raw,Website:p.websites[wp.ID]})
+    }
    }
    if ctx.Err()!=nil{poiError(w,503,"POI query unavailable");return}
-   out.Truncated=result.Truncated
-   // Reader already sorts and bounds native records. Enforce the entire
-   // encoded wrapper budget; a prefix of whole records only.
    empty,e:=json.Marshal(out);if e!=nil{poiError(w,503,"response unavailable");return}
-   // false -> true shortens JSON by one byte. Account conservatively.
    total:=len(empty)
-   for _,raw:=range result.Records{
-    var wp struct{Category string `json:"category"`; ID string `json:"id"`}
-    if json.Unmarshal(raw,&wp)!=nil||!containsPOICategory(q.Categories,wp.Category){p.unavailable.Store(true);poiError(w,503,"POI query unavailable");return}
-    record:=poiRecord{ProviderCategories:[]string{wp.Category},Waypoint:raw,Website:p.websites[wp.ID]};encoded,e:=json.Marshal(record);if e!=nil{poiError(w,503,"response unavailable");return}
+   for _,record:=range combined{
+    encoded,e:=json.Marshal(record);if e!=nil{poiError(w,503,"response unavailable");return}
     size:=len(encoded);if len(out.Records)>0{size++}
     if len(out.Records)>=q.Limit||total+size>poiMaxBody{out.Truncated=true;break}
     out.Records=append(out.Records,record);total+=size
    }
   }
   if !p.available(){poiError(w,503,"POI dataset unavailable");return}
-  poiJSON(w,r,out,true)
+  poiJSON(w,r,out,p.marine==nil)
  }
 }
 func containsPOICategory(c []string,v string)bool{for _,s:=range c{if s==v{return true}};return false}

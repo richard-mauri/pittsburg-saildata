@@ -65,3 +65,5 @@ See [POI API](docs/POI_API.md) for owner opt-in in-process real-generation HTTP 
 The separately owner-approved disposable Mac listener acceptance command is documented in [POI API](docs/POI_API.md#isolated-listener-acceptance-owner-next). It uses the verified freshly built executable and never the production launcher or tunnel. No production burst tests.
 
 Website enrichment: see docs/POI_API.md. Run go test -count=1 ./cmd/poimanager ./internal/poiweb, then go run ./cmd/poimanager websites on the owner Mac with the existing Docker image and pinned local Parquet sources. No acquisition; existing generation unchanged. Report only aggregate counts and SHA-256 before enabling a local candidate. No production activation.
+
+Marine local acceptance: use paired GPS Map preview harness with explicit path to the existing tracked assets/marine_places.json, no production launcher. Build once via ./devbuild.sh. No generation rebuild, no Docker or downloads.
