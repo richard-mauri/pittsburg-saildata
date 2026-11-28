@@ -98,3 +98,5 @@ Following nautical tile conventions, X-Sailing-Street-Source (proxy, cache, upst
 ## Public POI API (Issue #51)
 
 See [POI API](docs/POI_API.md). Exact read-only route exemptions, independent bounded admissions, default-disabled immutable reviewed generation, native waypoint envelope and full data attribution. No upstream requests or private user activity tracking. Runtime reader separate from acquisition. Marine unavailable. Missing/corrupt/unreviewed dataset affects POI only.
+
+Optional website enrichment: separate immutable index tied to exact reviewed base payload; explicit operator-reviewed SHA-256 required, invalid or absent enrichment leaves base POI service intact. Optional website is on the public record envelope, never the native seven-field waypoint. No upstream website requests.

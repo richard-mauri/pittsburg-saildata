@@ -57,9 +57,10 @@ func sql(s,n float64)string{
  var ts []string;for _,g:=range tokenGroups{for _,k:=range g{ts=append(ts,"'"+k+"'")}};tokens:=strings.Join(ts,",")
  return fmt.Sprintf("SET autoinstall_known_extensions=false; SET autoload_known_extensions=false; SET enable_geoparquet_conversion=false; SET threads=2; SET memory_limit='2GB'; SET temp_directory='/tmp/duckdb'; SET max_temp_directory_size='512MB'; SELECT id, names.primary AS name, basic_category, taxonomy.primary AS primary_category, CAST(taxonomy.hierarchy AS JSON) AS hierarchy, operating_status, confidence, hex(geometry) AS wkb, CAST(sources AS JSON) AS sources FROM read_parquet('/input/places.parquet') WHERE bbox.xmin <= -114 AND bbox.xmax >= -125 AND bbox.ymin <= %.8f AND bbox.ymax >= %.8f AND (basic_category IN (%s) OR taxonomy.primary IN (%s) OR list_has_any(taxonomy.hierarchy,[%s])) ORDER BY id LIMIT %d;",n,s,tokens,tokens,tokens,maxBandRows+1)
 }
-func extract(ctx context.Context,input,container,id string,s,n float64,out io.Writer)error{
+func extract(ctx context.Context,input,container,id string,s,n float64,out io.Writer)error{return extractQuery(ctx,input,container,id,sql(s,n),out)}
+func extractQuery(ctx context.Context,input,container,id,query string,out io.Writer)error{
  ctx,cancel:=context.WithTimeout(ctx,15*time.Minute);defer cancel()
- cmd:=exec.CommandContext(ctx,"docker","run","--rm","--name",container,"--pull=never","--network","none","--read-only","--cap-drop","ALL","--security-opt","no-new-privileges","--memory","4g","--cpus","2","--pids-limit","128","--tmpfs","/tmp:rw,noexec,nosuid,size=1g","--user",fmt.Sprintf("%d:%d",os.Getuid(),os.Getgid()),"--mount","type=bind,source="+input+",target=/input/places.parquet,readonly","--entrypoint","/duckdb",id,"-batch","-bail","-csv","-header","-c",sql(s,n))
+ cmd:=exec.CommandContext(ctx,"docker","run","--rm","--name",container,"--pull=never","--network","none","--read-only","--cap-drop","ALL","--security-opt","no-new-privileges","--memory","4g","--cpus","2","--pids-limit","128","--tmpfs","/tmp:rw,noexec,nosuid,size=1g","--user",fmt.Sprintf("%d:%d",os.Getuid(),os.Getgid()),"--mount","type=bind,source="+input+",target=/input/places.parquet,readonly","--entrypoint","/duckdb",id,"-batch","-bail","-csv","-header","-c",query)
  cmd.Stdout=&capped{out,rawCap};cmd.Stderr=&capped{os.Stderr,1<<20}
  if e:=cmd.Run();e!=nil{cleanup,cancel:=context.WithTimeout(context.Background(),15*time.Second);defer cancel();_=exec.CommandContext(cleanup,"docker","rm","-f",container).Run();return e};return nil
 }

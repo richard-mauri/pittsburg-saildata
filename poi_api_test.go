@@ -158,3 +158,11 @@ func TestPOIOwnerGeneration(t *testing.T){
  sort.Float64s(times);sort.Float64s(concurrent)
  t.Logf("POI HTTP in-process: open_ms=%.3f sequential=%d p95_ms=%.3f concurrent=%d p95_ms=%.3f bytes=%d parity=pass",openMS,len(times),times[len(times)-1],len(concurrent),concurrent[30],total)
 }
+
+func TestPOIOptionalWebsite(t *testing.T){
+ p:=poiTestService(func(context.Context,poigrid.Query)(poigrid.Result,error){return poigrid.Result{Records:[]json.RawMessage{poiTestRecord("coffee","poi-ovt-a"),poiTestRecord("coffee","poi-ovt-b")}},nil})
+ p.websites=map[string]string{"poi-ovt-a":"https://vendor.com"};p.websiteDigest=strings.Repeat("b",64)
+ w:=poiTestRequest(p,"GET",poiTestBBox,nil);var out poiBBoxResponse
+ if w.Code!=200||json.Unmarshal(w.Body.Bytes(),&out)!=nil||len(out.Records)!=2||out.Records[0].Website!="https://vendor.com"||out.Records[1].Website!=""||!strings.Contains(*out.DatasetVersion,"-web-"){t.Fatal(w.Code,w.Body.String())}
+ var raw struct{Records []map[string]json.RawMessage};if json.Unmarshal(w.Body.Bytes(),&raw)!=nil||len(raw.Records[1])!=2{t.Fatal("missing URL must be omitted")}
+}

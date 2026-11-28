@@ -47,7 +47,7 @@ The provider-independent `GET /api/maps/street/{z}/{x}/{y}.png` interface return
 
 ## Public geographic POI API
 
-SailingGo provides bounded, read-only California terrestrial waypoint queries at `/api/poi/status`, `/api/poi/categories` and `/api/poi/bbox` for GPS Map. Dataset availability requires explicit operator configuration; marine categories are not yet available. Location, existence, access and hours are not verified. Source attribution and complete license texts are at `/api/poi/attribution`. GPS Map consumer integration is separate. See [POI API documentation](docs/POI_API.md).
+SailingGo provides bounded, read-only California terrestrial waypoint queries at `/api/poi/status`, `/api/poi/categories` and `/api/poi/bbox` for GPS Map. Dataset availability requires explicit operator configuration; marine categories are not yet available. Optional source-supplied website links require a separately reviewed local enrichment. Source attribution and complete license texts are at `/api/poi/attribution`. GPS Map consumer integration is separate. See [POI API documentation](docs/POI_API.md).
 
 ## Sign-in and preferences
 

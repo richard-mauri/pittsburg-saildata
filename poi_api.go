@@ -11,6 +11,8 @@ import (
  "math"
  "net/http"
  "net/url"
+ "os"
+ "path/filepath"
  "regexp"
  "sort"
  "strconv"
@@ -20,6 +22,7 @@ import (
  "time"
 
  "pittsburg-saildata/internal/poigrid"
+ "pittsburg-saildata/internal/poiweb"
 )
 
 const (
@@ -30,7 +33,7 @@ const (
  poiAttributionPath = "/api/poi/attribution"
  poiRegistry = "ca-poi-v1"
  poiMaxBody = 512 << 10
- poiNotice = "Informational mapped locations only. Existence, access, hours and navigational suitability are not verified. Marine coverage is unavailable."
+ poiNotice = "Marine coverage is unavailable."
 )
 var poiPaths = []string{poiStatusPath,poiCategoriesPath,poiBBoxPath,poiAttributionPath}
 
@@ -93,7 +96,7 @@ var poiAttribution = []byte("SailingGo POI API — data attribution and full lic
  "Overture Maps Foundation, Places release 2026-11-18.0. https://docs.overturemaps.org/attribution/\n"+
  "CDLA Permissive 2.0 sources in this generation: Meta, Microsoft, PinMeTo, RenderSEO, DAC, BrightQuery, Birdeye, Uberall, OpenTravel; Overture and Overture-signals carry CDLA metadata. Foursquare: Apache 2.0. AllThePlaces: CC0 1.0.\n"+
  "Foursquare copyright 2024 Foursquare Labs, Inc. All rights reserved (Overture attribution; Overture schema changes 2026-03-18). See full publisher NOTICE below.\n"+
- "SailingGo modifications dated 2026-11-27: selected California points using 2026 Census TIGER/Line state boundary, filtered confidence/status/name/license, mapped categories and encoded waypoint records and index. Source coordinates and identity retained. No endorsement or access/hours/navigation guarantee. Marine data not included.\n"+
+ "SailingGo modifications dated 2026-11-27: selected California points using 2026 Census TIGER/Line state boundary, filtered confidence/status/name/license, mapped categories and encoded waypoint records and index. Source coordinates and identity retained. No endorsement. Optional website links are taken from the same Places release; no live verification. Marine data not included.\n"+
  "Boundary reference: https://www.census.gov/geographies/mapping-files/time-series/geo/tiger-line-file.html\n\n"+
  "FOURSQUARE NOTICE\n"+poiFoursquare+"\n\nCDLA PERMISSIVE 2.0\n"+poiCDLA+"\n\nAPACHE 2.0\n"+poiApache+"\n\nCC0 1.0\n"+poiCC0)
 
@@ -104,6 +107,8 @@ type poiSearcher interface {
 type poiService struct {
  reader poiSearcher
  manifest poigrid.Manifest
+ websites map[string]string
+ websiteDigest string
  unavailable atomic.Bool
  slots chan struct{}
  mu sync.Mutex
@@ -136,7 +141,12 @@ func openPOIService(dir string)*poiService{
  if err!=nil{log.Print("Sailing POI disabled: generation validation failed");return newPOIService(nil,poigrid.Manifest{})}
  if !poiReviewedGeneration(m,evidence){_ = reader.Close();log.Print("Sailing POI disabled: generation not reviewed");return newPOIService(nil,poigrid.Manifest{})}
  log.Print("Sailing POI generation validated")
- return newPOIService(reader,m)
+ p:=newPOIService(reader,m)
+ if digest:=os.Getenv("SAILING_POI_WEBSITES_SHA256");digest!=""{
+  sites,e:=poiweb.Load(filepath.Join(filepath.Dir(dir),poiweb.Filename),digest)
+  if e!=nil{log.Print("Sailing POI website enrichment disabled: validation failed")}else{p.websites=sites;p.websiteDigest=digest;log.Print("Sailing POI website enrichment validated")}
+ }
+ return p
 }
 func(p *poiService)close(){if p.reader!=nil{_ = p.reader.Close()}}
 func(p *poiService)available()bool{return p.reader!=nil&&!p.unavailable.Load()}
@@ -213,6 +223,7 @@ func(p *poiService)status()poiStatus{
  v:=poiStatus{Version:1,Available:p.available(),Coverage:"California terrestrial candidate dataset",RegistryRevision:poiRegistry,CategoryCounts:map[string]int{},Sources:[]poiSource{},AttributionURL:poiAttributionPath,Notice:poiNotice}
  if v.Available{
   version:=p.manifest.Release+"-"+p.manifest.Mapping+"-"+p.manifest.PayloadSHA256
+  if p.websiteDigest!=""{version+="-web-"+p.websiteDigest}
   at:=p.manifest.Created;v.DatasetVersion=&version;v.SnapshotAt=&at
   for k,n:=range p.manifest.Stats.Categories{v.CategoryCounts[k]=n}
   v.Sources=poiSources()
@@ -229,6 +240,7 @@ type poiCategoriesResponse struct{
 type poiRecord struct{
  ProviderCategories []string `json:"provider_categories"`
  Waypoint json.RawMessage `json:"waypoint"`
+ Website string `json:"website,omitempty"`
 }
 type poiBBoxResponse struct{
  Version int `json:"version"`
@@ -308,9 +320,9 @@ func(p *poiService)ServeHTTP(w http.ResponseWriter,r *http.Request){
    // false -> true shortens JSON by one byte. Account conservatively.
    total:=len(empty)
    for _,raw:=range result.Records{
-    var wp struct{Category string `json:"category"`}
+    var wp struct{Category string `json:"category"`; ID string `json:"id"`}
     if json.Unmarshal(raw,&wp)!=nil||!containsPOICategory(q.Categories,wp.Category){p.unavailable.Store(true);poiError(w,503,"POI query unavailable");return}
-    record:=poiRecord{[]string{wp.Category},raw};encoded,e:=json.Marshal(record);if e!=nil{poiError(w,503,"response unavailable");return}
+    record:=poiRecord{ProviderCategories:[]string{wp.Category},Waypoint:raw,Website:p.websites[wp.ID]};encoded,e:=json.Marshal(record);if e!=nil{poiError(w,503,"response unavailable");return}
     size:=len(encoded);if len(out.Records)>0{size++}
     if len(out.Records)>=q.Limit||total+size>poiMaxBody{out.Truncated=true;break}
     out.Records=append(out.Records,record);total+=size

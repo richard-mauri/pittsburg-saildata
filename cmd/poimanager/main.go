@@ -101,8 +101,8 @@ type capped struct{w io.Writer;left int64}
 func(c *capped)Write(p []byte)(int,error){if int64(len(p))>c.left{return 0,errors.New("output cap exceeded")};n,e:=c.w.Write(p);c.left-=int64(n);return n,e}
 func run(args []string)error{
  if len(args)==0{return plan()};fs:=flag.NewFlagSet(args[0],flag.ContinueOnError)
- switch args[0]{case "plan","build","verify":if e:=fs.Parse(args[1:]);e!=nil{return e};if fs.NArg()!=0{return errors.New("unexpected argument")};switch args[0]{case "plan":return plan();case "build":return build();default:return verify()}
+ switch args[0]{case "plan","build","verify","websites":if e:=fs.Parse(args[1:]);e!=nil{return e};if fs.NArg()!=0{return errors.New("unexpected argument")};switch args[0]{case "plan":return plan();case "build":return build();case "websites":return websites();default:return verify()}
  case "acquire":a:=fs.Bool("apply",false,"perform bounded acquisition");if e:=fs.Parse(args[1:]);e!=nil{return e};if fs.NArg()!=0{return errors.New("unexpected argument")};if !*a{return plan()};return acquire()}
- return errors.New("use plan, acquire -apply, build, verify")
+ return errors.New("use plan, acquire -apply, build, verify, websites")
 }
 func main(){if e:=run(os.Args[1:]);e!=nil{fmt.Fprintln(os.Stderr,e);os.Exit(1)}}
