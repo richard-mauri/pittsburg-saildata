@@ -62,11 +62,15 @@ func TestManagerDockerFixture(t *testing.T){
  ctx,cancel:=context.WithTimeout(context.Background(),2*time.Minute);defer cancel()
  id,_,e:=localImage(ctx);if e!=nil{t.Fatal(e)}
  dir:=t.TempDir()
- fixture:=fmt.Sprintf("COPY (SELECT 'fixture-id' AS id, {'primary':'Example Eatery'} AS names, 'casual_eatery' AS basic_category, {'primary':'casual_eatery','hierarchy':['food_and_drink','casual_eatery']} AS taxonomy, 'open' AS operating_status, 0.9 AS confidence, unhex('%s') AS geometry, [{'dataset':'fixture','license':'CDLA-Permissive-2.0'}] AS sources, {'xmin':-121.9,'xmax':-121.9,'ymin':38.02,'ymax':38.02} AS bbox) TO '/fixture/places.parquet' (FORMAT PARQUET);",wkb(-121.9,38.02))
+ fixture:=fmt.Sprintf("COPY (SELECT 'fixture-id' AS id, {'primary':'Example Eatery'} AS names, 'casual_eatery' AS basic_category, {'primary':'casual_eatery','hierarchy':['food_and_drink','casual_eatery']} AS taxonomy, ['http://vendor.com','https://vendor.com/fixture'] AS websites, 'open' AS operating_status, 0.9 AS confidence, unhex('%s') AS geometry, [{'dataset':'fixture','license':'CDLA-Permissive-2.0'}] AS sources, {'xmin':-121.9,'xmax':-121.9,'ymin':38.02,'ymax':38.02} AS bbox) TO '/fixture/places.parquet' (FORMAT PARQUET);",wkb(-121.9,38.02))
  cmd:=exec.CommandContext(ctx,"docker","run","--rm","--pull=never","--network","none","--read-only","--cap-drop","ALL","--security-opt","no-new-privileges","--memory","4g","--cpus","2","--user",fmt.Sprintf("%d:%d",os.Getuid(),os.Getgid()),"--mount","type=bind,source="+dir+",target=/fixture","--entrypoint","/duckdb",id,"-batch","-bail","-c",fixture)
  if o,e:=cmd.CombinedOutput();e!=nil{t.Fatalf("%s %v",o,e)}
  var raw,p,v bytes.Buffer
  if e=extract(ctx,filepath.Join(dir,"places.parquet"),"sailinggo-ca-ci-"+filepath.Base(dir),id,38,39,&raw);e!=nil{t.Fatal(e)}
  state,e:=newBoundary([][]xy{square(-123,37,-120,40)});if e!=nil{t.Fatal(e)}
  b:=newBuilder(state,&p,&v);if e=b.consume(&raw,38,39);e!=nil{t.Fatal(e)};if b.stats.Rows!=1||b.stats.Categories["restaurant"]!=1{t.Fatalf("%+v",b.stats)}
+ var web bytes.Buffer
+ if e=extractQuery(ctx,filepath.Join(dir,"places.parquet"),"sailinggo-web-ci-"+filepath.Base(dir),id,websiteSQL(38,39),&web);e!=nil{t.Fatal(e)}
+ accepted:=map[string]bool{"poi-ovt-fixture-id":true};seen:=map[string]string{}
+ if e=consumeWebsites(&web,accepted,seen);e!=nil||seen["poi-ovt-fixture-id"]!="https://vendor.com/fixture"{t.Fatalf("website fixture: %v %v",seen,e)}
 }
